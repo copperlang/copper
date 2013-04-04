@@ -1,0 +1,72 @@
+
+const Integer	= Int32
+const Byte	= Unsigned8
+const String	= [] Char8
+
+enum InstructionCode
+
+	i_while
+	i_repeat
+	i_assign
+
+
+enum More : Byte
+	more_1 = next (Error)
+	more_2
+
+enum Error : Byte
+	rc_ok = 3
+	rc_invalid
+
+enum A : Unsigned8
+	v1 = 15
+	v2 = 16
+
+// Assign an enumeration value to a constant
+const ok = rc_ok
+
+function .c .cdecl main
+
+	var res = 0
+	
+	// Check size
+	res += size (Error) : Integer - 1
+	res += size (InstructionCode) : Integer - 4
+	
+	// Check const
+	res = ok : Integer - 3
+
+	// Check assign	
+	var code = {InstructionCode}
+	code = i_assign
+
+	// Cast enumeration to integer
+	var status = rc_ok
+	var x = status : Int8
+	
+	// Cast integer to enumeration
+	var y = 3 : Error
+
+	// Check next
+	res += more_2 : Integer - 6
+	
+	// Comparisons
+	var a = rc_invalid
+	if a == rc_ok
+		res += 10
+	else
+		res += 0
+	end
+
+	if a <> rc_ok
+		res += 0
+	else
+		res += 20
+	end
+
+	// Not
+	if not v1 <> 0xF0
+		res += 40
+	end
+
+	return res

@@ -1,0 +1,342 @@
+//[of]:Primitives
+//[of]:constants
+const path_separator	= system_path_separator
+const new_line_sequence	= system_new_line_sequence
+const invalid_file_size	= system_invalid_file_size
+//[cf]
+//[of]:filename
+//[of]:convertFullName
+function convertFullName (filename: String)
+
+	return systemConvertFullName (filename)
+//[cf]
+//[of]:normalizedfilenameChar
+function normalizedFilenameChar (c: Char)
+
+	return systemNormalizedFilenameChar (c)
+//[cf]
+//[of]:getFilePath
+//[c]Gets the path of a filename
+//[c]
+//[c]ARGUMENTS
+//[c]	stream	--	the buffer where the path is added
+//[c]	filename	--	the filename containing a path to be extracted
+//[c]
+function getFilePath (filename: String, sb: *StringBuffer)
+
+	systemGetFilePath (filename, sb)
+//[cf]
+//[of]:getBaseName
+//[c]Gets the base name of a filename
+//[c]
+function getBaseName (filename: String, sb: *StringBuffer)
+
+	var occurrence = filename lastCharOccurrence (path_separator)
+	if occurrence notNil
+		sb << occurrence + 1
+	else
+		sb << filename
+	end
+//[cf]
+//[of]:getName
+//[c]Gets the base name of a filename without extension
+//[c]
+function getName (filename: String, sb: *StringBuffer)
+
+	var occurrence = filename lastCharOccurrence (path_separator)
+	if occurrence notNil
+		var p = occurrence + 1
+		var q = p lastCharOccurrence ($.)
+		if q notNil
+			sb addRange (p, q - p)
+		else
+			sb << p
+		end
+	else
+		sb << filename
+	end
+//[cf]
+
+//[of]file size:fileSize
+//[c]Returns the file size or 'invalid_file_size' if an error occurs.
+//[c]
+function fileSize (filename: String)
+
+	return systemFileSize (filename)
+//[cf]
+//[of]file last modification:fileLastModification
+//[c]Returns the last modification date
+//[c]
+//[c]ARGUMENTS
+//[c]	filename
+//[c]		the filename
+//[c]	last modification
+//[c]		the structure to initialize with the file time
+//[c]
+//[c]RETURNS
+//[c]	Returns an empty date if the file does not exist
+//[c]	
+function fileLastModification (lastModification: *FileTime, filename: String)
+
+	return systemFileLastModification (lastModification, filename)
+//[cf]
+//[cf]
+//[of]testing:testing
+//[of]file exists:fileExists
+function fileExists (filename: String)
+
+	return systemFileExists (filename)
+//[cf]
+//[of]is file read only:isFileReadOnly
+function isFileReadOnly (filename: String)
+
+	return systemIsFileReadOnly (filename)
+//[cf]
+//[of]is directory:isDirectory
+function isDirectory (filename: String)
+
+	return systemIsDirectory (filename)
+//[cf]
+//[of]is same file:isSameFile
+//[c]Returns true if the two file names represent the same file.
+//[c]
+//[c]ARGUMENTS
+//[c]	fn1	--	The first file name. It must be a fully qualified file name, without '.' or '..'
+//[c]	fn2	--	The second file name. It must be a fully qualified file name, without '.' or '..'
+//[c]
+//[c]RETURN VALUES
+//[c]	True if the two file names point to the same file.
+//[c]	
+//[c]REMARKS
+//[c]	The behavior of this function is system dependent:
+//[c]	- On Windows, the comparison is case insensitive.
+//[c]	- On Unix, the comparison is case sensitive.
+//[c]
+function isSameFile (	fn1	: String, 
+	fn2	: String)
+
+	return systemIsSameFile (fn1, fn2)
+//[cf]
+//[of]:matchWildcards
+//[c]Compares a string with a pattern having wildcards (*)
+//[c]
+function matchWildcards (pattern: String, value: String)
+
+	var sp	= nil : String
+	var sq	= nil : String
+	var p	= pattern
+	var q	= value
+	repeat
+		if p[] == $*
+			p ++
+			sp = p
+			sq = q
+		end
+		
+		if q [] isNul
+			return p [] isNul
+		end
+		
+		if p [] normalizedFilenameChar == q [] normalizedFilenameChar
+			p ++
+			q ++
+		else
+			if sp isNil
+				// No previous wild card: no match
+				break
+			end
+			
+			// Assimilate char and restart
+			sq ++
+			p = sp
+			q = sq
+		end
+	end
+
+	return false
+//[cf]
+//[cf]
+//[of]:directory
+//[of]:createDirectories
+//[c]Create all intermediary directories for the given filename
+//[c]
+//[c]NOTE: no result code returned
+//[c]
+function createDirectories (filename: String)
+
+	var path = {TempStringBuffer} local
+	filename getFilePath (path)
+	var parent = path string
+
+	if parent notEmpty and
+		// hack for windows: detect drive
+		(parent [1] <> $: or parent [2] notNul)
+		
+		createDirectories (parent)
+		createDirectory (parent)
+	end
+
+	path release
+//[cf]
+//[of]:createDirectory
+//[c]Creates a new directory
+//[c]
+//[c]Returns true if success
+//[c]
+function createDirectory (path: String)
+
+	return systemCreateDirectory (path)
+//[cf]
+//[cf]
+//[cf]
+//[of]:File
+//[of]:instance creation
+//[of]:openRead
+function openRead (filename: String)
+
+	var handle = systemOpenRead (filename)
+	if handle isNil
+		return nil
+	end
+	return File new (handle)
+//[cf]
+//[of]:openWrite
+function openWrite (filename: String)
+
+	var handle = systemOpenWrite (filename)
+	if handle isNil
+		return nil
+	end
+	return File new (handle)
+//[cf]
+//[cf]
+//[of]:definition
+struct File:	SystemFile
+//[cf]
+//[of]:closing
+//[of]:close
+// function close
+//[cf]
+//[cf]
+//[of]:reading - writing
+//[of]:read
+
+// implemented in super class
+// function read (base: Bytes, size: Size)
+//[cf]
+//[of]:write
+//[c]Write data to the file
+//[c]
+//[c]ARGUMENTS
+//[c]	base	-- the address of data
+//[c]	size	-- the number of bytes to write
+//[c]
+//[c]RETURN VALUES
+//[c]	A Size. 0 If the write has failed.
+//[c]
+// implemented in super class
+// function write (base: Bytes, size: Size)
+//[cf]
+//[cf]
+//[cf]
+//[of]:FileTime
+//[of]:definition
+struct FileTime: SystemFileTime
+//[cf]
+//[of]:accessing
+//[of]:clear
+// function clear
+//[cf]
+//[cf]
+//[of]:testing
+//[of]:is equal
+// function is equal (t2: *System File Time)
+//[cf]
+//[of]:is empty
+// function is empty
+//[cf]
+//[of]:not empty
+// function not empty
+//[cf]
+//[of]:is more recent
+// function is more recent (other: *File Time)
+//[cf]
+//[cf]
+//[cf]
+//[of]:FileBuffer
+//[of]:definition
+struct FileBuffer
+
+	attr buffer	: Bytes
+	attr bufferSize	: Size
+	attr size	: Size
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+method initialize (filename: String, isText: Bool)
+
+	self buffer = nil
+
+	// Get file size
+	var fileSize = fileSize (filename)
+	if fileSize == 0xFFFFFFFF
+		return fb_seek_error
+	end
+	var bufferSize = fileSize
+	if isText
+		bufferSize ++
+	end
+	
+	// open the file
+	var f = openRead (filename)
+	if f isNil
+		return fb_file_not_found
+	end
+
+	// allocate memory
+	var base = Byte allocateArray (bufferSize)
+	if base isNil
+		return fb_not_enough_memory
+	end
+		
+	// read the file
+	f read (base, fileSize)
+
+	// close the file
+	f close
+
+	// append a zero if text
+	if isText
+		base [fileSize] = 0
+	end
+	
+	// Setup object status and return
+	self buffer	= base
+	self size	= fileSize
+	self bufferSize	= bufferSize
+
+	return fb_ok
+//[cf]
+//[of]:release
+method release
+
+	if self buffer notNil
+		Byte freeArray (self buffer, self bufferSize)
+	end
+//[cf]
+//[cf]
+//[cf]
+//[of]:FileBufferError
+enum FileBufferError
+
+	fb_ok
+	fb_file_not_found
+	fb_seek_error
+	fb_not_enough_memory
+//[cf]
+
+.private
+//[of]:Imports
+import "file-\(os)"
+import "core"
+//[cf]

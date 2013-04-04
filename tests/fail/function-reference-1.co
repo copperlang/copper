@@ -1,0 +1,9 @@
+function main
+
+	var f = function test (*B)	// must be the exact type
+
+struct A
+	function test
+	end
+
+struct B : A

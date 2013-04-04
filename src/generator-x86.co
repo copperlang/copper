@@ -1,0 +1,5065 @@
+//[of]:X86CodeGenerator
+//[of]:definition
+struct X86CodeGenerator
+
+	attr program	: *Program
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+method initialize (program: *Program)
+
+	self program = program
+//[cf]
+//[cf]
+//[of]:generating
+//[of]:generate
+method generate (filename: String, debug: Bool, dump: Bool)
+
+	var generator	= {X86Generator}
+
+	// Create the function extension (MCFunction)
+	self program eachFunction do f
+		f generator = self program pool new (MCFunction, f, debug)
+	end
+	
+	// Pass 1 - generate code but don't save, we just want to know
+	// what functions are never called after inlining.
+	generator initialize (self program)
+	generator generate (debug, dump, false)
+	generator removeDuplicateFunctions (debug, dump)
+	generator release
+
+	// Pass 2 - again but for real this time
+	generator	initialize (self program)
+	generator generate (debug, dump, true)
+	var ok = generator dump (filename)
+	generator release
+
+	return ok
+//[cf]
+//[cf]
+//[cf]
+//[of]:X86Generator
+//[of]:definition
+struct X86Generator : ObjectFile
+
+	attr program	: *Program	// The program to be generated
+	attr pool	: MemoryPool	// We still need to allocate stuffs
+	attr debug	: Bool	// Generate debug information
+	attr dump	: Bool	// Dump p-functions
+	attr functionGenerator	: FunctionGenerator	// Object to generate p-code
+	attr unsolvedRelatives	: Vector (*MCUnsolvedReference)	// The forwards addresses
+
+	// Variables for function generation
+	attr currentObject	: *ObjectData	// The current function being generated
+	attr argumentStackSize	: Size	// The number of bytes allocated on stack by the arguments
+	attr stackPointer	: StackOffset	// The relative position of the stack pointer at the current state of code generation
+			// 0 is when just entered, i.e. the next value on the stack is the return address.
+			// -4 is when one dword is pushed.
+			// ...
+			// This value is useful to compute the relative offset of a local 
+			// variable or an argument on the stack.
+	attr firstVariable	: StackOffset	// The offset of variables on the stack
+			// 0 means that variables are stored immediately before the return address.
+			// -4 means that variables are stored 4 bytes before the returned address.
+			// This variable is used because we may need to save some registers
+			// on the stack in the function prologue but it is not known when
+			// allocating registers.
+	attr nextVariable	: StackOffset	// The offset of the next variable, relative to stack pointer.
+			// This is the offset of the byte AFTER the variable, i.e. if this variable is
+			// -8, the next integer will be stored at -12 (predecrement).
+			
+	attr unsolvedLabels	: Vector (*MCUnsolvedLabel)	// The forwards labels
+	attr lastJumpToExit	: Bytes	// The address of the byte following the last jump to exit.
+			// this attribute is used to remove the last jump if it is followed 
+			// immediately by the exit label.
+	attr firstLineOffset	: Offset	// Offset of the next line number record in bytes, relative to the first line number record of the section
+	attr lineNumber	: LineNumber	// The current line number: emit a new address/line pair when the line number changes
+	attr lineNumberCount	: Size	// The number of line numbers: for the .lf record
+	attr firstLineNumber	: LineNumber	// The first line number
+	attr lastLineNumber	: LineNumber	// The last line number
+
+	// Register Allocator
+	attr variables	: Vector (*PVariable)	// Sorted list of variables
+	attr actives	: [1024] *PVariable	// The list of variables having a register sorted by last index
+			// This is a sliding list: the first elements are never removed as they
+			// are removed in the order of the list, the activeFirst attribute is just
+			// updated.
+			// But it limits the total amount of local variables to 1024.
+	attr activeSize	: Size	// Number of variables in the active list
+	attr activeFirst	: Offset	// Offset to the first variable not yet inactive
+	attr registers	: RegisterMask	// The mask of registers currently used.
+	attr usedRegisters	: RegisterMask	// The registers used at least once.
+
+	// Builtin Functions
+	attr builtins	: [BuiltinId next] MCBuiltin
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+method initialize (program: *Program)
+	
+	self pool	initialize
+	self super initialize (self pool)
+	self program	= program
+	
+	program resetGenerators
+	self functionGenerator initialize (self pool, self)
+	self unsolvedRelatives initialize
+	self unsolvedLabels initialize
+	self variables initialize
+
+	self initializeBuiltinFunctions
+//[cf]
+//[of]:release
+method release
+
+	self variables release
+	self unsolvedRelatives release
+	self unsolvedLabels release
+	self super release
+	self pool release
+//[cf]
+
+//[c].private
+//[of]:initializeBuiltinFunctions
+method initializeBuiltinFunctions
+
+	var p = builtin_table
+	var q = self builtins
+	while p [] code notNil
+		q [] initialize (self, p [] code, p [] size, p [] stackOffset)
+		p ++
+		q ++
+	end
+//[cf]
+//[cf]
+//[of]:generating
+//[of]:generate
+method generate (debug: Bool, dump: Bool, native: Bool)
+
+	var program	= self program
+	var modules	= program modules
+	self dump	= dump
+	self debug	= debug
+
+	self prepareFunctions
+	self prepareExternFunctions
+	
+	self generateVariables
+	self generateFunctions
+	if native
+		self generateNatives
+	end
+//[cf]
+//[of]:dump
+method dump (filename: String)
+
+	self addBuiltins
+	self resolveRelatives
+	return self super dump (filename)
+//[cf]
+//[of]:removeDuplicateFunctions
+method removeDuplicateFunctions (debug: Bool, dump: Bool)
+
+	// Don't remove duplicate as very different source code may have 
+	// same code, resulting unusable source level debugging.
+	if debug
+		return
+	end
+
+	var buckets = {FunctionBuckets} local
+
+	// Divide functions up by hash value
+	// This step reduce the number of comparisons as we compare
+	// only functions with the same hash value.
+	self program eachFunction do f
+		var mc	= f mcFunction
+		if not mc ignore
+			// We can't compare variables and arguments: 
+			// reduce the p-code first.
+			self reduceFunction (mc pfunction)
+		
+			buckets add (f)
+		end
+	end
+	
+	// Compare pair of functions inside each bucket
+	var count = 0 s
+	buckets each do bucket
+		var n = bucket size
+		if bucket size > 1
+			(n - 1) each do i1
+				var f1	= bucket [i1]
+				var m1	= f1 mcFunction
+				// Skip this one if it already matches
+				if m1 equivalent isNil
+					var i2 = i1 + 1
+					while i2 < n
+						var f2	= bucket [i2]
+						var m2	= f2 mcFunction
+						// Skip this one if it already matches
+						if m2 equivalent isNil
+							// Two functions can have identical p-code but a 
+							// different calling convention. It is critical to
+							// compare calling conventions first.
+							if	f1 directives callingConvention == f2 directives callingConvention and 
+								m1 pfunction isEqual (m2 pfunction)
+							
+								m1 called |= m2 called
+								m1 ignore = not m1 called
+								m2 equivalent = f1
+								m2 ignore = true
+								m2 called = false
+								
+								count ++
+								
+//[c]								sb removeAll
+//[c]								sb << f2
+//[c]								sb << " duplicate of " 
+//[c]								sb << f1
+//[c]								sb << \n
+//[c]								sb string puts
+							end
+						end
+						i2 ++
+					end
+				end
+			end
+		end
+	end
+
+	if dump
+		var sb = {StringBuffer} local
+		sb << "Functions: " 
+		sb << buckets count
+		sb << \n
+		sb << "Buckets: " 
+		sb << buckets buckets size
+		sb << \n
+		sb << "Biggest bucket : " 
+		sb << buckets maxCount
+		sb << \n
+		sb << "Duplicates: " 
+		sb << count
+		sb << \n
+		sb string puts16
+		sb release
+	end
+	
+	buckets release
+//[cf]
+//[cf]
+
+:private
+//[of]:preparing
+//[of]:prepareFunctions
+method prepareFunctions
+
+	self program eachFunction do f
+		var mc	= f mcFunction 
+		if not mc ignore
+			mc reset (f, self pool, self, self textSection, self debug)
+		end
+	end
+//[cf]
+//[of]:prepareExternFunctions
+method prepareExternFunctions
+
+	self program eachExternFunction do f
+		f generator = self createFunctionSymbol (f)
+	end
+//[cf]
+//[cf]
+//[of]:generating
+//[of]:addBuiltins
+method addBuiltins
+
+	BuiltinId next toSize each do i
+		var builtin = self builtins [i]
+		if builtin used
+			self addBuiltin (builtin)
+		end
+	end
+//[cf]
+//[of]:addBuiltin
+method addBuiltin (builtin : *MCBuiltin)
+
+	self textSection addObject (builtin object, align_byte)
+//[cf]
+//[of]:resolveRelatives
+method resolveRelatives
+
+	self unsolvedRelatives each do u
+		var address	= (u fromObject buffer + u fromOffset) : *Offset
+		address [] = u to relative (u fromObject, u fromOffset)
+	end
+//[cf]
+
+//[of]:generateVariables
+method generateVariables
+
+	self program eachVariable do variable, value
+		self functionGenerator generateVariable (variable, value)
+	end
+//[cf]
+//[of]:generateFunctions
+method generateFunctions
+
+	self program eachFunction do f
+		var mc	= f mcFunction 
+		if not mc ignore
+			var pfunction	= mc pfunction
+			self functionGenerator generate (f, pfunction)
+			
+			// Force 'called' flag if the function is an entry point
+			mc called |= f directives entry
+		end
+	end
+
+	self program eachFunction do f
+		var mc	= f mcFunction 
+		mc ignore = not mc called
+	end
+	
+//[cf]
+//[of]:generateNatives
+method generateNatives
+
+	self program eachFunction do f
+		var mc	= f mcFunction 
+		if not mc ignore
+			var pfunction	= mc pfunction
+			
+			self reduceFunction (pfunction)
+			self generateNative (pfunction, pfunction object, f line, f callingConvention)
+			pfunction object finalize (self debug, self firstLineOffset, self lineNumberCount, self firstLineNumber, self lastLineNumber)
+			
+			// Debug
+			if self dump
+				var sb = {TempStringBuffer} local
+				sb << f name << \n
+				sb << pfunction
+				sb string puts16
+				sb release
+			end
+		end
+	end
+//[cf]
+//[of]:reduceFunction
+//[c]Replace variables and arguments with register
+//[c]or offset on stack
+//[c]
+method reduceFunction (pfunction: *PFunction)
+
+	pfunction computeVariableIntervals
+	self allocateRegisters (pfunction)
+	self prepareLocals (pfunction)
+	pfunction reduce
+//[cf]
+//[of]:prepareLocals
+method prepareLocals (pfunction: *PFunction)
+
+	// Compute the size on stack to save register
+	var n = stack_origin
+	// In debug mode, save the stack pointer into ebp
+	if self debug
+		n -= 4
+	end
+	var u = self usedRegisters
+	if (u & mask_ebx) <> 0
+		n -= 4
+	end
+	if (u & mask_esi) <> 0
+		n -= 4
+	end
+	if (u & mask_edi) <> 0
+		n -= 4
+	end
+	if (u & mask_ebp) <> 0
+		n -= 4
+	end
+
+	// Save the offset
+	self firstVariable = n
+	
+	// Initialize the position of the next variable
+	self nextVariable	= n
+	
+	// Allocate locals
+	pfunction locals each do e
+		e offset = self alloca (e size)
+	end
+
+	// Allocate variables
+	pfunction variables each do v
+		var rid	= v register
+		if rid == rid_none
+			// variable will be on stack
+			v value = self fpool new (PStackValue, v size, self alloca (v size toStackSize))
+		else
+			v value = rid registerValue
+		end
+	end
+
+	// Allocate arguments
+	var offset = stack_origin + 4
+	pfunction arguments each do a
+		var rid = a register
+		if rid == rid_none
+			// The argument stay on stack
+			a value = self fpool new (PStackValue, a size, offset)
+		else
+			a value = rid registerValue
+		end
+		offset += a size toStackSize
+	end
+
+	// Reset the size allocated on stack by arguments
+	// The size is the offset minus the return address
+	self argumentStackSize = offset toSize - 4
+//[cf]
+//[of]:alloca
+method alloca (size: Size)
+
+	// Get current position on stack
+	var offset = self nextVariable
+	
+	// Allocate
+	offset -= size stackAligned
+	
+	// Update position on stack
+	self nextVariable = offset
+
+	return offset
+//[cf]
+
+//[of]:generateNative
+method generateNative (	pfunction	: *PFunction, 
+	object	: *ObjectData, 
+	line	: LineNumber, 
+	cc	: CallingConvention)
+
+	// The function becomes the current object	
+	self currentObject = object
+	
+	// Initialize the stack pointer
+	self stackPointer	= 0	
+	
+	// Reset unsolved labels
+	self unsolvedLabels removeAll
+	
+	self beginObject (object, self textSection, align_byte)
+	
+	self initializeLineNumbers (line)
+	self generateFunctionPrologue (pfunction)
+	self generateInstructions (pfunction)
+	self generateFunctionEpilogue (pfunction, cc)
+	self resolveLabels
+	self resolveExternLabels (pfunction, object)
+
+	self endObject (object)
+//[cf]
+//[of]:generateFunctionPrologue
+//[c]Generates the function prologue
+//[c]
+//[c]	The prologue looks like
+//[c]	
+//[c]		push	ebp	; In debug mode only, ebp is not used
+//[c]		mov	ebp, esp	;
+//[c]		push	reg	; Save all registers used in this function (ebp, esi, edi, ebx)
+//[c]		...		;
+//[c]		mov	reg, [esp + nn]	; Load arguments into registers (if any)
+//[c]		...		;
+//[c]
+method generateFunctionPrologue (pfunction: *PFunction)
+
+	// In debug mode, save the stack pointer into ebp to help
+	// the debugger showing the call stack
+	if self debug
+		// PUSH EBP
+		self writeByte (0x50 + register_ebp)
+		self stackPointer -= 4
+		// MOV EBP, ESP
+		self writeModrm (register_esp, 3, register_ebp, 0x89)
+	end
+
+	var u = self usedRegisters
+	if (u & mask_ebx) <> 0
+		self writeByte (0x50 + register_ebx)
+		self stackPointer -= 4
+	end
+	if (u & mask_esi) <> 0
+		self writeByte (0x50 + register_esi)
+		self stackPointer -= 4
+	end
+	if (u & mask_edi) <> 0
+		self writeByte (0x50 + register_edi)
+		self stackPointer -= 4
+	end
+	if (u & mask_ebp) <> 0
+		self writeByte (0x50 + register_ebp)
+		self stackPointer -= 4
+	end
+	
+	self subEspImm (- self nextVariable + self firstVariable)
+
+	// Load arguments into registers (if applicable)
+	var offset = stack_origin + 4
+	pfunction arguments each do a
+		var rid = a register
+		if rid <> rid_none
+			var value = {PStackValue} local (a size, offset)
+			self movRegStack (rid registerValue number, value)
+		end
+		offset += a size toStackSize
+	end
+//[cf]
+//[of]:generateFunctionEpilogue
+//[c]Generates the function epilogue
+//[c]
+//[c]	The epilogue looks like
+//[c]	
+//[c]		pop	reg	; Save all registers used in this function (ebp, esi, edi, ebx)
+//[c]		...		;
+//[c]		pop	ebp	; In debug mode only, ebp is not used
+//[c]		ret	<nn>	; Return and remove arguments from stack (if stdcall or fastcall)
+//[c]
+method generateFunctionEpilogue (pfunction: *PFunction, callingConvention: CallingConvention)
+
+	if self debug
+		// Get the relative line number of the last line number + 1
+		var lineNumber	= (self lineNumber + 1 - self firstLineNumber) : Unsigned16
+		self addLineNumber (self virtualAddress, lineNumber)
+	end
+	
+	// Free local variables
+	self addEspImm (- self nextVariable + self firstVariable)
+
+	var u = self usedRegisters
+	if (u & mask_ebp) <> 0
+		self writeByte (0x58 + register_ebp)
+	end
+	if (u & mask_edi) <> 0
+		self writeByte (0x58 + register_edi)
+	end
+	if (u & mask_esi) <> 0
+		self writeByte (0x58 + register_esi)
+	end
+	if (u & mask_ebx) <> 0
+		self writeByte (0x58 + register_ebx)
+	end
+	
+	// In debug mode, save the stack pointer into ebp to help
+	// the debugger showing the call stack
+	if self debug
+		// POP EBP
+		self writeByte (0x58 + register_ebp)
+	end
+	
+	// RET NEAR
+	if callingConvention == cc_cdecl
+		self writeByte (0xC3)
+	else // stdcall, fastcall
+		self writeByte (0xC2)
+		self writeWord (self argumentStackSize : Unsigned16)
+	end
+//[cf]
+//[of]:generateInstructions
+method generateInstructions (pfunction: *PFunction)
+
+	pfunction instructions each do i
+		self generateInstruction (i)
+	end
+//[cf]
+//[of]:generateInstruction
+method generateInstruction (pinstruction: *PInstruction)
+
+	self locateInstruction (pinstruction)
+	
+	switch pinstruction code
+//[of]:	assign
+	case pc_assign
+		self movValueValue (pinstruction operation lvalue, pinstruction operation rvalue)
+//[cf]
+//[of]:	add
+	case pc_add
+		self opValueValue (self add_operation, pinstruction operation lvalue, pinstruction operation rvalue)
+//[cf]
+//[of]:	sub
+	case pc_sub
+		self opValueValue (self sub_operation, pinstruction operation lvalue, pinstruction operation rvalue)
+//[cf]
+//[of]:	smul
+	case pc_smul
+		self opValueValue (self imul_operation, pinstruction operation lvalue, pinstruction operation rvalue)
+//[cf]
+//[of]:	umul
+	case pc_umul
+		self opValueValue (self mul_operation, pinstruction operation lvalue, pinstruction operation rvalue)
+//[cf]
+//[of]:	sdiv
+	case pc_sdiv
+		self opValueValue (self idiv_operation, pinstruction operation lvalue, pinstruction operation rvalue)
+//[cf]
+//[of]:	udiv
+	case pc_udiv
+		self opValueValue (self div_operation, pinstruction operation lvalue, pinstruction operation rvalue)
+//[cf]
+//[of]:	smod
+	case pc_smod
+		self opValueValue (self imod_operation, pinstruction operation lvalue, pinstruction operation rvalue)
+//[cf]
+//[of]:	umod
+	case pc_umod
+		self opValueValue (self mod_operation, pinstruction operation lvalue, pinstruction operation rvalue)
+//[cf]
+//[of]:	shl
+	case pc_shl
+		self shiftValueValue (self shl_operation, pinstruction operation lvalue, pinstruction operation rvalue)
+//[cf]
+//[of]:	sshr
+	case pc_sshr
+		self shiftValueValue (self sar_operation, pinstruction operation lvalue, pinstruction operation rvalue)
+//[cf]
+//[of]:	ushr
+	case pc_ushr
+		self shiftValueValue (self shr_operation, pinstruction operation lvalue, pinstruction operation rvalue)
+//[cf]
+//[of]:	and
+	case pc_and
+		self opValueValue (self and_operation, pinstruction operation lvalue, pinstruction operation rvalue)
+//[cf]
+//[of]:	or
+	case pc_or
+		self opValueValue (self or_operation, pinstruction operation lvalue, pinstruction operation rvalue)
+//[cf]
+//[of]:	xor
+	case pc_xor
+		self opValueValue (self xor_operation, pinstruction operation lvalue, pinstruction operation rvalue)
+//[cf]
+//[of]:	label
+	case pc_label
+		pinstruction label label offset = self nextByte - self firstByte
+//[cf]
+//[of]:	evaluate
+	case pc_evaluate
+		// Need to evaluate the value because some can contain calls
+		self movAccumulatorValue (pinstruction evaluate value)
+//[cf]
+//[of]:	call
+	case pc_call
+		var c	= pinstruction call
+		
+		// Save stack pointer
+		var sp = self stackPointer
+
+		// Allocate space on stack for extra return values
+		var returnStackSize = 0 s
+		var first = true
+		c eachValue do value
+			if not first
+				returnStackSize += value size toStackSize
+			end
+			first = false
+		end
+		self subEspImm (returnStackSize)
+		
+		// Call the function
+		self call (	c callingConvention,
+			c address,
+			c argumentCount,
+			c arguments)
+		
+		// Assign the return values to variables
+		var offset = sp - returnStackSize
+		first = true
+		c eachValue do value
+			if first
+				// Mov the result into the register
+				self movValueValue (value, value size accumulator)
+				first = false
+			else
+				var stack = {PStackValue} local (value size, offset)
+				self movValueValue (value, stack)
+				offset += value size toStackSize
+			end
+		end
+		
+		// Restore the stack pointer (cdecl arguments and return values)
+		var d = sp - self stackPointer
+		self addEspImm (d)
+//[cf]
+//[of]:	return
+	case pc_return
+		var r = pinstruction ret
+
+		// Get Values
+		// The first return value is always put into the accumulator. All 
+		// additional return values are written on the stack in an area
+		// after the arguments allocated by the caller.
+		var offset = (self argumentStackSize + 4)
+		var i = 1 s
+		var n = r valueCount
+		while i < n
+			var v = r values [i]
+			var size = v size
+			var stack = {PStackValue} local (size, offset)
+			self movStackValue (stack, v)
+			offset += size toStackSize
+			i ++
+		end
+		// The first value must be the last to be processed because the result 
+		// is stored in the accumulator and must not be modified afterward.
+		if n > 0
+			self movAccumulatorValue (r values [0])
+		end
+//[cf]
+//[of]:	jump
+	case pc_jump
+		var label = pinstruction jump label
+		if not pinstruction isFollowedByLabel (label)
+			self jump (label)
+		end
+//[cf]
+//[of]:	jumpi
+	case pc_jumpi
+		self jmpValue (pinstruction jumpi value)
+//[cf]
+//[of]:	jumpc
+	case pc_jumpc
+		var condition	= pinstruction condition condition
+		var label	= pinstruction condition label
+		if condition isIntegerComparison
+			var cc = self cmpValueValue (condition binary left, condition binary right, condition conditionCode)
+			self jumpCC (cc, label)
+		else
+			self testValue (condition)
+			self jumpCC (condition_nz, label)
+		end
+//[cf]
+//[of]:	jumpnc
+	case pc_jumpnc
+		var condition	= pinstruction condition condition
+		var label	= pinstruction condition label
+		if condition isIntegerComparison
+			var cc = self cmpValueValue (condition binary left, condition binary right, condition invertedConditionCode)
+			self jumpCC (cc, label)
+		else
+			self testValue (condition)
+			self jumpCC (condition_z, label)
+		end
+//[cf]
+//[of]:	lookup
+	case pc_lookup
+		self movAccumulatorValue (pinstruction lookup value)
+		self movEcxValue (pinstruction lookup table, eax_register_value)
+		
+		// The lookup function is inline because of behavior of debuggers
+		if self debug
+			self writeBytes (lookup_function, lookup_size)
+		else
+			self jmpBuiltin (__lookup)
+		end
+//[cf]
+	end
+//[cf]
+//[of]:locateInstruction
+method locateInstruction (pinstruction: *PInstruction)
+
+	if self debug
+		var line	= pinstruction line
+		self lastLineNumber = line
+		if line <> self lineNumber
+			self lineNumber = line
+			var lineNumber	= (line - self firstLineNumber) : Unsigned16
+			self addLineNumber (self virtualAddress, lineNumber)
+		end
+	end
+//[cf]
+//[of]:initializeLineNumbers
+method initializeLineNumbers (line: LineNumber)
+
+	self firstLineNumber = line
+	self lastLineNumber	= line
+
+	if self debug
+		self firstLineOffset	= self lineNumberOffset
+		self lineNumber	= line
+		self lineNumberCount	= 0
+		self beginLineNumber (self currentObject)
+	end
+//[cf]
+//[of]:resolveLabels
+method resolveLabels
+
+	self unsolvedLabels each do u
+		var position	= u offset
+		var address	= (self firstByte + position) : *Offset
+		address [] = relativeOffset (u label, position)
+	end
+//[cf]
+//[of]:resolveExternLabels
+method resolveExternLabels (pfunction: *PFunction, object: *ObjectData)
+
+	pfunction references each do reference
+	
+		// Patch the reference with the distance between the label and 
+		// the beginning of the function
+		var p = (reference object buffer + reference offset) : *Address
+		p [] = reference label offset
+	
+		// Add a relocation
+		self dataSection addDirectRelocation (reference object, reference offset, object symbol)
+		
+	end
+//[cf]
+//[cf]
+//[of]:register allocation
+//[of]:allocateRegisters
+//[c]Allocate registers on local variables and arguments
+//[c]
+//[c]	This function just assign the register attribute of variables and
+//[c]	arguments. Acutal creation of p-values is made later.
+//[c]
+method allocateRegisters (pfunction: *PFunction)
+
+	// Free all registers
+	self registers = 0
+	self usedRegisters = 0
+	
+	// Initialize the list of actives
+	self activeFirst = 0
+	self activeSize = 0
+
+	// In debug mode, ebp is used to point to the stack frame
+	// so it can not be used
+	if self debug
+		self registers |= mask_ebp
+		self usedRegisters |= mask_ebp
+	end
+
+	// Create a list of variables sorted by firstIndex.
+	//
+	// The insertion sort is used as the list should be already sorted
+	// with minor changes occurring when functions are inlined.
+	// So in average it is more efficient than a quick sort.
+	//
+	// A vector is recycled to reduce memory allocations.
+	//
+	self variables removeAll
+	pfunction variables each do pvariable
+		self variables add (pvariable)
+	end
+	self variables insertionSort
+	
+	// Scan all variables
+	self variables each do pvariable
+
+		// Expire old intervals
+		var i	= self activeFirst
+		var n	= self activeSize
+		var first	= pvariable firstIndex
+		while i < n
+			var v	= self actives [i]
+			var last	= v lastIndex
+			if last >= first
+				break
+			end
+			self freeRegister (v)
+			i ++
+		end
+		self activeFirst = i
+
+		var rid = self getRegister (pvariable size)
+		if rid <> rid_none
+			pvariable register = rid
+			self insertToActives (pvariable)
+		else
+			self spillAtInterval (pvariable)
+		end
+		
+	end
+
+	// Mark all registers used once as currently used, so we can use
+	// the get register function to assign never used registers to arguments
+	self registers = self usedRegisters
+	
+	pfunction arguments each do a
+		var rid = rid_none
+		
+		// Try to use a register with the argument if the argument
+		// is referenced at least 3 times (there is a cost of using a
+		// register for arguments: push, pop and initial mov).
+		if a referenceCount > 2
+			rid = self getRegister (a size)
+		end
+		
+		a register = rid
+	end
+//[cf]
+//[of]:spillAtInterval
+//[c]The variable 'steals' the register of the last active variable
+//[c]
+//[c]	This algorithm is a bit more complex than the linear scan as there
+//[c]	is constraints on size of registers: the last active variable may not be 
+//[c]	compatible with the new variable so we search other candidates
+//[c]	in the stack of active variables.
+//[c]
+method spillAtInterval (pvariable: *PVariable)
+
+	// Scan all active variables (i.e. variables having a register)
+	// from the last to die to the first
+	var index	= self activeSize
+	var first = self activeFirst
+	while index <> first
+		index --
+		var spill	= self actives [index]
+		
+		// Stop as soon as the active variable dies before the new variable:
+		// no active variable will give up its register to the new variable.
+		if spill lastIndex <= pvariable lastIndex
+			break
+		end
+	
+		// Test compatibility: does the active variable can give up its register
+		// to the new variable ?
+		var rid = self replaceRegister (spill, pvariable)
+		
+		if rid <> rid_none
+			// 'variable' inherits the register of 'spill'
+			pvariable register = rid
+			
+			// 'spill' moved to stack
+			spill register = rid_none
+			
+			// Remove spill from the list of actives
+			var lastIndex = self activeSize - 1
+			while index <> lastIndex
+				self actives [index] = self actives [index + 1]
+				index ++
+			end
+			self activeSize --
+			
+			// Add 'variable' to the list of active
+			self insertToActives (pvariable)
+		
+			break
+		end
+		
+	end
+//[cf]
+//[of]:insertToActives
+method insertToActives (pvariable: *PVariable)
+
+	var i	= self activeSize
+	var first	= self activeFirst
+	var actives	= self actives
+	while i > first
+		var v = actives [i - 1]
+		if pvariable lastIndex >= v lastIndex
+			break
+		end
+		actives [i] = v
+		i --
+	end
+	actives [i] = pvariable
+	self activeSize ++
+//[cf]
+//[of]:replaceRegister
+//[c]Replaces a register
+//[c]
+//[c]	spillAtInterval transfers a register from a variable to another one.
+//[c]	Unfortunately, the size may differ and the register may not be
+//[c]	transferrable (e.g. it is not possible to pass 'esi' to a 8bit variable).
+//[c]	
+//[c]	This function use a table of valid transfers and return the new register
+//[c]	to use.
+//[c]
+method replaceRegister (spill: *PVariable, pvariable: *PVariable)
+
+	var s	= pvariable size
+	var spillRid	= spill register
+	var rid	= rid_convert_table [(spillRid * 4) : Unsigned + (s : Unsigned)]
+	
+	if rid <> rid_none
+		self registers &= spillRid clearMask
+		self registers |= rid mask
+	end
+	
+	return rid
+//[cf]
+//[of]:getRegister
+//[c]Get a register and mark it as used.
+//[c]
+//[c]RETURN VALUES
+//[c]	true if a register has been assigned.
+//[c]	
+method getRegister (size: PValueSize)
+
+	var r	= self registers
+	var rid	= {RegisterId}
+	switch size
+
+	case vs_byte
+		if (r & mask_bl) == 0
+			r = mask_bl
+			rid = rid_bl
+		elsif (r & mask_bh) == 0
+			r = mask_bh
+			rid = rid_bh
+		else
+			return rid_none
+		end
+
+	case vs_word
+		if (r & mask_si) == 0
+			r = mask_si
+			rid = rid_si
+		elsif (r & mask_di) == 0
+			r = mask_di
+			rid = rid_di
+		elsif (r & mask_bp) == 0
+			r = mask_bp
+			rid = rid_bp
+		elsif (r & mask_bx) == 0
+			r = mask_bx
+			rid = rid_bx
+		else
+			return rid_none
+		end
+		
+	case vs_dword
+		if (r & mask_esi) == 0
+			r = mask_esi
+			rid = rid_esi
+		elsif (r & mask_edi) == 0
+			r = mask_edi
+			rid = rid_edi
+		elsif (r & mask_ebp) == 0
+			r = mask_ebp
+			rid = rid_ebp
+		elsif (r & mask_ebx) == 0
+			r = mask_ebx
+			rid = rid_ebx
+		else
+			return rid_none
+		end
+		
+	else // vs_qword
+		if (r & mask_edi_esi) == 0
+			r = mask_edi_esi
+			rid = rid_edi_esi
+		elsif (r & mask_ebp_ebx) == 0
+			r = mask_ebp_ebx
+			rid = rid_ebp_ebx
+		else
+			return rid_none
+		end
+	
+	end
+	
+	self registers |= r
+	self usedRegisters |= r
+	return rid
+//[cf]
+//[of]:freeRegister
+method freeRegister (pvariable: *PVariable)
+
+	self registers &= pvariable register clearMask
+//[cf]
+//[cf]
+//[of]:utils
+//[of]:allocate
+method allocate (size: Size)
+
+	return self pool allocateArray (Byte, size)
+//[cf]
+//[of]:fpool
+//[c]Returns the pool for data needed only when generating a function
+//[c]
+method fpool
+
+	return self pool
+//[cf]
+//[cf]
+
+//[of]:line number
+//[of]:lineNumberOffset
+method lineNumberOffset
+
+	return self textSection lineNumberOffset
+//[cf]
+//[of]:beginLineNumber
+method beginLineNumber (object: *ObjectData)
+
+	self textSection beginLineNumber (object)
+	self lineNumberCount	++
+//[cf]
+//[of]:addLineNumber
+method addLineNumber (address: Unsigned32, line: Unsigned16)
+
+	self textSection addLineNumber (address, line)
+	self lineNumberCount	++
+//[cf]
+//[cf]
+//[of]:symbol table
+//[of]:updateFunctionSymbols
+//[c]Updates the function symbols
+//[c]
+//[c]	Once the function is fully built, we can complete its associated symbol
+//[c]	(and auxiliary debug symbols) with all missing information.
+//[c]
+method updateFunctionSymbols (f: *Function)
+
+	var e	= f mcFunction
+	
+	if self debug
+		var aux	= e _auxSymbol _auxSymbolFunction
+		aux TotalSize	= e size
+		aux PointerToLinenumber	= self firstLineOffset
+			
+		var bf	= e _bfSymbol _imageSymbol
+		bf Value	= e _offset	// unused
+		bf SectionNumber	= e _section
+			
+		var bf1	= e _bfSymbol1 _auxSymbolXF
+		bf1 Linenumber	= self firstLineNumber : Unsigned16
+			
+		var lf	= e _lfSymbol _imageSymbol
+		lf Value	= self lineNumberCount
+		lf SectionNumber	= e _section
+			
+		var ef	= e _efSymbol _imageSymbol
+		ef Value	= e _offset	+ e size // end offset
+		ef SectionNumber	= e _section
+			
+		var ef1	= e _efSymbol1 _auxSymbolXF
+		ef1 Linenumber	= self lastLineNumber : Unsigned16
+	end
+//[cf]
+//[cf]
+
+//[of]:call
+//[of]:call
+method call (	callingConvention	: CallingConvention,
+	address	: *PValue,
+	argumentCount	: Size,
+	arguments	: *[] *PValue)
+
+	// Save the position of the stack pointer before pushing arguments
+	var argumentSP = self stackPointer
+	
+	// Push arguments
+	var i = argumentCount
+	while i <> 0
+		i --
+		self pushValue (arguments [i])
+	end
+
+	self callValue (address)
+	
+	// Simulate stdcall/fastcall return
+	if callingConvention <> cc_cdecl
+		self stackPointer = argumentSP
+	end
+//[cf]
+//[of]:callExtern
+method callExtern (	address	: *COFFSymbol,
+	arguments	: *PValueArray,
+	callingConvention	: CallingConvention)
+
+	// Save the position of the stack pointer before pushing arguments
+	var argumentSP = self stackPointer
+	
+	// Push arguments
+	arguments reverseEach do v
+		self pushValue (v)
+	end
+
+	// Call the function
+	self writeByte (0xE8)
+	self writeRelativeReference (address, 0)
+	
+	// Simulate stdcall/fastcall return
+	if callingConvention <> cc_cdecl
+		self stackPointer = argumentSP
+	end
+//[cf]
+//[of]:callBuiltin
+method callBuiltin (id: BuiltinId)
+
+	var builtin = self builtins [id]
+	builtin used = true
+
+	self writeByte (0xE8)
+	self writeRelative (builtin object)
+	self stackPointer += builtin stackOffset
+//[cf]
+//[of]:callValue
+method callValue (address: *PValue)
+
+	// Call the function
+	switch address code
+	case vc_function
+		self writeByte (0xE8)
+		self writeRelative (address func pfunction object)
+	
+	case vc_global
+		self writeByte (0xE8)
+		self writeRelativeReference (address glob symbol, address glob offset)
+	
+	case	vc_register, 
+		vc_stack,
+		vc_memory
+	
+		// call r/m32
+		self writeRM (address, nil, 2, 0xFF)
+		
+	else
+		self movAccumulatorValue (address)
+		// call eax
+		self writeRM (eax_register_value, eax_register_value, 2, 0xFF)
+	end
+//[cf]
+//[cf]
+//[of]:jmp
+//[of]:jumpCC
+method jumpCC (condition: Byte, label: *PLabel)
+
+	if label isDefined
+		var position = self nextByte - self firstByte + 2
+		var offset = label offset - position
+		if offset >= (-128 : Unsigned32)
+			self writeByte (condition + 0x70)
+			self writeByte (offset : Byte)
+			return
+		end
+	end
+
+	// Jcc rel32
+	self writeByte (0x0F)
+	self writeByte (condition + 0x80)
+	self writeLabel (label)	
+//[cf]
+//[of]:jump
+method jump (label: *PLabel)
+
+	// JMP rel32
+	self writeByte (0xE9)
+	self writeLabel (label)
+//[cf]
+//[of]:jmpBuiltin
+method jmpBuiltin (id: BuiltinId)
+
+	var builtin = self builtins [id]
+	builtin used = true
+
+	self writeByte (0xE9)
+	self writeRelative (builtin object)
+//[cf]
+//[of]:jmpValue
+method jmpValue (address: *PValue)
+
+	// Call the function
+	switch address code
+	case vc_function
+		self writeByte (0xE9)
+		self writeRelative (address func pfunction object)
+	
+	case vc_global
+		self writeByte (0xE9)
+		self writeRelativeReference (address glob symbol, address glob offset)
+	
+	case	vc_register, 
+		vc_stack,
+		vc_memory
+	
+		// call r/m32
+		self writeRM (address, nil, 4, 0xFF)
+		
+	else
+		self movAccumulatorValue (address)
+		// jmp eax
+		self writeRM (eax_register_value, eax_register_value, 4, 0xFF)
+	end
+//[cf]
+//[cf]
+//[of]:mov
+//[of]:movAccumulatorValue
+//[c]Puts the given value into the accumulator:
+//[c]	8 bits	:	al
+//[c]	16 bits	:	ax
+//[c]	32 bits	:	eax
+//[c]	64 bits	:	edx:eax
+//[c]
+method movAccumulatorValue (value: *PValue)
+
+	return self movRegValue (register_eax, value)
+//[cf]
+//[of]:movEcxValue
+//[c]Moves the value into the register ecx
+//[c]
+//[c]	The registers eax and edx are save accordingly to the given flags.
+//[c]	
+//[c]	This method applies only to 32 bit values and is intended to load
+//[c]	effective addresses too complex for a simple register based
+//[c]	memory access.
+//[c]
+method movEcxValue (	value	: *PValue, 
+	registerToSave	: *PRegisterValue)
+
+	switch value code
+
+	case vc_register
+		// MOV ECX, reg32
+		self writeModrm (value register number, 3, register_ecx, 0x89)
+
+	case vc_integer
+		// MOV ECX, imm32
+		self writeByte (register_ecx : Byte + 0xB8)
+		self write (value integer dword)
+
+	case vc_stack
+		// MOV ECX, [ESP + nn]
+		self writeEspBase (register_ecx, value stack offset - self stackPointer, 0x8B)
+
+	case vc_global
+		var glob = value glob
+
+		// MOV ECX, imm32
+		self writeByte (register_ecx + 0xB8)
+		self writeReference (glob symbol, glob offset)
+
+	case vc_local
+		var offset	= value local offset - self stackPointer
+		
+		if offset <> 0
+			// LEA ECX, [ESP + nn]
+			self writeEspBase (register_ecx, offset, 0x8D)
+		else
+			// MOV ECX, ESP
+			self writeModrm (register_esp, 3, register_ecx, 0x89)
+		end
+
+	case vc_memory
+		var info = {MemoryInfo}
+		self getMemory (value memory address, registerToSave, info)
+		self writeByte (0x8B)
+		self writeMemoryInfo (info, register_ecx)
+
+	else
+		var save = save_none
+		if registerToSave notNil
+			save = registerToSave save
+		end
+		
+		if (save & save_edx) <> 0
+			self pushEdx
+		end
+		
+		if (save & save_eax) <> 0
+			self pushEax
+		end
+
+		self movAccumulatorValue (value)
+		
+		// MOV ECX, EAX
+		self writeModrm (register_eax, 3, register_ecx, 0x89)
+		
+		if (save & save_eax) <> 0
+			self popEax
+		end
+		
+		if (save & save_edx) <> 0
+			self popEdx
+		end
+
+	end		
+//[cf]
+
+//[of]:movValueValue
+method movValueValue (	left	: *PValue,
+	right	: *PValue )
+
+	switch left code
+	case vc_register
+		self movRegValue (left register number, right)
+	case vc_stack
+		self movStackValue (left stack, right)
+	case vc_memory
+		self movMemoryValue (left memory, right)
+	else
+		assertFailure ("mov: invalid left value")
+	end
+//[cf]
+//[of]:movRegValue
+//[c]Puts the given value into the accumulator:
+//[c]	8 bits	:	al
+//[c]	16 bits	:	ax
+//[c]	32 bits	:	eax
+//[c]	64 bits	:	edx:eax
+//[c]
+//[c]REMARKS
+//[c]	Important rule: this method does not modifies the stack even when 
+//[c]	calling complex values. If the stack pointer is temporarily modified, 
+//[c]	it is restored before leaving.
+//[c]
+method movRegValue (	register	: Byte,
+	value	: *PValue )
+
+	switch value code
+//[of]:	register
+	case vc_register
+		self movRegReg (value size, register, value register number)
+//[cf]
+//[of]:	integer constant
+	case vc_integer
+		self movRegImm (register, value integer)
+//[cf]
+//[of]:	integer stack
+	case vc_stack
+		self movRegStack (register, value stack)
+//[cf]
+//[of]:	memory
+	case vc_memory
+		self movRegMemory (register, value memory)
+//[cf]
+
+//[of]:	undefined
+	case vc_undefined
+		// Do nothing: moving an undefined value into a register
+		// does not require any instruction.
+//[cf]
+//[of]:	local
+	case vc_local
+		var offset	= value local offset - self stackPointer
+		
+		if offset <> 0
+			// LEA reg, [ESP + nn]
+			self writeEspBase (register, offset, 0x8D)
+		else
+			// MOV reg, ESP
+			self writeModrm (register_esp, 3, register, 0x89)
+		end
+
+//[cf]
+//[of]:	global
+	case vc_global
+		var glob = value glob
+		
+		// MOV r32, imm32
+		self writeByte (register + 0xB8)
+		self writeReference (glob symbol, glob offset)
+//[cf]
+//[of]:	object
+	case vc_function
+		var pfunction = value func pfunction
+		
+		// MOV r32, imm32
+		self writeByte (register + 0xB8)
+		self writeReference (pfunction object symbol, 0)
+//[cf]
+//[of]:	integer add
+	case vc_integer_add
+		var left, right	= value bestOrderedPair
+		self movAccumulatorValue (left)
+		self opValueValue (self add_operation, value size accumulator, right)
+		self movRegReg (value size, register,	register_eax)
+//[cf]
+//[of]:	integer sub
+	case vc_integer_sub
+		var binary	= value binary
+		self movAccumulatorValue (binary left)
+		self opValueValue (self sub_operation, value size accumulator, binary right)
+		self movRegReg (value size, register,	register_eax)
+//[cf]
+//[of]:	integer smul
+	case vc_integer_smul
+		var left, right	= value bestOrderedPair
+		self movAccumulatorValue (left)
+		self opValueValue (self imul_operation, value size accumulator, right)
+		self movRegReg (value size, register,	register_eax)
+//[cf]
+//[of]:	integer umul
+	case vc_integer_umul
+		var left, right	= value bestOrderedPair
+		self movAccumulatorValue (left)
+		self opValueValue (self mul_operation, value size accumulator, right)
+		self movRegReg (value size, register,	register_eax)
+//[cf]
+//[of]:	integer sdiv
+	case vc_integer_sdiv
+		var binary	= value binary
+		self movAccumulatorValue (binary left)
+		self opValueValue (self idiv_operation, value size accumulator, binary right)
+		self movRegReg (value size, register,	register_eax)
+//[cf]
+//[of]:	integer udiv
+	case vc_integer_udiv
+		var binary	= value binary
+		self movAccumulatorValue (binary left)
+		self opValueValue (self div_operation, value size accumulator, binary right)
+		self movRegReg (value size, register,	register_eax)
+//[cf]
+//[of]:	integer smod
+	case vc_integer_smod
+		var binary	= value binary
+		self movAccumulatorValue (binary left)
+		self opValueValue (self imod_operation, value size accumulator, binary right)
+		self movRegReg (value size, register,	register_eax)
+//[cf]
+//[of]:	integer umod
+	case vc_integer_umod
+		var binary	= value binary
+		self movAccumulatorValue (binary left)
+		self opValueValue (self mod_operation, value size accumulator, binary right)
+		self movRegReg (value size, register,	register_eax)
+//[cf]
+//[of]:	integer shl
+	case vc_integer_shl
+		var binary	= value binary
+		self movAccumulatorValue (binary left)
+		self shiftValueValue (self shl_operation, value size accumulator, binary right)
+		self movRegReg (value size, register,	register_eax)
+//[cf]
+//[of]:	integer sshr
+	case vc_integer_sshr
+		var binary	= value binary
+		self movAccumulatorValue (binary left)
+		self shiftValueValue (self sar_operation, value size accumulator, binary right)
+		self movRegReg (value size, register,	register_eax)
+//[cf]
+//[of]:	integer ushr
+	case vc_integer_ushr
+		var binary	= value binary
+		self movAccumulatorValue (binary left)
+		self shiftValueValue (self shr_operation, value size accumulator, binary right)
+		self movRegReg (value size, register,	register_eax)
+//[cf]
+//[of]:	integer neg
+	case vc_integer_neg
+		var unary	= value unary
+		self movAccumulatorValue (unary value)
+		self negValue (value size accumulator)
+		self movRegReg (value size, register,	register_eax)
+//[cf]
+//[of]:	integer not
+	case vc_integer_not
+		var unary	= value unary
+		self movAccumulatorValue (unary value)
+		self notValue (value size accumulator)
+		self movRegReg (value size, register,	register_eax)
+//[cf]
+//[of]:	integer and
+	case vc_integer_and
+		var left, right	= value bestOrderedPair
+		self movAccumulatorValue (left)
+		self opValueValue (self and_operation, value size accumulator, right)
+		self movRegReg (value size, register,	register_eax)
+//[cf]
+//[of]:	integer or
+	case vc_integer_or
+		var left, right	= value bestOrderedPair
+		self movAccumulatorValue (left)
+		self opValueValue (self or_operation, value size accumulator, right)
+		self movRegReg (value size, register,	register_eax)
+//[cf]
+//[of]:	integer xor
+	case vc_integer_xor
+		var left, right	= value bestOrderedPair
+		self movAccumulatorValue (left)
+		self opValueValue (self xor_operation, value size accumulator, right)
+		self movRegReg (value size, register,	register_eax)
+//[cf]
+//[of]:	integer comparisons
+	case	vc_integer_eq,
+		vc_integer_ne,
+		vc_integer_sle,
+		vc_integer_slt,
+		vc_integer_sge,
+		vc_integer_sgt,
+		vc_integer_ule,
+		vc_integer_ult,
+		vc_integer_uge,
+		vc_integer_ugt
+	
+		var binary	= value binary
+		
+		// Compare left - right
+		var cc = self cmpValueValue (	binary left, 
+			binary right, 
+			value conditionCode)
+		// SETcc r8
+		self writeModrm (0, 3, register, 0x0F, cc + 0x90)
+//[cf]
+//[of]:	boolean not
+	case vc_boolean_not
+		var unary	= value unary
+		self movRegValue (register, unary value)
+		
+		// xor r8, 1
+		self writeModrm (6, 3, register, 0x80)
+		self writeByte (1)
+
+//[cf]
+//[of]:	call
+	case vc_call
+		var c	= value call
+
+		// Save stack pointer
+		var sp = self stackPointer
+
+		self call (	c callingConvention,
+			c address,
+			c argumentCount,
+			c arguments)
+	
+		// Restore the stack pointer (cdecl arguments)
+		var d = sp - self stackPointer
+		self addEspImm (d)
+		
+		// Mov the result into the register
+		self movRegReg (value size, register, register_eax)
+//[cf]
+//[of]:	truncate
+	case vc_truncate
+		var arg = value unary value
+		self movAccumulatorValue (arg)
+		self movRegReg (value size, register,	register_eax)
+	
+//[cf]
+//[of]:	sext
+	case vc_sext
+		var arg = value unary value
+		self movAccumulatorValue (arg)
+		
+		if arg size == vs_byte
+			// cbw
+			self writeByte (0x66)
+			self writeByte (0x98)
+		end
+		
+		if arg size <= vs_word and value size >= vs_dword
+			// cwde
+			self writeByte (0x98)
+		end
+
+		if value size == vs_qword
+			// cdq
+			self writeByte (0x99)
+		end
+		
+		self movRegReg (value size, register,	register_eax)
+	
+//[cf]
+//[of]:	uext
+	case vc_uext
+		var arg = value unary value
+		self movAccumulatorValue (arg)
+		
+		if arg size == vs_byte
+			// and eax, 255
+			self writeByte (0x25)
+			self writeDword (255)
+		elsif arg size == vs_word
+			// and eax, 65535
+			// and eax, 255
+			self writeByte (0x25)
+			self writeDword (65535)
+		else
+			// nothing to do
+		end
+
+		if value size == vs_qword
+			// xor edx, edx
+			self writeModrm (register_edx, 3, register_edx, 0x33)
+		end
+		
+		self movRegReg (value size, register,	register_eax)
+	
+//[cf]
+	else
+		assertFailure ("mov reg value: unknown value")
+	end
+//[cf]
+//[of]:movRegReg
+//[c]
+//[c]Register
+//[c]	eax means
+//[c]		al
+//[c]		ax
+//[c]		eax
+//[c]		edx:eax
+//[c]	ebx
+//[c]		ebx
+//[c]		ebp:ebx
+//[c]	esi
+//[c]		esi
+//[c]		edi:esi
+//[c]
+method movRegReg (	size	: PValueSize,
+	register	: Byte,
+	registerSrc	: Byte)
+
+	// Nothing to do if src is same as dst
+	if registerSrc == register
+		return
+	end
+	
+	switch size
+	case vs_byte
+		// MOV r8, r8
+		self writeModrm (registerSrc, 3, register, 0x88)
+	case vs_word
+		// MOV r16, r16
+		self writeModrm (registerSrc, 3, register, 0x66, 0x89)
+	case vs_dword
+		// MOV r32, r32
+		self writeModrm (registerSrc, 3, register, 0x89)
+	else
+		// MOV r32, r32
+		self writeModrm (registerSrc, 3, register, 0x89)
+		// MOV r32, r32
+		self writeModrm (registerSrc peerRegister, 3, register peerRegister, 0x89)
+	end
+//[cf]
+//[of]:movRegImm
+method movRegImm (	register	: Byte,
+	constant	: *PIntegerValue )
+
+	if constant isNull
+
+		switch constant size
+		case vs_byte
+			// XOR r8, r8
+			self writeModrm (register, 3, register, 0x32)
+		case vs_word
+			// XOR r16, r16
+			self writeModrm (register, 3, register, 0x66, 0x33)
+		case vs_dword
+			// XOR r32, r32
+			self writeModrm (register, 3, register, 0x33)
+		else
+			// XOR r32, r32
+			self writeModrm (register, 3, register, 0x33)
+			
+			// XOR r32, r32
+			var peer = register peerRegister
+			self writeModrm (peer, 3, peer, 0x33)
+		end
+	
+	else
+	
+		switch constant size
+		case vs_byte
+			// MOV r8, imm32
+			self writeByte (register + 0xB0)
+			self write (constant byte)
+		case vs_word
+			// MOV r16, imm32
+			self writeByte (0x66)
+			self writeByte (register + 0xB8)
+			self write (constant word)
+		case vs_dword
+			// MOV r32, imm32
+			self writeByte (register + 0xB8)
+			self write (constant dword)
+		else
+			var nn = constant qword
+			// MOV r32, nn.low
+			self writeByte (register + 0xB8)
+			self write (nn low)
+			// MOV r32, nn.high
+			self writeByte (register peerRegister + 0xB8)
+			self write (nn high)
+		end
+
+	end
+//[cf]
+//[of]:movRegStack
+method movRegStack (	register	: Byte,
+	value	: *PStackValue )
+
+	var offset	= value offset - self stackPointer
+	
+	switch value size
+	case vs_byte
+		// MOV r8, [ESP + nn]
+		self writeEspBase (register, offset, 0x8A)
+	case vs_word
+		// MOV r16, [ESP + nn]
+		self writeEspBase (register, offset, 0x66, 0x8B)
+	case vs_dword
+		// MOV r32, [ESP + nn]
+		self writeEspBase (register, offset, 0x8B)
+	else
+		// MOV r32, [ESP + nn]
+		self writeEspBase (register, offset, 0x8B)
+		// MOV r32, [ESP + nn + 4]
+		self writeEspBase (register peerRegister, offset + 4, 0x8B)
+	end
+//[cf]
+//[of]:movRegMemory
+method movRegMemory (	register	: Byte,
+	value	: *PMemoryValue )
+
+	switch value size
+	case vs_byte
+		self writeMemory (value, nil, register, 0x8A)
+	case vs_word
+		self writeMemory (value, nil, register, 0x66, 0x8B)
+	case vs_dword
+		self writeMemory (value, nil, register, 0x8B)
+	else // vs_qword
+		self movEcxValue (value address, nil)
+		// MOV reg32, [ECX]
+		self writeModrm (register, 0, register_ecx, 0x8B)
+		// MOV reg32, [ECX + 4]
+		self writeModrm (register peerRegister, 1, register_ecx, 0x8B)
+		self writeByte (0x04)
+	end
+//[cf]
+//[of]:movStackValue
+method movStackValue (	stack	: *PStackValue,
+	value	: *PValue )
+
+	switch value code
+	case vc_undefined
+		// Do nothing
+	case vc_integer
+		self movStackImm (stack, value integer)
+	case vc_register
+		self movStackReg (stack, value register number)
+	else
+		// Complex expression: evaluate first, then store variable	
+		self movAccumulatorValue (value)
+		self movStackReg (stack, register_eax)
+	end
+//[cf]
+//[of]:movStackImm
+method movStackImm (	stack	: *PStackValue,
+	constant	: *PIntegerValue )
+
+	var offset	= stack offset - self stackPointer
+	switch constant size
+	case vs_byte
+		// MOV byte ptr [ESP + var], nn
+		self writeEspBase (0, offset, 0xC6)
+		self writeByte (constant byte)
+	case vs_word
+		// MOV word ptr [ESP + var], nn
+		self writeEspBase (0, offset, 0x66, 0xC7)
+		self write (constant word)
+	case vs_dword
+		// MOV dword ptr [ESP + var], nn
+		self writeEspBase (0, offset, 0xC7)
+		self write (constant dword)
+	else // vs_qword
+		var nn = constant qword
+		// MOV dword ptr [ESP + var], nn.low
+		self writeEspBase (0, offset, 0xC7)
+		self write (nn low)
+		// MOV dword ptr [ESP + var + 4], nn.high
+		self writeEspBase (0, offset + 4, 0xC7)
+		self write (nn high)
+	end
+//[cf]
+//[of]:movStackReg
+method movStackReg (	stack	: *PStackValue,
+	register	: Byte)
+
+	var offset = stack offset - self stackPointer
+	switch stack size
+	case vs_byte
+		// MOV [ESP + var], reg8
+		self writeEspBase (register, offset, 0x88)
+	case vs_word
+		// MOV [ESP + var], reg16
+		self writeEspBase (register, offset, 0x66, 0x89)
+	case vs_dword
+		// MOV [ESP + var], reg32
+		self writeEspBase (register, offset, 0x89)
+	else
+		// MOV [ESP + var], reg32
+		self writeEspBase (register, offset, 0x89)
+		// MOV [ESP + var + 4], reg32
+		self writeEspBase (register peerRegister, offset + 4, 0x89)
+	end
+//[cf]
+//[of]:movMemoryValue
+method movMemoryValue (	left	: *PMemoryValue,
+	right	: *PValue )
+
+	switch right code
+	case vc_undefined
+		// Do nothing
+	case vc_integer
+		self movMemoryImm (left, right integer)
+	case vc_register
+		self movMemoryReg (left, right register)
+	else
+		// Complex expression: evaluate first, then store variable	
+		self movAccumulatorValue (right)
+		self movMemoryReg (left, left size accumulator)
+	end
+//[cf]
+//[of]:movMemoryImm
+method movMemoryImm (	value	: *PMemoryValue,
+	constant	: *PIntegerValue )
+
+	switch value size
+	case vs_byte
+		self writeMemory (value, nil, 0, 0xC6)
+		self writeByte (constant byte)
+	case vs_word
+		self writeMemory (value, nil, 0, 0x66, 0xC7)
+		self write (constant word)
+	case vs_dword
+		self writeMemory (value, nil, 0, 0xC7)
+		self write (constant dword)
+	else // vs_qword
+		self movEcxValue (value address, nil)
+		var nn = constant qword
+		// MOV [ECX], low
+		self writeModrm (0, 0, register_ecx, 0xC7)
+		self write (nn low)
+		// MOV [ECX + 4], high
+		self writeModrm (0, 1, register_ecx, 0xC7)
+		self writeByte (0x04)
+		self write (nn high)
+	end
+//[cf]
+//[of]:movMemoryReg
+method movMemoryReg (	left	: *PMemoryValue,
+	right	: *PRegisterValue)
+
+	switch left size
+	case vs_byte
+		self writeMemory (left, right, right number, 0x88)
+	case vs_word
+		self writeMemory (left, right, right number, 0x66, 0x89)
+	case vs_dword
+		self writeMemory (left, right, right number, 0x89)
+	else // vs_qword
+		self movEcxValue (left address, right)
+		var register = right number
+		// MOV [ECX], reg32
+		self writeModrm (register, 0, register_ecx, 0x89)
+		// MOV [ECX + 4], reg32
+		self writeModrm (register peerRegister, 1, register_ecx, 0x89)
+		self writeByte (0x04)
+	end
+//[cf]
+//[cf]
+//[of]:test
+//[of]:testValue
+method testValue (value: *PValue)
+
+	switch value code
+	case vc_register
+		self testR (value register)
+	else
+		self movAccumulatorValue (value)
+		self testR (value size accumulator)
+	end
+//[cf]
+//[of]:testR
+method testR (value: *PRegisterValue)
+
+	var register = value number
+	switch value size
+	case vs_byte
+		// OR r8, r8
+		self writeModrm (register, 3, register, 0x0A)
+	case vs_word
+		// OR r16, r16
+		self writeModrm (register, 3, register, 0x66, 0x0B)
+	case vs_dword
+		// OR r32, r32
+		self writeModrm (register, 3, register, 0x0B)
+	else
+		// OR r32, r32
+		self writeModrm (register peerRegister, 3, register peerRegister, 0x0B)
+		
+		// JNZ $ + 2
+		self writeByte (0x75)
+		self writeByte (2)
+		
+		// OR r32, r32
+		self writeModrm (register, 3, register, 0x0B)
+	end
+//[cf]
+//[cf]
+//[of]:cmp
+//[of]:cmpValueValue
+//[c]Generates a comparison between two values
+//[c]
+//[c]	Flags will be set accordingly to first - second
+//[c]
+method cmpValueValue (	first	: *PValue,
+	second	: *PValue,
+	cc	: Byte )
+
+	var left	= first
+	var right	= second
+	var cc2	= cc
+
+	// Swap values: prefer register, stack and memory as left value as 
+	// it tends to generate more compact code.
+	if right code in (vc_register, vc_stack, vc_memory)
+		left, right = right, left
+		cc2 = table_swap_condition [cc2]
+	end
+
+	self opValueValue (self cmp_operation, left, right)
+	return cc2
+//[cf]
+//[cf]
+//[of]:binary operations
+//[of]:opValueValue
+method opValueValue (op: *BinaryOperation, left: *PValue, right: *PValue)
+
+	op call (self, left, right)
+
+method opVV64 (op: *BinaryOperation, left: *PValue, right: *PValue)
+
+	self pushValue64 (left, right)
+	self pushValue64 (right, nil)
+	self callBuiltin (op builtin64)
+	self movValueValue (left, rax_register_value)
+
+method cmpVV64 (op: *BinaryOperation, left: *PValue, right: *PValue)
+
+	self pushValue64 (left, right)
+	self pushValue64 (right, nil)
+	self callBuiltin (op builtin64)
+//[cf]
+
+//[of]:naming conventions
+//[c]functions suffix conventions:
+//[c]
+//[c]	R	- register value
+//[c]	S	- stack value
+//[c]	M	- memory value
+//[c]	I	- immediate value
+//[c]	O	- any value but register
+//[c]	X	- register, stack or memory value
+//[c]	V	- any value
+//[c]
+//[cf]
+//[of]:op reg rm
+method opRX8 (op: *BinaryOperation, left: *PRegisterValue, right: *PValue)
+
+	self writeRM (right, left, left number, op regRm)
+
+method opRX16 (op: *BinaryOperation, left: *PRegisterValue, right: *PValue)
+
+	self writeRM (right, left, left number, 0x66, op regRm + 1)
+
+method opRX32 (op: *BinaryOperation, left: *PRegisterValue, right: *PValue)
+
+	self writeRM (right, left, left number, op regRm + 1)
+//[cf]
+//[of]:op reg imm
+method opRI8 (op: *BinaryOperation, left: *PRegisterValue, right: *PIntegerValue)
+
+	if left == al_register_value
+		// op AL, imm8
+		self writeByte (op accImm)
+		self writeByte (right byte)
+	else
+		// op r8, imm8
+		self writeModrm (op rmImmm, 3, left number, op rmImm)
+		self writeByte (right byte)
+	end
+
+method opRI16 (op: *BinaryOperation, left: *PRegisterValue, right: *PIntegerValue)
+
+	var nn = right word
+	if nn isShortDisplacement
+		// op r16, imm8
+		self writeModrm (op rmImmm, 3, left number, 0x66, op rmImm + 3)
+		self writeByte (nn : Byte)
+	else
+		if left == ax_register_value
+			// op AX, imm16
+			self writeByte (0x66)
+			self writeByte (op accImm + 1)
+		else
+			// op r16, imm16
+			self writeModrm (op rmImmm, 3, left number, 0x66, op rmImm + 1)
+		end
+		self write (nn)
+	end
+
+method opRI32 (op: *BinaryOperation, left: *PRegisterValue, right: *PIntegerValue)
+
+	var nn = right dword
+	if nn isShortDisplacement
+		// op r32, imm8
+		self writeModrm (op rmImmm, 3, left number, op rmImm + 3)
+		self writeByte (nn : Byte)
+	else
+		if left == eax_register_value
+			// op EAX, imm32
+			self writeByte (op accImm + 1)
+		else
+			// op r32, imm32
+			self writeModrm (op rmImmm, 3, left number, op rmImm + 1)
+		end
+		self write (nn)
+	end
+
+//[c]
+method addRI8 (op: *BinaryOperation, left: *PRegisterValue, right: *PIntegerValue)
+
+	var register = left number
+	if right isNull
+		// do nothing
+	elsif right isUnit
+		// INC/DEC r8
+		self writeModrm (op unitRmm, 3, register, 0xFE)
+	else
+		self opRI8 (op, left, right)
+	end
+
+method addRI16 (op: *BinaryOperation, left: *PRegisterValue, right: *PIntegerValue)
+
+	var register = left number
+	if right isNull
+		// do nothing
+	elsif right isUnit
+		// INC/DEC r16
+		self writeByte (0x66)
+		self writeByte (op unitReg + register)
+	else
+		self opRI16 (op, left, right)
+	end
+
+method addRI32 (op: *BinaryOperation, left: *PRegisterValue, right: *PIntegerValue)
+
+	var register = left number
+	if right isNull
+		// do nothing
+	elsif right isUnit
+		// INC/DEC r32
+		self writeByte (op unitReg + register)
+	else
+		self opRI32 (op, left, right)
+	end
+//[cf]
+//[of]:op reg other
+method opRO8 (op: *BinaryOperation, left: *PRegisterValue, right: *PValue)
+
+	if left number == register_al
+		self pushEax
+		self movAccumulatorValue (right)
+		self movRegReg (vs_byte, register_cl, register_al)
+		self popEax
+		
+		// op AL, CL
+		self writeModrm (register_al, 3, register_cl, op regRm)
+	else
+		self movAccumulatorValue (right)
+		self opRX8 (op, left, al_register_value)
+	end
+
+method opRO16 (op: *BinaryOperation, left: *PRegisterValue, right: *PValue)
+
+	if left number == register_ax
+		self pushEax
+		self movAccumulatorValue (right)
+		self movRegReg (vs_word, register_cx, register_ax)
+		self popEax
+		
+		// op AX, CX
+		self writeByte (0x66)
+		self writeModrm (register_ax, 3, register_cx, op regRm + 1)
+	else
+		self movAccumulatorValue (right)
+		self opRX16 (op, left, ax_register_value)
+	end
+
+method opRO32 (op: *BinaryOperation, left: *PRegisterValue, right: *PValue)
+
+	if left number == register_eax
+		self pushEax
+		self movAccumulatorValue (right)
+		self movRegReg (vs_dword, register_ecx, register_eax)
+		self popEax
+		
+		// op EAX, ECX
+		self writeModrm (register_eax, 3, register_ecx, op regRm + 1)
+	else
+		self movAccumulatorValue (right)
+		self opRX32 (op, left, eax_register_value)
+	end
+//[cf]
+//[of]:op rm reg
+method opXR8 (op: *BinaryOperation, left: *PValue, right: *PRegisterValue)
+
+	self writeRM (left, right, right number, op rmReg)
+
+method opXR16 (op: *BinaryOperation, left: *PValue, right: *PRegisterValue)
+
+	self writeRM (left, right, right number, 0x66, op rmReg + 1)
+
+method opXR32 (op: *BinaryOperation, left: *PValue, right: *PRegisterValue)
+
+	self writeRM (left, right, right number, op rmReg + 1)
+//[cf]
+//[of]:op rm imm
+method opXI8 (op: *BinaryOperation, left: *PValue, right: *PIntegerValue)
+
+	self writeRM (left, nil, op rmImmm, op rmImm)
+	self writeByte (right byte)
+
+method opXI16 (op: *BinaryOperation, left: *PValue, right: *PIntegerValue)
+
+	var nn = right word
+	if nn isShortDisplacement
+		// op word ptr [x], imm8
+		self writeRM (left, nil, op rmImmm, 0x66, op rmImm + 3)
+		self writeByte (nn : Byte)
+	else
+		// op word ptr [x], imm16
+		self writeRM (left, nil, op rmImmm, 0x66, op rmImm + 1)
+		self writeWord (nn)
+	end
+
+method opXI32 (op: *BinaryOperation, left: *PValue, right: *PIntegerValue)
+
+	var nn = right dword
+	if nn isShortDisplacement
+		// op dword ptr [x], imm8
+		self writeRM (left, nil, op rmImmm, op rmImm + 3)
+		self writeByte (nn : Byte)
+	else
+		// op dword ptr [x], imm32
+		self writeRM (left, nil, op rmImmm, op rmImm + 1)
+		self writeDword (nn)
+	end
+//[cf]
+//[of]:op rm other
+method opXO8 (op: *BinaryOperation, left: *PValue, right: *PValue)
+
+	self movAccumulatorValue (right)
+	self opXR8 (op, left, al_register_value)
+
+method opXO16 (op: *BinaryOperation, left: *PValue, right: *PValue)
+
+	self movAccumulatorValue (right)
+	self opXR16 (op, left, ax_register_value)
+
+method opXO32 (op: *BinaryOperation, left: *PValue, right: *PValue)
+
+	self movAccumulatorValue (right)
+	self opXR32 (op, left, eax_register_value)
+//[cf]
+//[of]:op other other
+method cmpOO8 (op: *BinaryOperation, left: *PValue, right: *PValue)
+
+	self movAccumulatorValue (left)
+	self opValueValue (op, al_register_value, right)
+
+method cmpOO16 (op: *BinaryOperation, left: *PValue, right: *PValue)
+
+	self movAccumulatorValue (left)
+	self opValueValue (op, ax_register_value, right)
+
+method cmpOO32 (op: *BinaryOperation, left: *PValue, right: *PValue)
+
+	self movAccumulatorValue (left)
+	self opValueValue (op, eax_register_value, right)
+//[cf]
+//[cf]
+//[of]:shift operations
+//[of]:shiftValueValue
+method shiftValueValue (op: *ShiftOperation, left: *PValue, right: *PValue)
+
+	op call (self, left, right)
+
+method shiftVV64 (op: *ShiftOperation, left: *PValue, right: *PValue)
+
+	self pushValue64 (left, right)
+	self pushValue (right)
+	self callBuiltin (op builtin64)
+	self movValueValue (left, rax_register_value)
+//[cf]
+
+//[of]:shift reg reg
+method shiftRR8 (op: *ShiftOperation, left: *PRegisterValue, right: *PRegisterValue)
+
+	self loadClReg (right)
+	self shiftR8Cl (op, left)
+
+method shiftRR16 (op: *ShiftOperation, left: *PRegisterValue, right: *PRegisterValue)
+
+	self loadClReg (right)
+	self shiftR16Cl (op, left)
+
+method shiftRR32 (op: *ShiftOperation, left: *PRegisterValue, right: *PRegisterValue)
+
+	self loadClReg (right)
+	self shiftR32Cl (op, left)
+//[cf]
+//[of]:shift reg stack
+method shiftRS8 (op: *ShiftOperation, left: *PRegisterValue, right: *PStackValue)
+
+	self loadClEsp (right)
+	self shiftR8Cl (op, left)
+
+method shiftRS16 (op: *ShiftOperation, left: *PRegisterValue, right: *PStackValue)
+
+	self loadClEsp (right)
+	self shiftR16Cl (op, left)
+
+method shiftRS32 (op: *ShiftOperation, left: *PRegisterValue, right: *PStackValue)
+
+	self loadClEsp (right)
+	self shiftR32Cl (op, left)
+//[cf]
+//[of]:shift reg other
+method shiftRO8 (op: *ShiftOperation, left: *PRegisterValue, right: *PValue)
+
+	self loadCl (left, right)
+	self shiftR8Cl (op, left)
+
+method shiftRO16 (op: *ShiftOperation, left: *PRegisterValue, right: *PValue)
+
+	self loadCl (left, right)
+	self shiftR16Cl (op, left)
+
+method shiftRO32 (op: *ShiftOperation, left: *PRegisterValue, right: *PValue)
+
+	self loadCl (left, right)
+	self shiftR32Cl (op, left)
+//[cf]
+//[of]:shift stack reg
+method shiftSR8 (op: *ShiftOperation, left: *PStackValue, right: *PRegisterValue)
+
+	self loadClReg (right)
+	self shiftS8Cl (op, left)
+
+method shiftSR16 (op: *ShiftOperation, left: *PStackValue, right: *PRegisterValue)
+
+	self loadClReg (right)
+	self shiftS16Cl (op, left)
+
+method shiftSR32 (op: *ShiftOperation, left: *PStackValue, right: *PRegisterValue)
+
+	self loadClReg (right)
+	self shiftS32Cl (op, left)
+//[cf]
+//[of]:shift stack stack
+method shiftSS8 (op: *ShiftOperation, left: *PStackValue, right: *PStackValue)
+
+	self loadClEsp (right)
+	self shiftS8Cl (op, left)
+
+method shiftSS16 (op: *ShiftOperation, left: *PStackValue, right: *PStackValue)
+
+	self loadClEsp (right)
+	self shiftS16Cl (op, left)
+
+method shiftSS32 (op: *ShiftOperation, left: *PStackValue, right: *PStackValue)
+
+	self loadClEsp (right)
+	self shiftS32Cl (op, left)
+//[cf]
+//[of]:shift stack other
+method shiftSO8 (op: *ShiftOperation, left: *PStackValue, right: *PValue)
+
+	self loadCl (right)
+	self shiftS8Cl (op, left)
+
+method shiftSO16 (op: *ShiftOperation, left: *PStackValue, right: *PValue)
+
+	self loadCl (right)
+	self shiftS16Cl (op, left)
+
+method shiftSO32 (op: *ShiftOperation, left: *PStackValue, right: *PValue)
+
+	self loadCl (right)
+	self shiftS32Cl (op, left)
+//[cf]
+//[of]:shift rm imm
+method shiftXI8 (op: *ShiftOperation, left: *PValue, right: *PIntegerValue)
+
+	var s = right byte
+	if s == 1
+		// shift [x]
+		self writeRM (left, nil, op register, 0xD0)
+	else
+		// shift [x], imm8
+		self writeRM (left, nil, op register, 0xC0)
+		self writeByte (s)
+	end
+
+method shiftXI16 (op: *ShiftOperation, left: *PValue, right: *PIntegerValue)
+
+	var s = right byte
+	if s == 1
+		// shift [x]
+		self writeRM (left, nil, op register, 0x66, 0xD1)
+	else
+		// shift [x], imm8
+		self writeRM (left, nil, op register, 0x66, 0xC1)
+		self writeByte (s)
+	end
+
+method shiftXI32 (op: *ShiftOperation, left: *PValue, right: *PIntegerValue)
+
+	var s = right byte
+	if s == 1
+		// shift [x]
+		self writeRM (left, nil, op register, 0xD1)
+	else
+		// shift [x], imm8
+		self writeRM (left, nil, op register, 0xC1)
+		self writeByte (s)
+	end
+//[cf]
+//[of]:shift other register
+method shiftOR8 (op: *ShiftOperation, left: *PValue, right: *PRegisterValue)
+
+	if right == al_register_value
+		self pushEax
+		self movAccumulatorValue (left)
+		self popEcx
+		self shiftR8Cl (op, al_register_value)
+	else
+		self movAccumulatorValue (left)
+		self shiftRR8 (op, al_register_value, right)
+	end
+	self movValueValue (left, al_register_value)
+
+method shiftOR16 (op: *ShiftOperation, left: *PValue, right: *PRegisterValue)
+
+	if right == al_register_value
+		self pushEax
+		self movAccumulatorValue (left)
+		self popEcx
+		self shiftR16Cl (op, ax_register_value)
+	else
+		self movAccumulatorValue (left)
+		self shiftRR16 (op, ax_register_value, right)
+	end
+	self movValueValue (left, ax_register_value)
+
+method shiftOR32 (op: *ShiftOperation, left: *PValue, right: *PRegisterValue)
+
+	if right == al_register_value
+		self pushEax
+		self movAccumulatorValue (left)
+		self popEcx
+		self shiftR32Cl (op, eax_register_value)
+	else
+		self movAccumulatorValue (left)
+		self shiftRR32 (op, eax_register_value, right)
+	end
+	self movValueValue (left, eax_register_value)
+//[cf]
+//[of]:shift other other
+//[c]WARNING: right cannot be the accumulator
+//[c]
+method shiftOO (op: *ShiftOperation, left: *PValue, right: *PValue)
+
+	var accumulator = left size accumulator
+	self movAccumulatorValue (left)
+	self shiftValueValue (op, accumulator, right)
+	self movValueValue (left, accumulator)
+//[cf]
+
+//[of]:utils
+method loadClReg (right: *PRegisterValue)
+
+	// MOV CL, r8
+	self writeModrm (right number, 3, register_cl, 0x88)
+
+method loadClEsp (right: *PStackValue)
+
+	// MOV CL, [ESP + n]
+	self writeEspBase (register_cl, right offset - self stackPointer, 0x8A)
+
+//[c]
+method shiftS8Cl (op: *ShiftOperation, left: *PStackValue)
+
+	// shift [ESP + n], cl
+	self writeEspBase (op register, left offset - self stackPointer, 0xD2)
+
+method shiftS16Cl (op: *ShiftOperation, left: *PStackValue)
+
+	// shift [ESP + n], cl
+	self writeEspBase (op register, left offset - self stackPointer, 0x66, 0xD3)
+
+method shiftS32Cl (op: *ShiftOperation, left: *PStackValue)
+
+	// shift [ESP + n], cl
+	self writeEspBase (op register, left offset - self stackPointer, 0xD3)
+
+//[c]
+method shiftR8Cl (op: *ShiftOperation, left: *PRegisterValue)
+
+	// shift r8, cl
+	self writeModrm (op register, 3, left number, 0xD2)
+
+method shiftR16Cl (op: *ShiftOperation, left: *PRegisterValue)
+
+	// shift r16, cl
+	self writeByte (0x66)
+	self writeModrm (op register, 3, left number, 0xD3)
+
+method shiftR32Cl (op: *ShiftOperation, left: *PRegisterValue)
+
+	// shift r32, cl
+	self writeModrm (op register, 3, left number, 0xD3)
+
+//[c]
+method loadCl (left: *PRegisterValue, right: *PValue)
+
+	if left isAccumulator
+		self pushAccumulator (left size)
+		self movAccumulatorValue (right)
+		// MOV CL, AL
+		self writeModrm (register_al, 3, register_cl, 0x88)
+		self popAccumulator (left size)
+	else
+		self movAccumulatorValue (right)
+		// MOV CL, AL
+		self writeModrm (register_al, 3, register_cl, 0x88)
+	end
+
+method loadCl (right: *PValue)
+
+	self movAccumulatorValue (right)
+	// MOV CL, AL
+	self writeModrm (register_al, 3, register_cl, 0x88)
+
+method pushAccumulator (size: PValueSize)
+
+	if size <> vs_qword
+		self pushEax
+	else
+		self pushEdxEax
+	end
+
+method popAccumulator (size: PValueSize)
+
+	if size <> vs_qword
+		self popEax
+	else
+		self popEaxEdx
+	end
+//[cf]
+//[cf]
+//[of]:mul operation
+//[of]:mul value rm
+method mulVX8 (op: *BinaryOperation, left: *PValue, right: *PValue)
+
+	self movAccumulatorValue (left)
+	self writeRM (right, al_register_value, op rmm, 0xF6)
+	self movValueValue (left, al_register_value)
+
+method mulVX16 (op: *BinaryOperation, left: *PValue, right: *PValue)
+
+	self movAccumulatorValue (left)
+	self writeRM (right, ax_register_value, op rmm, 0x66, 0xF7)
+	self movValueValue (left, ax_register_value)
+
+method mulVX32 (op: *BinaryOperation, left: *PValue, right: *PValue)
+
+	self movAccumulatorValue (left)
+	self writeRM (right, eax_register_value, op rmm, 0xF7)
+	self movValueValue (left, eax_register_value)
+//[cf]
+//[of]:mul rm imm
+method mulXI8 (op: *BinaryOperation, left: *PValue, right: *PIntegerValue)
+
+	if right isUnit
+		return
+	end
+	
+	var n = right dword
+	var pow = self shift (n)
+	if pow <> 0
+		var shift = {PIntegerValue} local (vs_byte, pow : Unsigned64)
+		self shiftValueValue (self shl_operation, left, shift)
+	else
+		self movAccumulatorValue (left)
+		// mov cl, n
+		self writeByte (register_cl + 0xB0)
+		self writeByte (n : Byte)
+		// mul cl
+		self writeRM (cl_register_value, al_register_value, op rmm, 0xF6)
+		self movValueValue (left, al_register_value)
+	end
+
+method mulXI16 (op: *BinaryOperation, left: *PValue, right: *PIntegerValue)
+
+	if right isUnit
+		return
+	end
+	
+	var n = right dword
+	var pow = self shift (n)
+	if pow <> 0
+		var shift = {PIntegerValue} local (vs_byte, pow : Unsigned64)
+		self shiftValueValue (self shl_operation, left, shift)
+	else
+		self movAccumulatorValue (left)
+		// mov cx, n
+		self writeByte (0x66)
+		self writeByte (register_cx + 0xB8)
+		self writeWord (n : Unsigned16)
+		// mul ecx
+		self writeRM (cx_register_value, ax_register_value, op rmm, 0x66, 0xF7)
+		self movValueValue (left, ax_register_value)
+	end
+
+method mulXI32 (op: *BinaryOperation, left: *PValue, right: *PIntegerValue)
+
+	if right isUnit
+		return
+	end
+	
+	var n = right dword
+	var pow = self shift (n)
+	if pow <> 0
+		var shift = {PIntegerValue} local (vs_byte, pow : Unsigned64)
+		self shiftValueValue (self shl_operation, left, shift)
+	else
+		self movAccumulatorValue (left)
+		// mov ecx, n
+		self writeByte (register_ecx + 0xB8)
+		self writeDword (n)
+		// mul ecx
+		self writeRM (ecx_register_value, al_register_value, op rmm, 0xF7)
+		self movValueValue (left, eax_register_value)
+	end
+//[cf]
+//[of]:mul rm other
+method mulXO8 (op: *BinaryOperation, left: *PValue, right: *PValue)
+
+	self movAccumulatorValue (left)
+	self pushEax
+	self movAccumulatorValue (right)
+	self popEcx
+	self writeRM (cl_register_value, al_register_value, op rmm, 0xF6)
+	self movValueValue (left, al_register_value)
+
+method mulXO16 (op: *BinaryOperation, left: *PValue, right: *PValue)
+
+	self movAccumulatorValue (left)
+	self pushEax
+	self movAccumulatorValue (right)
+	self popEcx
+	self writeRM (cx_register_value, ax_register_value, op rmm, 0x66, 0xF7)
+	self movValueValue (left, ax_register_value)
+
+method mulXO32 (op: *BinaryOperation, left: *PValue, right: *PValue)
+
+	self movAccumulatorValue (left)
+	self pushEax
+	self movAccumulatorValue (right)
+	self popEcx
+	self writeRM (ecx_register_value, eax_register_value, op rmm, 0xF7)
+	self movValueValue (left, eax_register_value)
+//[cf]
+
+//[of]:div value rm
+method divVX8 (op: *BinaryOperation, left: *PValue, right: *PValue)
+
+	self movAccumulatorValue (left)
+	self extendAL (op)
+	self writeRM (right, ax_register_value, op rmm, 0xF6)
+	self movValueValue (left, al_register_value)
+
+method divVX16 (op: *BinaryOperation, left: *PValue, right: *PValue)
+
+	self movAccumulatorValue (left)
+	self extendAX (op)
+	self writeRM (right, ax_register_value, op rmm, 0x66, 0xF7)
+	self movValueValue (left, ax_register_value)
+
+method divVX32 (op: *BinaryOperation, left: *PValue, right: *PValue)
+
+	self movAccumulatorValue (left)
+	self extendEAX (op)
+	self writeRM (right, eax_register_value, op rmm, 0xF7)
+	self movValueValue (left, eax_register_value)
+//[cf]
+//[of]:div rm imm
+method divXI8 (op: *BinaryOperation, left: *PValue, right: *PIntegerValue)
+
+	if right isUnit
+		return
+	end
+	
+	var n = right dword
+	var pow = self shift (n)
+	if pow <> 0
+		var shift = {PIntegerValue} local (vs_byte, pow : Unsigned64)
+		self shiftValueValue ((op isSigned cond self sar_operation else self shr_operation), left, shift)
+	else
+		self movAccumulatorValue (left)
+		self extendAL (op)
+		// mov cl, n
+		self writeByte (register_cl + 0xB0)
+		self writeByte (n : Byte)
+		// div cl
+		self writeRM (cl_register_value, ax_register_value, op rmm, 0xF6)
+		self movValueValue (left, al_register_value)
+	end
+
+method divXI16 (op: *BinaryOperation, left: *PValue, right: *PIntegerValue)
+
+	if right isUnit
+		return
+	end
+	
+	var n = right dword
+	var pow = self shift (n)
+	if pow <> 0
+		var shift = {PIntegerValue} local (vs_byte, pow : Unsigned64)
+		self shiftValueValue ((op isSigned cond self sar_operation else self shr_operation), left, shift)
+	else
+		self movAccumulatorValue (left)
+		self extendAX (op)
+		// mov cx, n
+		self writeByte (0x66)
+		self writeByte (register_cx + 0xB8)
+		self writeWord (n : Unsigned16)
+		// div ecx
+		self writeRM (cx_register_value, ax_register_value, op rmm, 0x66, 0xF7)
+		self movValueValue (left, ax_register_value)
+	end
+
+method divXI32 (op: *BinaryOperation, left: *PValue, right: *PIntegerValue)
+
+	if right isUnit
+		return
+	end
+	
+	var n = right dword
+	var pow = self shift (n)
+	if pow <> 0
+		var shift = {PIntegerValue} local (vs_byte, pow : Unsigned64)
+		self shiftValueValue ((op isSigned cond self sar_operation else self shr_operation), left, shift)
+	else
+		self movAccumulatorValue (left)
+		self extendEAX (op)
+		// mov ecx, n
+		self writeByte (register_ecx + 0xB8)
+		self writeDword (n)
+		// div ecx
+		self writeRM (ecx_register_value, al_register_value, op rmm, 0xF7)
+		self movValueValue (left, eax_register_value)
+	end
+//[cf]
+//[of]:div rm other
+method divXO8 (op: *BinaryOperation, left: *PValue, right: *PValue)
+
+	self movAccumulatorValue (left)
+	self pushEax
+	self movAccumulatorValue (right)
+	// mov cl, al
+	self writeModrm (register_al, 3, register_cl, 0x88)
+	self popEax
+	self extendAL (op)
+	self writeRM (cl_register_value, al_register_value, op rmm, 0xF6)
+	self movValueValue (left, al_register_value)
+
+method divXO16 (op: *BinaryOperation, left: *PValue, right: *PValue)
+
+	self movAccumulatorValue (left)
+	self pushEax
+	self movAccumulatorValue (right)
+	// mov ecx, eax
+	self writeModrm (register_al, 3, register_cl, 0x89)
+	self popEax
+	self extendAX (op)
+	self writeRM (cx_register_value, ax_register_value, op rmm, 0x66, 0xF7)
+	self movValueValue (left, ax_register_value)
+
+method divXO32 (op: *BinaryOperation, left: *PValue, right: *PValue)
+
+	self movAccumulatorValue (left)
+	self pushEax
+	self movAccumulatorValue (right)
+	// mov ecx, eax
+	self writeModrm (register_al, 3, register_cl, 0x89)
+	self popEax
+	self extendEAX (op)
+	self writeRM (ecx_register_value, eax_register_value, op rmm, 0xF7)
+	self movValueValue (left, eax_register_value)
+//[cf]
+
+//[of]:mod value rm
+method modVX8 (op: *BinaryOperation, left: *PValue, right: *PValue)
+
+	self movAccumulatorValue (left)
+	self extendAL (op)
+	self writeRM (right, ax_register_value, op rmm, 0xF6)
+	self movValueValue (left, ah_register_value)
+
+method modVX16 (op: *BinaryOperation, left: *PValue, right: *PValue)
+
+	self movAccumulatorValue (left)
+	self extendAX (op)
+	self writeRM (right, ax_register_value, op rmm, 0x66, 0xF7)
+	self movValueValue (left, dx_register_value)
+
+method modVX32 (op: *BinaryOperation, left: *PValue, right: *PValue)
+
+	self movAccumulatorValue (left)
+	self extendEAX (op)
+	self writeRM (right, eax_register_value, op rmm, 0xF7)
+	self movValueValue (left, edx_register_value)
+//[cf]
+//[of]:mod rm imm
+method modXI8 (op: *BinaryOperation, left: *PValue, right: *PIntegerValue)
+
+	self movAccumulatorValue (left)
+	self extendAL (op)
+	// mov cl, n
+	self writeByte (register_cl + 0xB0)
+	self writeByte (right byte)
+	// div cl
+	self writeRM (cl_register_value, ax_register_value, op rmm, 0xF6)
+	self movValueValue (left, ah_register_value)
+
+method modXI16 (op: *BinaryOperation, left: *PValue, right: *PIntegerValue)
+
+	self movAccumulatorValue (left)
+	self extendAX (op)
+	// mov cx, n
+	self writeByte (0x66)
+	self writeByte (register_cx + 0xB8)
+	self writeWord (right word)
+	// div ecx
+	self writeRM (cx_register_value, ax_register_value, op rmm, 0x66, 0xF7)
+	self movValueValue (left, dx_register_value)
+
+method modXI32 (op: *BinaryOperation, left: *PValue, right: *PIntegerValue)
+
+	self movAccumulatorValue (left)
+	self extendEAX (op)
+	// mov ecx, n
+	self writeByte (register_ecx + 0xB8)
+	self writeDword (right dword)
+	// div ecx
+	self writeRM (ecx_register_value, al_register_value, op rmm, 0xF7)
+	self movValueValue (left, edx_register_value)
+//[cf]
+//[of]:mod rm other
+method modXO8 (op: *BinaryOperation, left: *PValue, right: *PValue)
+
+	self movAccumulatorValue (left)
+	self pushEax
+	self movAccumulatorValue (right)
+	// mov cl, al
+	self writeModrm (register_al, 3, register_cl, 0x88)
+	self popEax
+	self extendAL (op)
+	self writeRM (cl_register_value, al_register_value, op rmm, 0xF6)
+	self movValueValue (left, ah_register_value)
+
+method modXO16 (op: *BinaryOperation, left: *PValue, right: *PValue)
+
+	self movAccumulatorValue (left)
+	self pushEax
+	self movAccumulatorValue (right)
+	// mov ecx, eax
+	self writeModrm (register_al, 3, register_cl, 0x89)
+	self popEax
+	self extendAX (op)
+	self writeRM (cx_register_value, ax_register_value, op rmm, 0x66, 0xF7)
+	self movValueValue (left, dx_register_value)
+
+method modXO32 (op: *BinaryOperation, left: *PValue, right: *PValue)
+
+	self movAccumulatorValue (left)
+	self pushEax
+	self movAccumulatorValue (right)
+	// mov ecx, eax
+	self writeModrm (register_al, 3, register_cl, 0x89)
+	self popEax
+	self extendEAX (op)
+	self writeRM (ecx_register_value, eax_register_value, op rmm, 0xF7)
+	self movValueValue (left, edx_register_value)
+//[cf]
+
+//[of]:utils
+method shift (x: Unsigned32)
+
+	var pow = 0
+	var n = x
+	while n <> 1
+		if (n & 1) <> 0
+			return 0
+		end
+		n >>= 1
+		pow ++
+	end
+	return pow
+
+method extendAL (op: *BinaryOperation)
+
+	if op isSigned
+		// cbw
+		self writeByte (0x66)
+		self writeByte (0x98)
+	else
+		// xor ah, ah
+		self writeModrm (register_ah, 3, register_ah, 0x32)
+	end
+
+method extendAX (op: *BinaryOperation)
+
+	if op isSigned
+		// cwd
+		self writeByte (0x66)
+		self writeByte (0x99)
+	else
+		// xor dx, dx
+		self writeModrm (register_dx, 3, register_dx, 0x66, 0x33)
+	end
+
+method extendEAX (op: *BinaryOperation)
+
+	if op isSigned
+		// cdq
+		self writeByte (0x99)
+	else
+		// xor edx, edx
+		self writeModrm (register_edx, 3, register_edx, 0x33)
+	end
+//[cf]
+//[cf]
+//[of]:unary operations
+//[of]:negValue
+method negValue (value: *PValue)
+
+	switch value size
+	case vs_byte
+		self writeRM (value, nil, 3, 0xF6)
+	case vs_word
+		self writeRM (value, nil, 3, 0x66, 0xF7)
+	case vs_dword
+		self writeRM (value, nil, 3, 0xF7)
+	else // vs_qword
+		self movAccumulatorValue (value)
+		// neg edx
+		self writeRM (edx_register_value, nil, 3, 0xF7)
+		// neg eax
+		self writeRM (eax_register_value, nil, 3, 0xF7)
+		// sbb edx, 0
+		self writeRM (edx_register_value, nil, 3, 0x83)
+		self writeByte (0)
+		self movValueValue (value, rax_register_value)
+	end
+//[cf]
+//[of]:notValue
+method notValue (value: *PValue)
+
+	switch value size
+	case vs_byte
+		self writeRM (value, nil, 2, 0xF6)
+	case vs_word
+		self writeRM (value, nil, 2, 0x66, 0xF7)
+	case vs_dword
+		self writeRM (value, nil, 2, 0xF7)
+	else // vs_qword
+		self movAccumulatorValue (value)
+		// not eax
+		self writeRM (eax_register_value, nil, 2, 0xF7)
+		// not edx
+		self writeRM (edx_register_value, nil, 2, 0xF7)
+		self movValueValue (value, rax_register_value)
+	end
+//[cf]
+//[cf]
+//[of]:push
+//[of]:pushValue
+method pushValue (value: *PValue)
+
+	switch value code
+	case vc_register
+		self pushR (value register)
+	case vc_stack
+		self pushS (value stack)
+	case vc_memory
+		self pushM (value memory)
+	case vc_integer
+		self pushI (value integer)
+	case vc_global
+		var glob = value glob
+		// PUSH imm32
+		self writeByte (0x68)
+		self writeReference (glob symbol, glob offset)
+		self stackPointer -= 4
+	else
+		self movAccumulatorValue (value)
+		if value size <> vs_qword
+			self pushEax
+		else
+			self pushEdxEax
+		end
+	end
+
+method pushValue64 (	value	: *PValue, 
+	registerToSave	: *PValue)
+
+	switch value code
+	case vc_register
+		self pushR (value register)
+	case vc_stack
+		self pushS (value stack)
+	case vc_integer
+		self pushI (value integer)
+	else
+		if	registerToSave notNil and 
+			registerToSave isRegister and 
+			registerToSave register isAccumulator
+		
+			self pushEdxEax
+			self movAccumulatorValue (value)
+			
+			// XCHG EAX, [ESP]
+			self writeEspBase (register_eax, 0, 0x87)
+			// XCHG EDX, [ESP + 4]
+			self writeEspBase (register_edx, 4, 0x87)
+			
+		else
+			self movAccumulatorValue (value)
+			self pushR (rax_register_value)
+		end
+	end
+//[cf]
+//[of]:pushI
+method pushI (value: *PIntegerValue)
+
+	if value size <> vs_qword
+		var nn = value dword
+		if nn isShortDisplacement
+			// PUSH imm8
+			self writeByte (0x6A)
+			self writeByte (nn : Byte)
+		else
+			// PUSH imm32
+			self writeByte (0x68)
+			self writeDword (nn)
+		end
+		self stackPointer -= 4
+	else
+		self pushI64 (value)
+	end
+
+method pushI64 (value: *PIntegerValue)
+
+	var nn = value qword
+
+	// PUSH imm32
+	var high = nn high
+	if high isShortDisplacement
+		// PUSH imm8
+		self writeByte (0x6A)
+		self writeByte (high : Byte)
+	else
+		// PUSH imm32
+		self writeByte (0x68)
+		self writeDword (high : Unsigned32)
+	end
+
+	// PUSH imm32
+	var low = nn low
+	if low isShortDisplacement
+		// PUSH imm8
+		self writeByte (0x6A)
+		self writeByte (low : Byte)
+	else
+		// PUSH imm32
+		self writeByte (0x68)
+		self writeDword (low : Unsigned32)
+	end
+
+	self stackPointer -= 8
+//[cf]
+//[of]:pushR
+method pushR (register: *PRegisterValue)
+
+	switch register size
+	case vs_byte
+		// SUB ESP, 4	
+		self writeModrm (5, 3, register_esp, 0x83)
+		self writeByte (4)
+		self stackPointer -= 4
+	
+		// MOV [ESP], reg8
+		self writeEspBase (register number, 0, 0x88)
+		
+	case vs_word, vs_dword
+		// PUSH reg32
+		self writeByte (register number + 0x50)
+		self stackPointer -= 4
+	case vs_qword
+		self pushR64 (register)
+	end
+
+method pushR64 (register: *PRegisterValue)
+
+	// PUSH reg32
+	self writeByte (register number peerRegister + 0x50)
+	// PUSH reg32
+	self writeByte (register number + 0x50)
+	self stackPointer -= 8
+//[cf]
+//[of]:pushS
+method pushS (value: *PStackValue)
+
+	var offset	= value offset - self stackPointer
+	if value size <> vs_qword
+		// PUSH [ESP + nn]
+		self writeEspBase (6, offset, 0xFF)
+
+		self stackPointer -= 4
+	else
+		// PUSH [ESP + nn + 4]
+		self writeEspBase (6, offset + 4, 0xFF)
+		// PUSH [ESP + nn + 4]
+		self writeEspBase (6, offset + 4, 0xFF)
+
+		self stackPointer -= 8
+	end
+//[cf]
+//[of]:pushM
+method pushM (value: *PMemoryValue)
+
+	if value size == vs_dword
+		// For DWORD, it is easy to read value and push it on stack
+		self writeMemory (value, nil, 6, 0xFF)
+		self stackPointer -= 4
+	else
+		// For other sizes, read separately to read the correct size
+		self movAccumulatorValue (value)
+		self pushR (value size accumulator)
+	end
+
+method pushM64 (value: *PMemoryValue, saveAccumulator: Bool)
+
+	if saveAccumulator
+		self pushEdxEax
+		self movAccumulatorValue (value)
+		
+		// XCHG EAX, [ESP]
+		self writeEspBase (register_eax, 0, 0x87)
+		// XCHG EDX, [ESP + 4]
+		self writeEspBase (register_edx, 4, 0x87)
+		
+	else
+		self movAccumulatorValue (value)
+		self pushR (rax_register_value)
+	end
+//[cf]
+//[cf]
+//[of]:stack
+//[of]:addEspImm
+method addEspImm (offset: StackOffset)
+
+	if offset == 0
+		// Do nothing
+	elsif offset isShortDisplacement
+		// ADD ESP, imm8
+		self writeModrm (0, 3, register_esp, 0x83)
+		self writeByte (offset : Byte)
+	else
+		// ADD ESP, imm32
+		self writeModrm (0, 3, register_esp, 0x81)
+		self write (offset)
+	end
+	
+	// Update the stack pointer
+	self stackPointer += offset
+//[cf]
+//[of]:subEspImm
+method subEspImm (offset: StackOffset)
+
+	if offset == 0
+		// Do nothing
+	elsif offset isShortDisplacement
+		// SUB ESP, imm8
+		self writeModrm (5, 3, register_esp, 0x83)
+		self writeByte (offset : Byte)
+	else
+		// SUB ESP, imm32
+		self writeModrm (5, 3, register_esp, 0x81)
+		self write (offset)
+	end
+
+	// Update the stack pointer
+	self stackPointer -= offset
+//[cf]
+//[of]:pushEax
+method pushEax
+
+	self writeByte (0x50 + register_eax)
+	self stackPointer -= 4
+//[cf]
+//[of]:pushEdx
+method pushEdx
+
+	self writeByte (0x50 + register_edx)
+	self stackPointer -= 4
+//[cf]
+//[of]:popEdx
+method popEdx
+
+	self writeByte (0x58 + register_edx)
+	self stackPointer += 4
+//[cf]
+//[of]:popEcx
+method popEcx
+
+	self writeByte (0x58 + register_ecx)
+	self stackPointer += 4
+//[cf]
+//[of]:popEax
+method popEax
+
+	self writeByte (0x58 + register_eax)
+	self stackPointer += 4
+//[cf]
+//[of]:pushEdxEax
+method pushEdxEax
+
+	self writeByte (0x50 + register_edx)
+	self writeByte (0x50 + register_eax)
+	self stackPointer -= 8
+//[cf]
+//[of]:popEaxEdx
+method popEaxEdx
+
+	self writeByte (0x58 + register_eax)
+	self writeByte (0x58 + register_edx)
+	self stackPointer += 8
+//[cf]
+//[cf]
+//[of]:writing
+//[of]:writeLabel
+method writeLabel (label: *PLabel)
+
+	var position = self nextByte - self firstByte
+	
+	if label isDefined
+		// Write relative offset
+		self writeDword (relativeOffset (label, position))
+	else
+		// Add an unresolved label
+		var unsolved = self fpool new (MCUnsolvedLabel, label, position)
+		self unsolvedLabels add (unsolved)
+		
+		// Write empty offset
+		self writeDword (0)
+	end
+//[cf]
+//[of]:writeRelative
+//[c]Writes a relative address (for function calls)
+//[c]
+//[c]REMARKS
+//[c]	A relative address is always unsolved because the source offset can not
+//[c]	be computed yet: the object is inserted into the section only when
+//[c]	completed, therefore its offset in the section is unknown (other objects
+//[c]	could be inserted into the section before it is completed).
+//[c]
+method writeRelative (toObject: *ObjectData)
+
+	var fromObject	= self currentObject
+	var fromOffset	= self nextByte - self firstByte
+		
+	var unsolved	= self fpool new (	MCUnsolvedReference, 
+			fromObject,
+			fromOffset,
+			toObject)
+	
+	self unsolvedRelatives add (unsolved)
+	
+	// Write empty offset
+	self writeDword (0)
+//[cf]
+//[of]:writeRM
+method writeRM (	value	: *PValue,
+	registerToSave	: *PRegisterValue,
+	register	: Byte,
+	opcode1	: Byte)
+
+	self writeRM2 (value, registerToSave, register, opcode1)
+
+method writeRM (	value	: *PValue, 
+	registerToSave	: *PRegisterValue,
+	register	: Byte, 
+	opcode1	: Byte, 
+	opcode2	: Byte)
+
+	self writeRM2 (value, registerToSave, register, opcode1, opcode2)
+
+method writeRM2 (	value	: *PValue, 
+	registerToSave	: *PRegisterValue,
+	register	: Byte, 
+	...)
+
+	switch value code
+	case vc_register
+		self writeModrm (register, 3, value register number, ...)
+	case vc_stack
+		self writeEspBase (register, value stack offset - self stackPointer, ...)
+	else // vc_memory
+		self writeMemory (value memory, registerToSave, register, ...)
+	end
+//[cf]
+//[of]:writeMemory
+//[c]Same as write memory, but it saves the accumulator if the register is eax
+//[c]
+//[c]	If the value requires a complex computation to get the effective address,
+//[c]	the accumulator may be modified. If we need to read it, it must be saved.
+//[c]	For instance: when writing accumulator into memory or when performing
+//[c]	an operation on the accumulator from memory
+//[c]		mov [ea], eax
+//[c]		add eax, [ea]
+//[c]		...
+//[c]
+method writeMemory (	value	: *PMemoryValue,
+	registerToSave	: *PRegisterValue,	// nil if no register to be saved
+	register	: Byte,
+	...)
+
+	var info = {MemoryInfo}
+	self getMemory (value address, registerToSave, info)
+	each_extra do x
+		self writeByte (x : Byte)
+	end
+	self writeMemoryInfo (info, register)
+//[cf]
+//[of]:getMemory
+method getMemory (	value	: *PValue,
+	registerToSave	: *PRegisterValue,
+	info	: *MemoryInfo)
+
+	// Initialize memory info
+	info flags = 0
+	
+	switch value code
+	
+	case vc_integer
+		info setAddress (value integer dword)
+		return
+		
+	case vc_register
+		info setIndex (value register number, 0)
+		return
+	
+	case vc_global
+		var glob = value glob
+		info setReference (glob symbol, glob offset)
+		return
+		
+	case vc_integer_add
+		var add = value binary
+		var left = add left
+		var right = add right
+		if right isInteger
+			var offset = right integer dword
+			if left isRegister
+				info setIndex (left register number, offset)
+				return
+			elsif left isLocal
+				info setEsp (offset + left local offset - self stackPointer)
+				return
+			else
+				self movEcxValue (left, registerToSave)
+				info setIndex (register_ecx, offset)
+				return
+			end
+		elsif right code == vc_integer_smul
+			var index = right binary left
+			var scale = right binary right
+			if index isRegister and scale isInteger
+				var n = scale integer dword
+				if n == 1
+					self movEcxValue (left, registerToSave)
+					info setIndexAndScale (0, register_ecx, index register number, 0)
+					return
+				elsif n == 2
+					self movEcxValue (left, registerToSave)
+					info setIndexAndScale (0, register_ecx, index register number, 1)
+					return
+				elsif n == 4
+					self movEcxValue (left, registerToSave)
+					info setIndexAndScale (0, register_ecx, index register number, 2)
+					return
+				elsif n == 8
+					self movEcxValue (left, registerToSave)
+					info setIndexAndScale (0, register_ecx, index register number, 3)
+					return
+				end
+			end
+		end
+		
+	end
+
+	// Default: compute the address and save it in ecx
+	// then create an [ecx] effective address
+	self movEcxValue (value, registerToSave)
+	info setIndex (register_ecx, 0)
+//[cf]
+//[of]:writeMemoryInfo
+method writeMemoryInfo (	info	: *MemoryInfo,
+	register	: Byte)
+
+	self writeByte (info modrm | (register << 3))
+	if info hasSib
+		self writeByte (info sib)
+	end
+	if info hasOffset8
+		self writeByte (info offset8)
+	elsif info hasOffset32
+		self writeDword (info offset32)
+	elsif info hasReference
+		self writeReference (info symbol, info offset)
+	end
+//[cf]
+//[of]:writeEspBase
+method writeEspBase (r: Byte, offset: StackOffset, opcode1: Byte)
+	self writeEspBase2 (r, offset, opcode1)
+
+method writeEspBase (r: Byte, offset: StackOffset, opcode1: Byte, opcode2: Byte)
+	self writeEspBase2 (r, offset, opcode1, opcode2)
+
+method writeEspBase2 (r: Byte, offset: StackOffset, ...)
+
+	if offset == 0
+
+		// modr/m: /r, mode=0, r/m=4
+		self writeModrm (r, 0, 4, ...)
+		
+		// sib: base=esp, scale=*1, index = none
+		self writeByte (register_esp + (4 << 3))
+		
+	elsif offset isShortDisplacement
+
+		// modr/m: /r, mode=1, r/m=4
+		self writeModrm (r, 1, 4, ...)
+		
+		// sib: base=esp, scale=*1, index = none
+		self writeByte (register_esp + (4 << 3))
+		
+		// disp8
+		self writeByte (offset : Byte)
+	
+	else
+	
+		// modr/m: /r, mode=2, r/m=4
+		self writeModrm (r, 2,  4, ...)
+		
+		// sib: base=esp, scale=*1, index = none
+		self writeByte (register_esp + (4 << 3))
+		
+		// disp32
+		self write (offset)
+	
+	end
+//[cf]
+//[of]:writeRegisterBase
+method writeRegisterBase (r: Byte, register: Byte, offset: Unsigned, opcode1: Byte)
+	self writeRegisterBase2 (r, register, offset, opcode1)
+
+method writeRegisterBase2 (r: Byte, register: Byte, offset: Unsigned, ...)
+
+	if offset == 0
+		// modr/m: /r, mode=0, r/m=register
+		self writeModrm (r, 0, register, ...)
+	elsif offset isShortDisplacement
+		// modr/m: /r, mode=1, r/m=register
+		self writeModrm (r, 1, register, ...)
+		// disp8
+		self writeByte (offset : Byte)
+	else
+		// modr/m: /r, mode=2, r/m=register
+		self writeModrm (r, 2,  register, ...)
+		// disp32
+		self write (offset)
+	end
+//[cf]
+//[of]:writeModrm
+//[c]
+//[c]REMARKS: do not use the variadic arguments to prevent
+//[c]too many instanciated functions (opcodes could be integers or bytes)
+//[c]
+method writeModrm (r: Byte, mod: Byte, rm: Byte, opcode1: Byte)
+
+	self writeByte (opcode1)
+	self writeByte (r modrm (mod, rm))
+
+method writeModrm (r: Byte, mod: Byte, rm: Byte, opcode1: Byte, opcode2: Byte)
+
+	self writeByte (opcode1)
+	self writeByte (opcode2)
+	self writeByte (r modrm (mod, rm))
+//[cf]
+//[cf]
+//[of]:tables
+//[of]:cmp
+static cmp_operation = BinaryOperation [
+	ref opRX8	(*X86Generator,	*BinaryOperation,	*PRegisterValue,	*PValue),	// reg	reg	byte
+	ref opRX16	(*X86Generator,	*BinaryOperation,	*PRegisterValue,	*PValue),	// reg	reg	word
+	ref opRX32	(*X86Generator,	*BinaryOperation,	*PRegisterValue,	*PValue),	// reg	reg	dword
+	ref cmpVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// reg	reg	qword
+	ref opRX8	(*X86Generator,	*BinaryOperation,	*PRegisterValue,	*PValue),	// reg	stack	byte
+	ref opRX16	(*X86Generator,	*BinaryOperation,	*PRegisterValue,	*PValue),	// reg	stack	word
+	ref opRX32	(*X86Generator,	*BinaryOperation,	*PRegisterValue,	*PValue),	// reg	stack	dword
+	ref cmpVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// reg	stack	qword
+	ref opRX8	(*X86Generator,	*BinaryOperation,	*PRegisterValue,	*PValue),	// reg	memory	byte
+	ref opRX16	(*X86Generator,	*BinaryOperation,	*PRegisterValue,	*PValue),	// reg	memory	word
+	ref opRX32	(*X86Generator,	*BinaryOperation,	*PRegisterValue,	*PValue),	// reg	memory	dword
+	ref cmpVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// reg	memory	qword
+	ref opRI8	(*X86Generator,	*BinaryOperation,	*PRegisterValue,	*PIntegerValue),	// reg	imm	byte
+	ref opRI16	(*X86Generator,	*BinaryOperation,	*PRegisterValue,	*PIntegerValue),	// reg	imm	word
+	ref opRI32	(*X86Generator,	*BinaryOperation,	*PRegisterValue,	*PIntegerValue),	// reg	imm	dword
+	ref cmpVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// reg	imm	qword
+	ref opRO8	(*X86Generator,	*BinaryOperation,	*PRegisterValue,	*PValue),	// reg	other	byte
+	ref opRO16	(*X86Generator,	*BinaryOperation,	*PRegisterValue,	*PValue),	// reg	other	word
+	ref opRO32	(*X86Generator,	*BinaryOperation,	*PRegisterValue,	*PValue),	// reg	other	dword
+	ref cmpVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// reg	other	qword
+	ref opXR8	(*X86Generator,	*BinaryOperation,	*PValue,	*PRegisterValue),	// stack	reg	byte
+	ref opXR16	(*X86Generator,	*BinaryOperation,	*PValue,	*PRegisterValue),	// stack	reg	word
+	ref opXR32	(*X86Generator,	*BinaryOperation,	*PValue,	*PRegisterValue),	// stack	reg	dword
+	ref cmpVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	reg	qword
+	ref opXO8	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	stack	byte
+	ref opXO16	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	stack	word
+	ref opXO32	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	stack	dword
+	ref cmpVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	stack	qword
+	ref opXO8	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	memory	byte
+	ref opXO16	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	memory	word
+	ref opXO32	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	memory	dword
+	ref cmpVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	memory	qword
+	ref opXI8	(*X86Generator,	*BinaryOperation,	*PValue,	*PIntegerValue),	// stack	imm	byte
+	ref opXI16	(*X86Generator,	*BinaryOperation,	*PValue,	*PIntegerValue),	// stack	imm	word
+	ref opXI32	(*X86Generator,	*BinaryOperation,	*PValue,	*PIntegerValue),	// stack	imm	dword
+	ref cmpVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	imm	qword
+	ref opXO8	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	other	byte
+	ref opXO16	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	other	word
+	ref opXO32	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	other	dword
+	ref cmpVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	other	qword
+	ref opXR8	(*X86Generator,	*BinaryOperation,	*PValue,	*PRegisterValue),	// memory	reg	byte
+	ref opXR16	(*X86Generator,	*BinaryOperation,	*PValue,	*PRegisterValue),	// memory	reg	word
+	ref opXR32	(*X86Generator,	*BinaryOperation,	*PValue,	*PRegisterValue),	// memory	reg	dword
+	ref cmpVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	reg	qword
+	ref opXO8	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	stack	byte
+	ref opXO16	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	stack	word
+	ref opXO32	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	stack	dword
+	ref cmpVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	stack	qword
+	ref opXO8	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	memory	byte
+	ref opXO16	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	memory	word
+	ref opXO32	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	memory	dword
+	ref cmpVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	memory	qword
+	ref opXI8	(*X86Generator,	*BinaryOperation,	*PValue,	*PIntegerValue),	// memory	imm	byte
+	ref opXI16	(*X86Generator,	*BinaryOperation,	*PValue,	*PIntegerValue),	// memory	imm	word
+	ref opXI32	(*X86Generator,	*BinaryOperation,	*PValue,	*PIntegerValue),	// memory	imm	dword
+	ref cmpVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	imm	qword
+	ref opXO8	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	other	byte
+	ref opXO16	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	other	word
+	ref opXO32	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	other	dword
+	ref cmpVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	other	qword	
+	nil,					// other	reg	byte	-- register is always moved to left
+	nil,					// other	reg	word	-- register is always moved to left
+	nil,					// other	reg	dword	-- register is always moved to left
+	nil,					// other	reg	qword	-- register is always moved to left
+	nil,					// other	stack	byte	-- stack is always moved to left
+	nil,					// other	stack	word	-- stack is always moved to left
+	nil,					// other	stack	dword	-- stack is always moved to left
+	nil,					// other	stack	qword	-- stack is always moved to left
+	nil,					// other	memory	byte	-- memory is always moved to left
+	nil,					// other	memory	word	-- memory is always moved to left
+	nil,					// other	memory	dword	-- memory is always moved to left
+	nil,					// other	memory	qword	-- memory is always moved to left
+	ref cmpOO8	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// other	imm	byte
+	ref cmpOO16	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// other	imm	word
+	ref cmpOO32	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// other	imm	dword
+	ref cmpVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// other	imm	qword
+	ref cmpOO8	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// other	other	byte
+	ref cmpOO16	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// other	other	word
+	ref cmpOO32	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// other	other	dword
+	ref cmpVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// other	other	qword
+	
+	__cmp64,	// op64
+	0x3A,	// op reg, r/m
+	0x38,	// op r/m, reg
+	0x3C,	// op al/ax/eax, imm
+	0x80,	// op r/m, imm
+	0x07,	// op r/m, imm (/reg)
+	
+	0,	// inc/dec reg16/32 (add/sub only)
+	0,	// inc/dec rm (add/sub only)
+	0,	// op reg, r/m with CF
+	0,	// op r/m, reg with CF
+	0,	// op r/m, imm with CF
+	0,	// op r/m, imm with CF (/reg)
+
+	0,	// op r/m (/reg)
+	false]	// is signed
+//[cf]
+//[of]:add
+static add_operation = BinaryOperation [
+	ref opRX8	(*X86Generator,	*BinaryOperation,	*PRegisterValue,	*PValue),	// reg	reg	byte
+	ref opRX16	(*X86Generator,	*BinaryOperation,	*PRegisterValue,	*PValue),	// reg	reg	word
+	ref opRX32	(*X86Generator,	*BinaryOperation,	*PRegisterValue,	*PValue),	// reg	reg	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// reg	reg	qword
+	ref opRX8	(*X86Generator,	*BinaryOperation,	*PRegisterValue,	*PValue),	// reg	stack	byte
+	ref opRX16	(*X86Generator,	*BinaryOperation,	*PRegisterValue,	*PValue),	// reg	stack	word
+	ref opRX32	(*X86Generator,	*BinaryOperation,	*PRegisterValue,	*PValue),	// reg	stack	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// reg	stack	qword
+	ref opRX8	(*X86Generator,	*BinaryOperation,	*PRegisterValue,	*PValue),	// reg	memory	byte
+	ref opRX16	(*X86Generator,	*BinaryOperation,	*PRegisterValue,	*PValue),	// reg	memory	word
+	ref opRX32	(*X86Generator,	*BinaryOperation,	*PRegisterValue,	*PValue),	// reg	memory	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// reg	memory	qword
+	ref addRI8	(*X86Generator,	*BinaryOperation,	*PRegisterValue,	*PIntegerValue),	// reg	imm	byte
+	ref addRI16	(*X86Generator,	*BinaryOperation,	*PRegisterValue,	*PIntegerValue),	// reg	imm	word
+	ref addRI32	(*X86Generator,	*BinaryOperation,	*PRegisterValue,	*PIntegerValue),	// reg	imm	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// reg	imm	qword
+	ref opRO8	(*X86Generator,	*BinaryOperation,	*PRegisterValue,	*PValue),	// reg	other	byte
+	ref opRO16	(*X86Generator,	*BinaryOperation,	*PRegisterValue,	*PValue),	// reg	other	word
+	ref opRO32	(*X86Generator,	*BinaryOperation,	*PRegisterValue,	*PValue),	// reg	other	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// reg	other	qword
+	ref opXR8	(*X86Generator,	*BinaryOperation,	*PValue,	*PRegisterValue),	// stack	reg	byte
+	ref opXR16	(*X86Generator,	*BinaryOperation,	*PValue,	*PRegisterValue),	// stack	reg	word
+	ref opXR32	(*X86Generator,	*BinaryOperation,	*PValue,	*PRegisterValue),	// stack	reg	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	reg	qword
+	ref opXO8	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	stack	byte
+	ref opXO16	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	stack	word
+	ref opXO32	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	stack	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	stack	qword
+	ref opXO8	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	memory	byte
+	ref opXO16	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	memory	word
+	ref opXO32	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	memory	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	memory	qword
+	ref opXI8	(*X86Generator,	*BinaryOperation,	*PValue,	*PIntegerValue),	// stack	imm	byte
+	ref opXI16	(*X86Generator,	*BinaryOperation,	*PValue,	*PIntegerValue),	// stack	imm	word
+	ref opXI32	(*X86Generator,	*BinaryOperation,	*PValue,	*PIntegerValue),	// stack	imm	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	imm	qword
+	ref opXO8	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	other	byte
+	ref opXO16	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	other	word
+	ref opXO32	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	other	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	other	qword
+	ref opXR8	(*X86Generator,	*BinaryOperation,	*PValue,	*PRegisterValue),	// memory	reg	byte
+	ref opXR16	(*X86Generator,	*BinaryOperation,	*PValue,	*PRegisterValue),	// memory	reg	word
+	ref opXR32	(*X86Generator,	*BinaryOperation,	*PValue,	*PRegisterValue),	// memory	reg	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	reg	qword
+	ref opXO8	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	stack	byte
+	ref opXO16	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	stack	word
+	ref opXO32	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	stack	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	stack	qword
+	ref opXO8	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	memory	byte
+	ref opXO16	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	memory	word
+	ref opXO32	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	memory	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	memory	qword
+	ref opXI8	(*X86Generator,	*BinaryOperation,	*PValue,	*PIntegerValue),	// memory	imm	byte
+	ref opXI16	(*X86Generator,	*BinaryOperation,	*PValue,	*PIntegerValue),	// memory	imm	word
+	ref opXI32	(*X86Generator,	*BinaryOperation,	*PValue,	*PIntegerValue),	// memory	imm	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	imm	qword
+	ref opXO8	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	other	byte
+	ref opXO16	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	other	word
+	ref opXO32	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	other	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	other	qword
+	nil,					// other	reg	byte
+	nil,					// other	reg	word
+	nil,					// other	reg	dword
+	nil,					// other	reg	qword
+	nil,					// other	stack	byte
+	nil,					// other	stack	word
+	nil,					// other	stack	dword
+	nil,					// other	stack	qword
+	nil,					// other	memory	byte
+	nil,					// other	memory	word
+	nil,					// other	memory	dword
+	nil,					// other	memory	qword
+	nil,					// other	imm	byte
+	nil,					// other	imm	word
+	nil,					// other	imm	dword
+	nil,					// other	imm	qword
+	nil,					// other	other	byte
+	nil,					// other	other	word
+	nil,					// other	other	dword
+	nil,					// other	other	qword
+	
+	__add64,	// op64
+	0x02,	// op reg, r/m
+	0x00,	// op r/m, reg
+	0x04,	// op al/ax/eax, imm
+	0x80,	// op r/m, imm
+	0x00,	// op r/m, imm (/reg)
+	0x40,	// inc/dec reg16/32 (add/sub only)
+	0x00,	// inc/dec rm (/reg) (add/sub only)
+	0x12,	// op reg, r/m with CF
+	0x10,	// op r/m, reg with CF
+	0x80,	// op r/m, imm with CF
+	0x02,	// op r/m, imm with CF (/reg)
+
+	0,	// op r/m (/reg)
+	false]	// is signed
+//[cf]
+//[of]:sub
+static sub_operation = BinaryOperation [
+	ref opRX8	(*X86Generator,	*BinaryOperation,	*PRegisterValue,	*PValue),	// reg	reg	byte
+	ref opRX16	(*X86Generator,	*BinaryOperation,	*PRegisterValue,	*PValue),	// reg	reg	word
+	ref opRX32	(*X86Generator,	*BinaryOperation,	*PRegisterValue,	*PValue),	// reg	reg	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// reg	reg	qword
+	ref opRX8	(*X86Generator,	*BinaryOperation,	*PRegisterValue,	*PValue),	// reg	stack	byte
+	ref opRX16	(*X86Generator,	*BinaryOperation,	*PRegisterValue,	*PValue),	// reg	stack	word
+	ref opRX32	(*X86Generator,	*BinaryOperation,	*PRegisterValue,	*PValue),	// reg	stack	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// reg	stack	qword
+	ref opRX8	(*X86Generator,	*BinaryOperation,	*PRegisterValue,	*PValue),	// reg	memory	byte
+	ref opRX16	(*X86Generator,	*BinaryOperation,	*PRegisterValue,	*PValue),	// reg	memory	word
+	ref opRX32	(*X86Generator,	*BinaryOperation,	*PRegisterValue,	*PValue),	// reg	memory	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// reg	memory	qword
+	ref addRI8	(*X86Generator,	*BinaryOperation,	*PRegisterValue,	*PIntegerValue),	// reg	imm	byte
+	ref addRI16	(*X86Generator,	*BinaryOperation,	*PRegisterValue,	*PIntegerValue),	// reg	imm	word
+	ref addRI32	(*X86Generator,	*BinaryOperation,	*PRegisterValue,	*PIntegerValue),	// reg	imm	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// reg	imm	qword
+	ref opRO8	(*X86Generator,	*BinaryOperation,	*PRegisterValue,	*PValue),	// reg	other	byte
+	ref opRO16	(*X86Generator,	*BinaryOperation,	*PRegisterValue,	*PValue),	// reg	other	word
+	ref opRO32	(*X86Generator,	*BinaryOperation,	*PRegisterValue,	*PValue),	// reg	other	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// reg	other	qword
+	ref opXR8	(*X86Generator,	*BinaryOperation,	*PValue,	*PRegisterValue),	// stack	reg	byte
+	ref opXR16	(*X86Generator,	*BinaryOperation,	*PValue,	*PRegisterValue),	// stack	reg	word
+	ref opXR32	(*X86Generator,	*BinaryOperation,	*PValue,	*PRegisterValue),	// stack	reg	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	reg	qword
+	ref opXO8	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	stack	byte
+	ref opXO16	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	stack	word
+	ref opXO32	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	stack	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	stack	qword
+	ref opXO8	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	memory	byte
+	ref opXO16	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	memory	word
+	ref opXO32	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	memory	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	memory	qword
+	ref opXI8	(*X86Generator,	*BinaryOperation,	*PValue,	*PIntegerValue),	// stack	imm	byte
+	ref opXI16	(*X86Generator,	*BinaryOperation,	*PValue,	*PIntegerValue),	// stack	imm	word
+	ref opXI32	(*X86Generator,	*BinaryOperation,	*PValue,	*PIntegerValue),	// stack	imm	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	imm	qword
+	ref opXO8	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	other	byte
+	ref opXO16	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	other	word
+	ref opXO32	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	other	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	other	qword
+	ref opXR8	(*X86Generator,	*BinaryOperation,	*PValue,	*PRegisterValue),	// memory	reg	byte
+	ref opXR16	(*X86Generator,	*BinaryOperation,	*PValue,	*PRegisterValue),	// memory	reg	word
+	ref opXR32	(*X86Generator,	*BinaryOperation,	*PValue,	*PRegisterValue),	// memory	reg	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	reg	qword
+	ref opXO8	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	stack	byte
+	ref opXO16	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	stack	word
+	ref opXO32	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	stack	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	stack	qword
+	ref opXO8	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	memory	byte
+	ref opXO16	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	memory	word
+	ref opXO32	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	memory	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	memory	qword
+	ref opXI8	(*X86Generator,	*BinaryOperation,	*PValue,	*PIntegerValue),	// memory	imm	byte
+	ref opXI16	(*X86Generator,	*BinaryOperation,	*PValue,	*PIntegerValue),	// memory	imm	word
+	ref opXI32	(*X86Generator,	*BinaryOperation,	*PValue,	*PIntegerValue),	// memory	imm	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	imm	qword
+	ref opXO8	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	other	byte
+	ref opXO16	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	other	word
+	ref opXO32	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	other	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	other	qword
+	nil,					// other	reg	byte
+	nil,					// other	reg	word
+	nil,					// other	reg	dword
+	nil,					// other	reg	qword
+	nil,					// other	stack	byte
+	nil,					// other	stack	word
+	nil,					// other	stack	dword
+	nil,					// other	stack	qword
+	nil,					// other	memory	byte
+	nil,					// other	memory	word
+	nil,					// other	memory	dword
+	nil,					// other	memory	qword
+	nil,					// other	imm	byte
+	nil,					// other	imm	word
+	nil,					// other	imm	dword
+	nil,					// other	imm	qword
+	nil,					// other	other	byte
+	nil,					// other	other	word
+	nil,					// other	other	dword
+	nil,					// other	other	qword
+	
+	__sub64,	// op64
+	0x2A,	// op reg, r/m
+	0x28,	// op r/m, reg
+	0x2C,	// op al/ax/eax, imm
+	0x80,	// op r/m, imm
+	0x05,	// op r/m, imm (/reg)
+	0x48,	// inc/dec reg16/32 (add/sub only)
+	0x01,	// inc/dec rm (/reg) (add/sub only)
+	0x1A,	// op reg, r/m with CF
+	0x18,	// op r/m, reg with CF
+	0x80,	// op r/m, imm with CF
+	0x03,	// op r/m, imm with CF (/reg)
+
+	0,	// op r/m (/reg)
+	false]	// is signed
+//[cf]
+//[of]:and
+static and_operation = BinaryOperation [
+	ref opRX8	(*X86Generator,	*BinaryOperation,	*PRegisterValue,	*PValue),	// reg	reg	byte
+	ref opRX16	(*X86Generator,	*BinaryOperation,	*PRegisterValue,	*PValue),	// reg	reg	word
+	ref opRX32	(*X86Generator,	*BinaryOperation,	*PRegisterValue,	*PValue),	// reg	reg	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// reg	reg	qword
+	ref opRX8	(*X86Generator,	*BinaryOperation,	*PRegisterValue,	*PValue),	// reg	stack	byte
+	ref opRX16	(*X86Generator,	*BinaryOperation,	*PRegisterValue,	*PValue),	// reg	stack	word
+	ref opRX32	(*X86Generator,	*BinaryOperation,	*PRegisterValue,	*PValue),	// reg	stack	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// reg	stack	qword
+	ref opRX8	(*X86Generator,	*BinaryOperation,	*PRegisterValue,	*PValue),	// reg	memory	byte
+	ref opRX16	(*X86Generator,	*BinaryOperation,	*PRegisterValue,	*PValue),	// reg	memory	word
+	ref opRX32	(*X86Generator,	*BinaryOperation,	*PRegisterValue,	*PValue),	// reg	memory	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// reg	memory	qword
+	ref opRI8	(*X86Generator,	*BinaryOperation,	*PRegisterValue,	*PIntegerValue),	// reg	imm	byte
+	ref opRI16	(*X86Generator,	*BinaryOperation,	*PRegisterValue,	*PIntegerValue),	// reg	imm	word
+	ref opRI32	(*X86Generator,	*BinaryOperation,	*PRegisterValue,	*PIntegerValue),	// reg	imm	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// reg	imm	qword
+	ref opRO8	(*X86Generator,	*BinaryOperation,	*PRegisterValue,	*PValue),	// reg	other	byte
+	ref opRO16	(*X86Generator,	*BinaryOperation,	*PRegisterValue,	*PValue),	// reg	other	word
+	ref opRO32	(*X86Generator,	*BinaryOperation,	*PRegisterValue,	*PValue),	// reg	other	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// reg	other	qword
+	ref opXR8	(*X86Generator,	*BinaryOperation,	*PValue,	*PRegisterValue),	// stack	reg	byte
+	ref opXR16	(*X86Generator,	*BinaryOperation,	*PValue,	*PRegisterValue),	// stack	reg	word
+	ref opXR32	(*X86Generator,	*BinaryOperation,	*PValue,	*PRegisterValue),	// stack	reg	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	reg	qword
+	ref opXO8	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	stack	byte
+	ref opXO16	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	stack	word
+	ref opXO32	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	stack	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	stack	qword
+	ref opXO8	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	memory	byte
+	ref opXO16	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	memory	word
+	ref opXO32	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	memory	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	memory	qword
+	ref opXI8	(*X86Generator,	*BinaryOperation,	*PValue,	*PIntegerValue),	// stack	imm	byte
+	ref opXI16	(*X86Generator,	*BinaryOperation,	*PValue,	*PIntegerValue),	// stack	imm	word
+	ref opXI32	(*X86Generator,	*BinaryOperation,	*PValue,	*PIntegerValue),	// stack	imm	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	imm	qword
+	ref opXO8	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	other	byte
+	ref opXO16	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	other	word
+	ref opXO32	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	other	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	other	qword
+	ref opXR8	(*X86Generator,	*BinaryOperation,	*PValue,	*PRegisterValue),	// memory	reg	byte
+	ref opXR16	(*X86Generator,	*BinaryOperation,	*PValue,	*PRegisterValue),	// memory	reg	word
+	ref opXR32	(*X86Generator,	*BinaryOperation,	*PValue,	*PRegisterValue),	// memory	reg	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	reg	qword
+	ref opXO8	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	stack	byte
+	ref opXO16	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	stack	word
+	ref opXO32	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	stack	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	stack	qword
+	ref opXO8	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	memory	byte
+	ref opXO16	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	memory	word
+	ref opXO32	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	memory	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	memory	qword
+	ref opXI8	(*X86Generator,	*BinaryOperation,	*PValue,	*PIntegerValue),	// memory	imm	byte
+	ref opXI16	(*X86Generator,	*BinaryOperation,	*PValue,	*PIntegerValue),	// memory	imm	word
+	ref opXI32	(*X86Generator,	*BinaryOperation,	*PValue,	*PIntegerValue),	// memory	imm	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	imm	qword
+	ref opXO8	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	other	byte
+	ref opXO16	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	other	word
+	ref opXO32	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	other	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	other	qword
+	nil,					// other	reg	byte
+	nil,					// other	reg	word
+	nil,					// other	reg	dword
+	nil,					// other	reg	qword
+	nil,					// other	stack	byte
+	nil,					// other	stack	word
+	nil,					// other	stack	dword
+	nil,					// other	stack	qword
+	nil,					// other	memory	byte
+	nil,					// other	memory	word
+	nil,					// other	memory	dword
+	nil,					// other	memory	qword
+	nil,					// other	imm	byte
+	nil,					// other	imm	word
+	nil,					// other	imm	dword
+	nil,					// other	imm	qword
+	nil,					// other	other	byte
+	nil,					// other	other	word
+	nil,					// other	other	dword
+	nil,					// other	other	qword
+	
+	__and64,	// op64
+	0x22,	// op reg, r/m
+	0x20,	// op r/m, reg
+	0x24,	// op al/ax/eax, imm
+	0x80,	// op r/m, imm
+	0x04,	// op r/m, imm (/reg)
+	
+	0,	// inc/dec reg16/32 (add/sub only)
+	0,	// inc/dec rm (/reg) (add/sub only)
+	0,	// op reg, r/m with CF
+	0,	// op r/m, reg with CF
+	0,	// op r/m, imm with CF
+	0,	// op r/m, imm with CF (/reg)
+
+	0,	// op r/m (/reg)
+	false]	// is signed
+//[cf]
+//[of]:or
+static or_operation = BinaryOperation [
+	ref opRX8	(*X86Generator,	*BinaryOperation,	*PRegisterValue,	*PValue),	// reg	reg	byte
+	ref opRX16	(*X86Generator,	*BinaryOperation,	*PRegisterValue,	*PValue),	// reg	reg	word
+	ref opRX32	(*X86Generator,	*BinaryOperation,	*PRegisterValue,	*PValue),	// reg	reg	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// reg	reg	qword
+	ref opRX8	(*X86Generator,	*BinaryOperation,	*PRegisterValue,	*PValue),	// reg	stack	byte
+	ref opRX16	(*X86Generator,	*BinaryOperation,	*PRegisterValue,	*PValue),	// reg	stack	word
+	ref opRX32	(*X86Generator,	*BinaryOperation,	*PRegisterValue,	*PValue),	// reg	stack	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// reg	stack	qword
+	ref opRX8	(*X86Generator,	*BinaryOperation,	*PRegisterValue,	*PValue),	// reg	memory	byte
+	ref opRX16	(*X86Generator,	*BinaryOperation,	*PRegisterValue,	*PValue),	// reg	memory	word
+	ref opRX32	(*X86Generator,	*BinaryOperation,	*PRegisterValue,	*PValue),	// reg	memory	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// reg	memory	qword
+	ref opRI8	(*X86Generator,	*BinaryOperation,	*PRegisterValue,	*PIntegerValue),	// reg	imm	byte
+	ref opRI16	(*X86Generator,	*BinaryOperation,	*PRegisterValue,	*PIntegerValue),	// reg	imm	word
+	ref opRI32	(*X86Generator,	*BinaryOperation,	*PRegisterValue,	*PIntegerValue),	// reg	imm	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// reg	imm	qword
+	ref opRO8	(*X86Generator,	*BinaryOperation,	*PRegisterValue,	*PValue),	// reg	other	byte
+	ref opRO16	(*X86Generator,	*BinaryOperation,	*PRegisterValue,	*PValue),	// reg	other	word
+	ref opRO32	(*X86Generator,	*BinaryOperation,	*PRegisterValue,	*PValue),	// reg	other	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// reg	other	qword
+	ref opXR8	(*X86Generator,	*BinaryOperation,	*PValue,	*PRegisterValue),	// stack	reg	byte
+	ref opXR16	(*X86Generator,	*BinaryOperation,	*PValue,	*PRegisterValue),	// stack	reg	word
+	ref opXR32	(*X86Generator,	*BinaryOperation,	*PValue,	*PRegisterValue),	// stack	reg	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	reg	qword
+	ref opXO8	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	stack	byte
+	ref opXO16	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	stack	word
+	ref opXO32	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	stack	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	stack	qword
+	ref opXO8	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	memory	byte
+	ref opXO16	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	memory	word
+	ref opXO32	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	memory	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	memory	qword
+	ref opXI8	(*X86Generator,	*BinaryOperation,	*PValue,	*PIntegerValue),	// stack	imm	byte
+	ref opXI16	(*X86Generator,	*BinaryOperation,	*PValue,	*PIntegerValue),	// stack	imm	word
+	ref opXI32	(*X86Generator,	*BinaryOperation,	*PValue,	*PIntegerValue),	// stack	imm	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	imm	qword
+	ref opXO8	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	other	byte
+	ref opXO16	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	other	word
+	ref opXO32	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	other	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	other	qword
+	ref opXR8	(*X86Generator,	*BinaryOperation,	*PValue,	*PRegisterValue),	// memory	reg	byte
+	ref opXR16	(*X86Generator,	*BinaryOperation,	*PValue,	*PRegisterValue),	// memory	reg	word
+	ref opXR32	(*X86Generator,	*BinaryOperation,	*PValue,	*PRegisterValue),	// memory	reg	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	reg	qword
+	ref opXO8	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	stack	byte
+	ref opXO16	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	stack	word
+	ref opXO32	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	stack	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	stack	qword
+	ref opXO8	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	memory	byte
+	ref opXO16	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	memory	word
+	ref opXO32	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	memory	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	memory	qword
+	ref opXI8	(*X86Generator,	*BinaryOperation,	*PValue,	*PIntegerValue),	// memory	imm	byte
+	ref opXI16	(*X86Generator,	*BinaryOperation,	*PValue,	*PIntegerValue),	// memory	imm	word
+	ref opXI32	(*X86Generator,	*BinaryOperation,	*PValue,	*PIntegerValue),	// memory	imm	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	imm	qword
+	ref opXO8	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	other	byte
+	ref opXO16	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	other	word
+	ref opXO32	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	other	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	other	qword
+	nil,					// other	reg	byte
+	nil,					// other	reg	word
+	nil,					// other	reg	dword
+	nil,					// other	reg	qword
+	nil,					// other	stack	byte
+	nil,					// other	stack	word
+	nil,					// other	stack	dword
+	nil,					// other	stack	qword
+	nil,					// other	memory	byte
+	nil,					// other	memory	word
+	nil,					// other	memory	dword
+	nil,					// other	memory	qword
+	nil,					// other	imm	byte
+	nil,					// other	imm	word
+	nil,					// other	imm	dword
+	nil,					// other	imm	qword
+	nil,					// other	other	byte
+	nil,					// other	other	word
+	nil,					// other	other	dword
+	nil,					// other	other	qword
+	
+	__or64,	// op64
+	0x0A,	// op reg, r/m
+	0x08,	// op r/m, reg
+	0x0C,	// op al/ax/eax, imm
+	0x80,	// op r/m, imm
+	0x01,	// op r/m, imm (/reg)
+	
+	0,	// inc/dec reg16/32 (add/sub only)
+	0,	// inc/dec rm (/reg) (add/sub only)
+	0,	// op reg, r/m with CF
+	0,	// op r/m, reg with CF
+	0,	// op r/m, imm with CF
+	0,	// op r/m, imm with CF (/reg)
+
+	0,	// op r/m (/reg)
+	false]	// is signed
+//[cf]
+//[of]:xor
+static xor_operation = BinaryOperation [
+	ref opRX8	(*X86Generator,	*BinaryOperation,	*PRegisterValue,	*PValue),	// reg	reg	byte
+	ref opRX16	(*X86Generator,	*BinaryOperation,	*PRegisterValue,	*PValue),	// reg	reg	word
+	ref opRX32	(*X86Generator,	*BinaryOperation,	*PRegisterValue,	*PValue),	// reg	reg	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// reg	reg	qword
+	ref opRX8	(*X86Generator,	*BinaryOperation,	*PRegisterValue,	*PValue),	// reg	stack	byte
+	ref opRX16	(*X86Generator,	*BinaryOperation,	*PRegisterValue,	*PValue),	// reg	stack	word
+	ref opRX32	(*X86Generator,	*BinaryOperation,	*PRegisterValue,	*PValue),	// reg	stack	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// reg	stack	qword
+	ref opRX8	(*X86Generator,	*BinaryOperation,	*PRegisterValue,	*PValue),	// reg	memory	byte
+	ref opRX16	(*X86Generator,	*BinaryOperation,	*PRegisterValue,	*PValue),	// reg	memory	word
+	ref opRX32	(*X86Generator,	*BinaryOperation,	*PRegisterValue,	*PValue),	// reg	memory	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// reg	memory	qword
+	ref opRI8	(*X86Generator,	*BinaryOperation,	*PRegisterValue,	*PIntegerValue),	// reg	imm	byte
+	ref opRI16	(*X86Generator,	*BinaryOperation,	*PRegisterValue,	*PIntegerValue),	// reg	imm	word
+	ref opRI32	(*X86Generator,	*BinaryOperation,	*PRegisterValue,	*PIntegerValue),	// reg	imm	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// reg	imm	qword
+	ref opRO8	(*X86Generator,	*BinaryOperation,	*PRegisterValue,	*PValue),	// reg	other	byte
+	ref opRO16	(*X86Generator,	*BinaryOperation,	*PRegisterValue,	*PValue),	// reg	other	word
+	ref opRO32	(*X86Generator,	*BinaryOperation,	*PRegisterValue,	*PValue),	// reg	other	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// reg	other	qword
+	ref opXR8	(*X86Generator,	*BinaryOperation,	*PValue,	*PRegisterValue),	// stack	reg	byte
+	ref opXR16	(*X86Generator,	*BinaryOperation,	*PValue,	*PRegisterValue),	// stack	reg	word
+	ref opXR32	(*X86Generator,	*BinaryOperation,	*PValue,	*PRegisterValue),	// stack	reg	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	reg	qword
+	ref opXO8	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	stack	byte
+	ref opXO16	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	stack	word
+	ref opXO32	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	stack	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	stack	qword
+	ref opXO8	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	memory	byte
+	ref opXO16	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	memory	word
+	ref opXO32	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	memory	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	memory	qword
+	ref opXI8	(*X86Generator,	*BinaryOperation,	*PValue,	*PIntegerValue),	// stack	imm	byte
+	ref opXI16	(*X86Generator,	*BinaryOperation,	*PValue,	*PIntegerValue),	// stack	imm	word
+	ref opXI32	(*X86Generator,	*BinaryOperation,	*PValue,	*PIntegerValue),	// stack	imm	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	imm	qword
+	ref opXO8	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	other	byte
+	ref opXO16	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	other	word
+	ref opXO32	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	other	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	other	qword
+	ref opXR8	(*X86Generator,	*BinaryOperation,	*PValue,	*PRegisterValue),	// memory	reg	byte
+	ref opXR16	(*X86Generator,	*BinaryOperation,	*PValue,	*PRegisterValue),	// memory	reg	word
+	ref opXR32	(*X86Generator,	*BinaryOperation,	*PValue,	*PRegisterValue),	// memory	reg	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	reg	qword
+	ref opXO8	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	stack	byte
+	ref opXO16	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	stack	word
+	ref opXO32	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	stack	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	stack	qword
+	ref opXO8	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	memory	byte
+	ref opXO16	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	memory	word
+	ref opXO32	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	memory	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	memory	qword
+	ref opXI8	(*X86Generator,	*BinaryOperation,	*PValue,	*PIntegerValue),	// memory	imm	byte
+	ref opXI16	(*X86Generator,	*BinaryOperation,	*PValue,	*PIntegerValue),	// memory	imm	word
+	ref opXI32	(*X86Generator,	*BinaryOperation,	*PValue,	*PIntegerValue),	// memory	imm	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	imm	qword
+	ref opXO8	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	other	byte
+	ref opXO16	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	other	word
+	ref opXO32	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	other	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	other	qword
+	nil,					// other	reg	byte
+	nil,					// other	reg	word
+	nil,					// other	reg	dword
+	nil,					// other	reg	qword
+	nil,					// other	stack	byte
+	nil,					// other	stack	word
+	nil,					// other	stack	dword
+	nil,					// other	stack	qword
+	nil,					// other	memory	byte
+	nil,					// other	memory	word
+	nil,					// other	memory	dword
+	nil,					// other	memory	qword
+	nil,					// other	imm	byte
+	nil,					// other	imm	word
+	nil,					// other	imm	dword
+	nil,					// other	imm	qword
+	nil,					// other	other	byte
+	nil,					// other	other	word
+	nil,					// other	other	dword
+	nil,					// other	other	qword
+	
+	__xor64,	// op64
+	0x32,	// op reg, r/m
+	0x30,	// op r/m, reg
+	0x34,	// op al/ax/eax, imm
+	0x80,	// op r/m, imm
+	0x06,	// op r/m, imm (/reg)
+	
+	0,	// inc/dec reg16/32 (add/sub only)
+	0,	// inc/dec rm (/reg) (add/sub only)
+	0,	// op reg, r/m with CF
+	0,	// op r/m, reg with CF
+	0,	// op r/m, imm with CF
+	0,	// op r/m, imm with CF (/reg)
+
+	0,	// op r/m (/reg)
+	false]	// is signed
+//[cf]
+
+//[of]:mul
+static mul_operation = BinaryOperation [
+	ref mulVX8	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// reg	reg	byte
+	ref mulVX16	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// reg	reg	word
+	ref mulVX32	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// reg	reg	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// reg	reg	qword
+	ref mulVX8	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// reg	stack	byte
+	ref mulVX16	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// reg	stack	word
+	ref mulVX32	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// reg	stack	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// reg	stack	qword
+	ref mulVX8	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// reg	memory	byte
+	ref mulVX16	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// reg	memory	word
+	ref mulVX32	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// reg	memory	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// reg	memory	qword
+	ref mulXI8	(*X86Generator,	*BinaryOperation,	*PValue,	*PIntegerValue),	// reg	imm	byte
+	ref mulXI16	(*X86Generator,	*BinaryOperation,	*PValue,	*PIntegerValue),	// reg	imm	word
+	ref mulXI32	(*X86Generator,	*BinaryOperation,	*PValue,	*PIntegerValue),	// reg	imm	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// reg	imm	qword
+	ref mulXO8	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// reg	other	byte
+	ref mulXO16	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// reg	other	word
+	ref mulXO32	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// reg	other	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// reg	other	qword
+	ref mulVX8	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	reg	byte
+	ref mulVX16	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	reg	word
+	ref mulVX32	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	reg	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	reg	qword
+	ref mulVX8	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	stack	byte
+	ref mulVX16	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	stack	word
+	ref mulVX32	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	stack	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	stack	qword
+	ref mulVX8	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	memory	byte
+	ref mulVX16	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	memory	word
+	ref mulVX32	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	memory	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	memory	qword
+	ref mulXI8	(*X86Generator,	*BinaryOperation,	*PValue,	*PIntegerValue),	// stack	imm	byte
+	ref mulXI16	(*X86Generator,	*BinaryOperation,	*PValue,	*PIntegerValue),	// stack	imm	word
+	ref mulXI32	(*X86Generator,	*BinaryOperation,	*PValue,	*PIntegerValue),	// stack	imm	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	imm	qword
+	ref mulXO8	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	other	byte
+	ref mulXO16	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	other	word
+	ref mulXO32	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	other	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	other	qword
+	ref mulVX8	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	reg	byte
+	ref mulVX16	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	reg	word
+	ref mulVX32	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	reg	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	reg	qword
+	ref mulVX8	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	stack	byte
+	ref mulVX16	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	stack	word
+	ref mulVX32	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	stack	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	stack	qword
+	ref mulVX8	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	memory	byte
+	ref mulVX16	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	memory	word
+	ref mulVX32	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	memory	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	memory	qword
+	ref mulXI8	(*X86Generator,	*BinaryOperation,	*PValue,	*PIntegerValue),	// memory	imm	byte
+	ref mulXI16	(*X86Generator,	*BinaryOperation,	*PValue,	*PIntegerValue),	// memory	imm	word
+	ref mulXI32	(*X86Generator,	*BinaryOperation,	*PValue,	*PIntegerValue),	// memory	imm	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	imm	qword
+	ref mulXO8	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	other	byte
+	ref mulXO16	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	other	word
+	ref mulXO32	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	other	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	other	qword
+	nil,					// other	reg	byte
+	nil,					// other	reg	word
+	nil,					// other	reg	dword
+	nil,					// other	reg	qword
+	nil,					// other	stack	byte
+	nil,					// other	stack	word
+	nil,					// other	stack	dword
+	nil,					// other	stack	qword
+	nil,					// other	memory	byte
+	nil,					// other	memory	word
+	nil,					// other	memory	dword
+	nil,					// other	memory	qword
+	nil,					// other	imm	byte
+	nil,					// other	imm	word
+	nil,					// other	imm	dword
+	nil,					// other	imm	qword
+	nil,					// other	other	byte
+	nil,					// other	other	word
+	nil,					// other	other	dword
+	nil,					// other	other	qword
+	
+	__umul64,	// op64
+	0,	// op reg, r/m
+	0,	// op r/m, reg
+	0,	// op al/ax/eax, imm
+	0,	// op r/m, imm
+	0,	// op r/m, imm (/reg)
+	0,	// inc/dec reg16/32 (add/sub only)
+	0,	// inc/dec rm (/reg) (add/sub only)
+	0,	// op reg, r/m with CF
+	0,	// op r/m, reg with CF
+	0,	// op r/m, imm with CF
+	0,	// op r/m, imm with CF (/reg)
+
+	4,	// op r/m (/reg)
+	false]	// is signed
+//[cf]
+//[of]:imul
+static imul_operation = BinaryOperation [
+	ref mulVX8	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// reg	reg	byte
+	ref mulVX16	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// reg	reg	word
+	ref mulVX32	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// reg	reg	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// reg	reg	qword
+	ref mulVX8	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// reg	stack	byte
+	ref mulVX16	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// reg	stack	word
+	ref mulVX32	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// reg	stack	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// reg	stack	qword
+	ref mulVX8	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// reg	memory	byte
+	ref mulVX16	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// reg	memory	word
+	ref mulVX32	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// reg	memory	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// reg	memory	qword
+	ref mulXI8	(*X86Generator,	*BinaryOperation,	*PValue,	*PIntegerValue),	// reg	imm	byte
+	ref mulXI16	(*X86Generator,	*BinaryOperation,	*PValue,	*PIntegerValue),	// reg	imm	word
+	ref mulXI32	(*X86Generator,	*BinaryOperation,	*PValue,	*PIntegerValue),	// reg	imm	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// reg	imm	qword
+	ref mulXO8	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// reg	other	byte
+	ref mulXO16	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// reg	other	word
+	ref mulXO32	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// reg	other	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// reg	other	qword
+	ref mulVX8	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	reg	byte
+	ref mulVX16	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	reg	word
+	ref mulVX32	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	reg	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	reg	qword
+	ref mulVX8	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	stack	byte
+	ref mulVX16	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	stack	word
+	ref mulVX32	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	stack	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	stack	qword
+	ref mulVX8	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	memory	byte
+	ref mulVX16	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	memory	word
+	ref mulVX32	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	memory	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	memory	qword
+	ref mulXI8	(*X86Generator,	*BinaryOperation,	*PValue,	*PIntegerValue),	// stack	imm	byte
+	ref mulXI16	(*X86Generator,	*BinaryOperation,	*PValue,	*PIntegerValue),	// stack	imm	word
+	ref mulXI32	(*X86Generator,	*BinaryOperation,	*PValue,	*PIntegerValue),	// stack	imm	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	imm	qword
+	ref mulXO8	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	other	byte
+	ref mulXO16	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	other	word
+	ref mulXO32	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	other	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	other	qword
+	ref mulVX8	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	reg	byte
+	ref mulVX16	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	reg	word
+	ref mulVX32	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	reg	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	reg	qword
+	ref mulVX8	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	stack	byte
+	ref mulVX16	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	stack	word
+	ref mulVX32	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	stack	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	stack	qword
+	ref mulVX8	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	memory	byte
+	ref mulVX16	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	memory	word
+	ref mulVX32	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	memory	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	memory	qword
+	ref mulXI8	(*X86Generator,	*BinaryOperation,	*PValue,	*PIntegerValue),	// memory	imm	byte
+	ref mulXI16	(*X86Generator,	*BinaryOperation,	*PValue,	*PIntegerValue),	// memory	imm	word
+	ref mulXI32	(*X86Generator,	*BinaryOperation,	*PValue,	*PIntegerValue),	// memory	imm	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	imm	qword
+	ref mulXO8	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	other	byte
+	ref mulXO16	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	other	word
+	ref mulXO32	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	other	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	other	qword
+	nil,					// other	reg	byte
+	nil,					// other	reg	word
+	nil,					// other	reg	dword
+	nil,					// other	reg	qword
+	nil,					// other	stack	byte
+	nil,					// other	stack	word
+	nil,					// other	stack	dword
+	nil,					// other	stack	qword
+	nil,					// other	memory	byte
+	nil,					// other	memory	word
+	nil,					// other	memory	dword
+	nil,					// other	memory	qword
+	nil,					// other	imm	byte
+	nil,					// other	imm	word
+	nil,					// other	imm	dword
+	nil,					// other	imm	qword
+	nil,					// other	other	byte
+	nil,					// other	other	word
+	nil,					// other	other	dword
+	nil,					// other	other	qword
+	
+	__umul64,	// op64
+	0,	// op reg, r/m
+	0,	// op r/m, reg
+	0,	// op al/ax/eax, imm
+	0,	// op r/m, imm
+	0,	// op r/m, imm (/reg)
+	0,	// inc/dec reg16/32 (add/sub only)
+	0,	// inc/dec rm (/reg) (add/sub only)
+	0,	// op reg, r/m with CF
+	0,	// op r/m, reg with CF
+	0,	// op r/m, imm with CF
+	0,	// op r/m, imm with CF (/reg)
+
+	5,	// op r/m (/reg)
+	true]	// is signed
+//[cf]
+//[of]:div
+static div_operation = BinaryOperation [
+	ref divVX8	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// reg	reg	byte
+	ref divVX16	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// reg	reg	word
+	ref divVX32	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// reg	reg	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// reg	reg	qword
+	ref divVX8	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// reg	stack	byte
+	ref divVX16	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// reg	stack	word
+	ref divVX32	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// reg	stack	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// reg	stack	qword
+	ref divVX8	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// reg	memory	byte
+	ref divVX16	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// reg	memory	word
+	ref divVX32	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// reg	memory	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// reg	memory	qword
+	ref divXI8	(*X86Generator,	*BinaryOperation,	*PValue,	*PIntegerValue),	// reg	imm	byte
+	ref divXI16	(*X86Generator,	*BinaryOperation,	*PValue,	*PIntegerValue),	// reg	imm	word
+	ref divXI32	(*X86Generator,	*BinaryOperation,	*PValue,	*PIntegerValue),	// reg	imm	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// reg	imm	qword
+	ref divXO8	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// reg	other	byte
+	ref divXO16	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// reg	other	word
+	ref divXO32	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// reg	other	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// reg	other	qword
+	ref divVX8	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	reg	byte
+	ref divVX16	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	reg	word
+	ref divVX32	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	reg	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	reg	qword
+	ref divVX8	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	stack	byte
+	ref divVX16	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	stack	word
+	ref divVX32	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	stack	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	stack	qword
+	ref divVX8	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	memory	byte
+	ref divVX16	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	memory	word
+	ref divVX32	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	memory	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	memory	qword
+	ref divXI8	(*X86Generator,	*BinaryOperation,	*PValue,	*PIntegerValue),	// stack	imm	byte
+	ref divXI16	(*X86Generator,	*BinaryOperation,	*PValue,	*PIntegerValue),	// stack	imm	word
+	ref divXI32	(*X86Generator,	*BinaryOperation,	*PValue,	*PIntegerValue),	// stack	imm	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	imm	qword
+	ref divXO8	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	other	byte
+	ref divXO16	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	other	word
+	ref divXO32	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	other	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	other	qword
+	ref divVX8	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	reg	byte
+	ref divVX16	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	reg	word
+	ref divVX32	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	reg	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	reg	qword
+	ref divVX8	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	stack	byte
+	ref divVX16	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	stack	word
+	ref divVX32	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	stack	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	stack	qword
+	ref divVX8	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	memory	byte
+	ref divVX16	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	memory	word
+	ref divVX32	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	memory	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	memory	qword
+	ref divXI8	(*X86Generator,	*BinaryOperation,	*PValue,	*PIntegerValue),	// memory	imm	byte
+	ref divXI16	(*X86Generator,	*BinaryOperation,	*PValue,	*PIntegerValue),	// memory	imm	word
+	ref divXI32	(*X86Generator,	*BinaryOperation,	*PValue,	*PIntegerValue),	// memory	imm	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	imm	qword
+	ref divXO8	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	other	byte
+	ref divXO16	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	other	word
+	ref divXO32	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	other	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	other	qword
+	nil,					// other	reg	byte
+	nil,					// other	reg	word
+	nil,					// other	reg	dword
+	nil,					// other	reg	qword
+	nil,					// other	stack	byte
+	nil,					// other	stack	word
+	nil,					// other	stack	dword
+	nil,					// other	stack	qword
+	nil,					// other	memory	byte
+	nil,					// other	memory	word
+	nil,					// other	memory	dword
+	nil,					// other	memory	qword
+	nil,					// other	imm	byte
+	nil,					// other	imm	word
+	nil,					// other	imm	dword
+	nil,					// other	imm	qword
+	nil,					// other	other	byte
+	nil,					// other	other	word
+	nil,					// other	other	dword
+	nil,					// other	other	qword
+	
+	__udiv64,	// op64
+	0,	// op reg, r/m
+	0,	// op r/m, reg
+	0,	// op al/ax/eax, imm
+	0,	// op r/m, imm
+	0,	// op r/m, imm (/reg)
+	0,	// inc/dec reg16/32 (add/sub only)
+	0,	// inc/dec rm (/reg) (add/sub only)
+	0,	// op reg, r/m with CF
+	0,	// op r/m, reg with CF
+	0,	// op r/m, imm with CF
+	0,	// op r/m, imm with CF (/reg)
+
+	6,	// op r/m (/reg)
+	false]	// is signed
+//[cf]
+//[of]:idiv
+static idiv_operation = BinaryOperation [
+	ref divVX8	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// reg	reg	byte
+	ref divVX16	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// reg	reg	word
+	ref divVX32	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// reg	reg	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// reg	reg	qword
+	ref divVX8	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// reg	stack	byte
+	ref divVX16	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// reg	stack	word
+	ref divVX32	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// reg	stack	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// reg	stack	qword
+	ref divVX8	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// reg	memory	byte
+	ref divVX16	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// reg	memory	word
+	ref divVX32	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// reg	memory	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// reg	memory	qword
+	ref divXI8	(*X86Generator,	*BinaryOperation,	*PValue,	*PIntegerValue),	// reg	imm	byte
+	ref divXI16	(*X86Generator,	*BinaryOperation,	*PValue,	*PIntegerValue),	// reg	imm	word
+	ref divXI32	(*X86Generator,	*BinaryOperation,	*PValue,	*PIntegerValue),	// reg	imm	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// reg	imm	qword
+	ref divXO8	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// reg	other	byte
+	ref divXO16	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// reg	other	word
+	ref divXO32	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// reg	other	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// reg	other	qword
+	ref divVX8	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	reg	byte
+	ref divVX16	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	reg	word
+	ref divVX32	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	reg	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	reg	qword
+	ref divVX8	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	stack	byte
+	ref divVX16	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	stack	word
+	ref divVX32	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	stack	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	stack	qword
+	ref divVX8	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	memory	byte
+	ref divVX16	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	memory	word
+	ref divVX32	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	memory	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	memory	qword
+	ref divXI8	(*X86Generator,	*BinaryOperation,	*PValue,	*PIntegerValue),	// stack	imm	byte
+	ref divXI16	(*X86Generator,	*BinaryOperation,	*PValue,	*PIntegerValue),	// stack	imm	word
+	ref divXI32	(*X86Generator,	*BinaryOperation,	*PValue,	*PIntegerValue),	// stack	imm	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	imm	qword
+	ref divXO8	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	other	byte
+	ref divXO16	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	other	word
+	ref divXO32	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	other	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	other	qword
+	ref divVX8	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	reg	byte
+	ref divVX16	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	reg	word
+	ref divVX32	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	reg	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	reg	qword
+	ref divVX8	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	stack	byte
+	ref divVX16	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	stack	word
+	ref divVX32	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	stack	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	stack	qword
+	ref divVX8	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	memory	byte
+	ref divVX16	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	memory	word
+	ref divVX32	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	memory	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	memory	qword
+	ref divXI8	(*X86Generator,	*BinaryOperation,	*PValue,	*PIntegerValue),	// memory	imm	byte
+	ref divXI16	(*X86Generator,	*BinaryOperation,	*PValue,	*PIntegerValue),	// memory	imm	word
+	ref divXI32	(*X86Generator,	*BinaryOperation,	*PValue,	*PIntegerValue),	// memory	imm	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	imm	qword
+	ref divXO8	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	other	byte
+	ref divXO16	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	other	word
+	ref divXO32	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	other	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	other	qword
+	nil,					// other	reg	byte
+	nil,					// other	reg	word
+	nil,					// other	reg	dword
+	nil,					// other	reg	qword
+	nil,					// other	stack	byte
+	nil,					// other	stack	word
+	nil,					// other	stack	dword
+	nil,					// other	stack	qword
+	nil,					// other	memory	byte
+	nil,					// other	memory	word
+	nil,					// other	memory	dword
+	nil,					// other	memory	qword
+	nil,					// other	imm	byte
+	nil,					// other	imm	word
+	nil,					// other	imm	dword
+	nil,					// other	imm	qword
+	nil,					// other	other	byte
+	nil,					// other	other	word
+	nil,					// other	other	dword
+	nil,					// other	other	qword
+	
+	__sdiv64,	// op64
+	0,	// op reg, r/m
+	0,	// op r/m, reg
+	0,	// op al/ax/eax, imm
+	0,	// op r/m, imm
+	0,	// op r/m, imm (/reg)
+	0,	// inc/dec reg16/32 (add/sub only)
+	0,	// inc/dec rm (/reg) (add/sub only)
+	0,	// op reg, r/m with CF
+	0,	// op r/m, reg with CF
+	0,	// op r/m, imm with CF
+	0,	// op r/m, imm with CF (/reg)
+
+	7,	// op r/m (/reg)
+	true]	// is signed
+//[cf]
+//[of]:mod
+static mod_operation = BinaryOperation [
+	ref modVX8	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// reg	reg	byte
+	ref modVX16	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// reg	reg	word
+	ref modVX32	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// reg	reg	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// reg	reg	qword
+	ref modVX8	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// reg	stack	byte
+	ref modVX16	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// reg	stack	word
+	ref modVX32	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// reg	stack	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// reg	stack	qword
+	ref modVX8	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// reg	memory	byte
+	ref modVX16	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// reg	memory	word
+	ref modVX32	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// reg	memory	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// reg	memory	qword
+	ref modXI8	(*X86Generator,	*BinaryOperation,	*PValue,	*PIntegerValue),	// reg	imm	byte
+	ref modXI16	(*X86Generator,	*BinaryOperation,	*PValue,	*PIntegerValue),	// reg	imm	word
+	ref modXI32	(*X86Generator,	*BinaryOperation,	*PValue,	*PIntegerValue),	// reg	imm	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// reg	imm	qword
+	ref modXO8	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// reg	other	byte
+	ref modXO16	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// reg	other	word
+	ref modXO32	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// reg	other	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// reg	other	qword
+	ref modVX8	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	reg	byte
+	ref modVX16	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	reg	word
+	ref modVX32	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	reg	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	reg	qword
+	ref modVX8	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	stack	byte
+	ref modVX16	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	stack	word
+	ref modVX32	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	stack	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	stack	qword
+	ref modVX8	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	memory	byte
+	ref modVX16	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	memory	word
+	ref modVX32	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	memory	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	memory	qword
+	ref modXI8	(*X86Generator,	*BinaryOperation,	*PValue,	*PIntegerValue),	// stack	imm	byte
+	ref modXI16	(*X86Generator,	*BinaryOperation,	*PValue,	*PIntegerValue),	// stack	imm	word
+	ref modXI32	(*X86Generator,	*BinaryOperation,	*PValue,	*PIntegerValue),	// stack	imm	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	imm	qword
+	ref modXO8	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	other	byte
+	ref modXO16	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	other	word
+	ref modXO32	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	other	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	other	qword
+	ref modVX8	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	reg	byte
+	ref modVX16	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	reg	word
+	ref modVX32	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	reg	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	reg	qword
+	ref modVX8	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	stack	byte
+	ref modVX16	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	stack	word
+	ref modVX32	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	stack	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	stack	qword
+	ref modVX8	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	memory	byte
+	ref modVX16	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	memory	word
+	ref modVX32	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	memory	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	memory	qword
+	ref modXI8	(*X86Generator,	*BinaryOperation,	*PValue,	*PIntegerValue),	// memory	imm	byte
+	ref modXI16	(*X86Generator,	*BinaryOperation,	*PValue,	*PIntegerValue),	// memory	imm	word
+	ref modXI32	(*X86Generator,	*BinaryOperation,	*PValue,	*PIntegerValue),	// memory	imm	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	imm	qword
+	ref modXO8	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	other	byte
+	ref modXO16	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	other	word
+	ref modXO32	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	other	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	other	qword
+	nil,					// other	reg	byte
+	nil,					// other	reg	word
+	nil,					// other	reg	dword
+	nil,					// other	reg	qword
+	nil,					// other	stack	byte
+	nil,					// other	stack	word
+	nil,					// other	stack	dword
+	nil,					// other	stack	qword
+	nil,					// other	memory	byte
+	nil,					// other	memory	word
+	nil,					// other	memory	dword
+	nil,					// other	memory	qword
+	nil,					// other	imm	byte
+	nil,					// other	imm	word
+	nil,					// other	imm	dword
+	nil,					// other	imm	qword
+	nil,					// other	other	byte
+	nil,					// other	other	word
+	nil,					// other	other	dword
+	nil,					// other	other	qword
+	
+	__umod64,	// op64
+	0,	// op reg, r/m
+	0,	// op r/m, reg
+	0,	// op al/ax/eax, imm
+	0,	// op r/m, imm
+	0,	// op r/m, imm (/reg)
+	0,	// inc/dec reg16/32 (add/sub only)
+	0,	// inc/dec rm (/reg) (add/sub only)
+	0,	// op reg, r/m with CF
+	0,	// op r/m, reg with CF
+	0,	// op r/m, imm with CF
+	0,	// op r/m, imm with CF (/reg)
+
+	6,	// op r/m (/reg)
+	false]	// is signed
+//[cf]
+//[of]:imod
+static imod_operation = BinaryOperation [
+	ref modVX8	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// reg	reg	byte
+	ref modVX16	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// reg	reg	word
+	ref modVX32	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// reg	reg	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// reg	reg	qword
+	ref modVX8	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// reg	stack	byte
+	ref modVX16	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// reg	stack	word
+	ref modVX32	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// reg	stack	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// reg	stack	qword
+	ref modVX8	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// reg	memory	byte
+	ref modVX16	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// reg	memory	word
+	ref modVX32	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// reg	memory	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// reg	memory	qword
+	ref modXI8	(*X86Generator,	*BinaryOperation,	*PValue,	*PIntegerValue),	// reg	imm	byte
+	ref modXI16	(*X86Generator,	*BinaryOperation,	*PValue,	*PIntegerValue),	// reg	imm	word
+	ref modXI32	(*X86Generator,	*BinaryOperation,	*PValue,	*PIntegerValue),	// reg	imm	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// reg	imm	qword
+	ref modXO8	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// reg	other	byte
+	ref modXO16	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// reg	other	word
+	ref modXO32	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// reg	other	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// reg	other	qword
+	ref modVX8	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	reg	byte
+	ref modVX16	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	reg	word
+	ref modVX32	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	reg	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	reg	qword
+	ref modVX8	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	stack	byte
+	ref modVX16	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	stack	word
+	ref modVX32	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	stack	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	stack	qword
+	ref modVX8	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	memory	byte
+	ref modVX16	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	memory	word
+	ref modVX32	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	memory	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	memory	qword
+	ref modXI8	(*X86Generator,	*BinaryOperation,	*PValue,	*PIntegerValue),	// stack	imm	byte
+	ref modXI16	(*X86Generator,	*BinaryOperation,	*PValue,	*PIntegerValue),	// stack	imm	word
+	ref modXI32	(*X86Generator,	*BinaryOperation,	*PValue,	*PIntegerValue),	// stack	imm	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	imm	qword
+	ref modXO8	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	other	byte
+	ref modXO16	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	other	word
+	ref modXO32	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	other	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// stack	other	qword
+	ref modVX8	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	reg	byte
+	ref modVX16	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	reg	word
+	ref modVX32	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	reg	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	reg	qword
+	ref modVX8	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	stack	byte
+	ref modVX16	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	stack	word
+	ref modVX32	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	stack	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	stack	qword
+	ref modVX8	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	memory	byte
+	ref modVX16	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	memory	word
+	ref modVX32	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	memory	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	memory	qword
+	ref modXI8	(*X86Generator,	*BinaryOperation,	*PValue,	*PIntegerValue),	// memory	imm	byte
+	ref modXI16	(*X86Generator,	*BinaryOperation,	*PValue,	*PIntegerValue),	// memory	imm	word
+	ref modXI32	(*X86Generator,	*BinaryOperation,	*PValue,	*PIntegerValue),	// memory	imm	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	imm	qword
+	ref modXO8	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	other	byte
+	ref modXO16	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	other	word
+	ref modXO32	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	other	dword
+	ref opVV64	(*X86Generator,	*BinaryOperation,	*PValue,	*PValue),	// memory	other	qword
+	nil,					// other	reg	byte
+	nil,					// other	reg	word
+	nil,					// other	reg	dword
+	nil,					// other	reg	qword
+	nil,					// other	stack	byte
+	nil,					// other	stack	word
+	nil,					// other	stack	dword
+	nil,					// other	stack	qword
+	nil,					// other	memory	byte
+	nil,					// other	memory	word
+	nil,					// other	memory	dword
+	nil,					// other	memory	qword
+	nil,					// other	imm	byte
+	nil,					// other	imm	word
+	nil,					// other	imm	dword
+	nil,					// other	imm	qword
+	nil,					// other	other	byte
+	nil,					// other	other	word
+	nil,					// other	other	dword
+	nil,					// other	other	qword
+	
+	__smod64,	// op64
+	0,	// op reg, r/m
+	0,	// op r/m, reg
+	0,	// op al/ax/eax, imm
+	0,	// op r/m, imm
+	0,	// op r/m, imm (/reg)
+	0,	// inc/dec reg16/32 (add/sub only)
+	0,	// inc/dec rm (/reg) (add/sub only)
+	0,	// op reg, r/m with CF
+	0,	// op r/m, reg with CF
+	0,	// op r/m, imm with CF
+	0,	// op r/m, imm with CF (/reg)
+
+	6,	// op r/m (/reg)
+	true]	// is signed
+//[cf]
+
+//[of]:shl
+static shl_operation = ShiftOperation [
+	ref shiftRR8	(*X86Generator,	*ShiftOperation,	*PRegisterValue,	*PRegisterValue),	// reg	reg	byte
+	ref shiftRR16	(*X86Generator,	*ShiftOperation,	*PRegisterValue,	*PRegisterValue),	// reg	reg	word
+	ref shiftRR32	(*X86Generator,	*ShiftOperation,	*PRegisterValue,	*PRegisterValue),	// reg	reg	dword
+	ref shiftVV64	(*X86Generator,	*ShiftOperation,	*PValue,	*PValue),	// reg	reg	qword
+	ref shiftRS8	(*X86Generator,	*ShiftOperation,	*PRegisterValue,	*PStackValue),	// reg	stack	byte
+	ref shiftRS16	(*X86Generator,	*ShiftOperation,	*PRegisterValue,	*PStackValue),	// reg	stack	word
+	ref shiftRS32	(*X86Generator,	*ShiftOperation,	*PRegisterValue,	*PStackValue),	// reg	stack	dword
+	ref shiftVV64	(*X86Generator,	*ShiftOperation,	*PValue,	*PValue),	// reg	stack	qword
+	ref shiftRO8	(*X86Generator,	*ShiftOperation,	*PRegisterValue,	*PValue),	// reg	memory	byte
+	ref shiftRO16	(*X86Generator,	*ShiftOperation,	*PRegisterValue,	*PValue),	// reg	memory	word
+	ref shiftRO32	(*X86Generator,	*ShiftOperation,	*PRegisterValue,	*PValue),	// reg	memory	dword
+	ref shiftVV64	(*X86Generator,	*ShiftOperation,	*PValue,	*PValue),	// reg	memory	qword
+	ref shiftXI8	(*X86Generator,	*ShiftOperation,	*PValue,	*PIntegerValue),	// reg	imm	byte
+	ref shiftXI16	(*X86Generator,	*ShiftOperation,	*PValue,	*PIntegerValue),	// reg	imm	word
+	ref shiftXI32	(*X86Generator,	*ShiftOperation,	*PValue,	*PIntegerValue),	// reg	imm	dword
+	ref shiftVV64	(*X86Generator,	*ShiftOperation,	*PValue,	*PValue),	// reg	imm	qword
+	ref shiftRO8	(*X86Generator,	*ShiftOperation,	*PRegisterValue,	*PValue),	// reg	other	byte
+	ref shiftRO16	(*X86Generator,	*ShiftOperation,	*PRegisterValue,	*PValue),	// reg	other	word
+	ref shiftRO32	(*X86Generator,	*ShiftOperation,	*PRegisterValue,	*PValue),	// reg	other	dword
+	ref shiftVV64	(*X86Generator,	*ShiftOperation,	*PValue,	*PValue),	// reg	other	qword
+	ref shiftSR8	(*X86Generator,	*ShiftOperation,	*PStackValue,	*PRegisterValue),	// stack	reg	byte
+	ref shiftSR16	(*X86Generator,	*ShiftOperation,	*PStackValue,	*PRegisterValue),	// stack	reg	word
+	ref shiftSR32	(*X86Generator,	*ShiftOperation,	*PStackValue,	*PRegisterValue),	// stack	reg	dword
+	ref shiftVV64	(*X86Generator,	*ShiftOperation,	*PValue,	*PValue),	// stack	reg	qword
+	ref shiftSS8	(*X86Generator,	*ShiftOperation,	*PStackValue,	*PStackValue),	// stack	stack	byte
+	ref shiftSS16	(*X86Generator,	*ShiftOperation,	*PStackValue,	*PStackValue),	// stack	stack	word
+	ref shiftSS32	(*X86Generator,	*ShiftOperation,	*PStackValue,	*PStackValue),	// stack	stack	dword
+	ref shiftOO	(*X86Generator,	*ShiftOperation,	*PValue,	*PValue),	// stack	stack	qword
+	ref shiftSO8	(*X86Generator,	*ShiftOperation,	*PStackValue,	*PValue),	// stack	memory	byte
+	ref shiftSO16	(*X86Generator,	*ShiftOperation,	*PStackValue,	*PValue),	// stack	memory	word
+	ref shiftSO32	(*X86Generator,	*ShiftOperation,	*PStackValue,	*PValue),	// stack	memory	dword
+	ref shiftOO	(*X86Generator,	*ShiftOperation,	*PValue,	*PValue),	// stack	memory	qword
+	ref shiftXI8	(*X86Generator,	*ShiftOperation,	*PValue,	*PIntegerValue),	// stack	imm	byte
+	ref shiftXI16	(*X86Generator,	*ShiftOperation,	*PValue,	*PIntegerValue),	// stack	imm	word
+	ref shiftXI32	(*X86Generator,	*ShiftOperation,	*PValue,	*PIntegerValue),	// stack	imm	dword
+	ref shiftVV64	(*X86Generator,	*ShiftOperation,	*PValue,	*PValue),	// stack	imm	qword
+	ref shiftSO8	(*X86Generator,	*ShiftOperation,	*PStackValue,	*PValue),	// stack	other	byte
+	ref shiftSO16	(*X86Generator,	*ShiftOperation,	*PStackValue,	*PValue),	// stack	other	word
+	ref shiftSO32	(*X86Generator,	*ShiftOperation,	*PStackValue,	*PValue),	// stack	other	dword
+	ref shiftOO	(*X86Generator,	*ShiftOperation,	*PValue,	*PValue),	// stack	other	qword
+	ref shiftOR8	(*X86Generator,	*ShiftOperation,	*PValue,	*PRegisterValue),	// memory	reg	byte
+	ref shiftOR16	(*X86Generator,	*ShiftOperation,	*PValue,	*PRegisterValue),	// memory	reg	word
+	ref shiftOR32	(*X86Generator,	*ShiftOperation,	*PValue,	*PRegisterValue),	// memory	reg	dword
+	ref shiftVV64	(*X86Generator,	*ShiftOperation,	*PValue,	*PValue),	// memory	reg	qword
+	ref shiftOO	(*X86Generator,	*ShiftOperation,	*PValue,	*PValue),	// memory	stack	byte
+	ref shiftOO	(*X86Generator,	*ShiftOperation,	*PValue,	*PValue),	// memory	stack	word
+	ref shiftOO	(*X86Generator,	*ShiftOperation,	*PValue,	*PValue),	// memory	stack	dword
+	ref shiftOO	(*X86Generator,	*ShiftOperation,	*PValue,	*PValue),	// memory	stack	qword
+	ref shiftOO	(*X86Generator,	*ShiftOperation,	*PValue,	*PValue),	// memory	memory	byte
+	ref shiftOO	(*X86Generator,	*ShiftOperation,	*PValue,	*PValue),	// memory	memory	word
+	ref shiftOO	(*X86Generator,	*ShiftOperation,	*PValue,	*PValue),	// memory	memory	dword
+	ref shiftOO	(*X86Generator,	*ShiftOperation,	*PValue,	*PValue),	// memory	memory	qword
+	ref shiftXI8	(*X86Generator,	*ShiftOperation,	*PValue,	*PIntegerValue),	// memory	imm	byte
+	ref shiftXI16	(*X86Generator,	*ShiftOperation,	*PValue,	*PIntegerValue),	// memory	imm	word
+	ref shiftXI32	(*X86Generator,	*ShiftOperation,	*PValue,	*PIntegerValue),	// memory	imm	dword
+	ref shiftVV64	(*X86Generator,	*ShiftOperation,	*PValue,	*PValue),	// memory	imm	qword
+	ref shiftOO	(*X86Generator,	*ShiftOperation,	*PValue,	*PValue),	// memory	other	byte
+	ref shiftOO	(*X86Generator,	*ShiftOperation,	*PValue,	*PValue),	// memory	other	word
+	ref shiftOO	(*X86Generator,	*ShiftOperation,	*PValue,	*PValue),	// memory	other	dword
+	ref shiftOO	(*X86Generator,	*ShiftOperation,	*PValue,	*PValue),	// memory	other	qword
+	nil,					// other	reg	byte
+	nil,					// other	reg	word
+	nil,					// other		reg	dword
+	nil,					// other	reg	qword
+	nil,					// other	stack	byte
+	nil,					// other	stack	word
+	nil,					// other	stack	dword
+	nil,					// other	stack	qword
+	nil,					// other	memory	byte
+	nil,					// other	memory	word
+	nil,					// other	memory	dword
+	nil,					// other	memory	qword
+	nil,					// other	imm	byte
+	nil,					// other	imm	word
+	nil,					// other	imm	dword
+	nil,					// other	imm	qword
+	nil,					// other	other	byte
+	nil,					// other	other	word
+	nil,					// other	other	dword
+	nil,					// other	other	qword
+	
+	__shl64,	// builtin64
+	0x04]	// register (/r)
+//[cf]
+//[of]:shr
+static shr_operation = ShiftOperation [
+	ref shiftRR8	(*X86Generator,	*ShiftOperation,	*PRegisterValue,	*PRegisterValue),	// reg	reg	byte
+	ref shiftRR16	(*X86Generator,	*ShiftOperation,	*PRegisterValue,	*PRegisterValue),	// reg	reg	word
+	ref shiftRR32	(*X86Generator,	*ShiftOperation,	*PRegisterValue,	*PRegisterValue),	// reg	reg	dword
+	ref shiftVV64	(*X86Generator,	*ShiftOperation,	*PValue,	*PValue),	// reg	reg	qword
+	ref shiftRS8	(*X86Generator,	*ShiftOperation,	*PRegisterValue,	*PStackValue),	// reg	stack	byte
+	ref shiftRS16	(*X86Generator,	*ShiftOperation,	*PRegisterValue,	*PStackValue),	// reg	stack	word
+	ref shiftRS32	(*X86Generator,	*ShiftOperation,	*PRegisterValue,	*PStackValue),	// reg	stack	dword
+	ref shiftVV64	(*X86Generator,	*ShiftOperation,	*PValue,	*PValue),	// reg	stack	qword
+	ref shiftRO8	(*X86Generator,	*ShiftOperation,	*PRegisterValue,	*PValue),	// reg	memory	byte
+	ref shiftRO16	(*X86Generator,	*ShiftOperation,	*PRegisterValue,	*PValue),	// reg	memory	word
+	ref shiftRO32	(*X86Generator,	*ShiftOperation,	*PRegisterValue,	*PValue),	// reg	memory	dword
+	ref shiftVV64	(*X86Generator,	*ShiftOperation,	*PValue,	*PValue),	// reg	memory	qword
+	ref shiftXI8	(*X86Generator,	*ShiftOperation,	*PValue,	*PIntegerValue),	// reg	imm	byte
+	ref shiftXI16	(*X86Generator,	*ShiftOperation,	*PValue,	*PIntegerValue),	// reg	imm	word
+	ref shiftXI32	(*X86Generator,	*ShiftOperation,	*PValue,	*PIntegerValue),	// reg	imm	dword
+	ref shiftVV64	(*X86Generator,	*ShiftOperation,	*PValue,	*PValue),	// reg	imm	qword
+	ref shiftRO8	(*X86Generator,	*ShiftOperation,	*PRegisterValue,	*PValue),	// reg	other	byte
+	ref shiftRO16	(*X86Generator,	*ShiftOperation,	*PRegisterValue,	*PValue),	// reg	other	word
+	ref shiftRO32	(*X86Generator,	*ShiftOperation,	*PRegisterValue,	*PValue),	// reg	other	dword
+	ref shiftVV64	(*X86Generator,	*ShiftOperation,	*PValue,	*PValue),	// reg	other	qword
+	ref shiftSR8	(*X86Generator,	*ShiftOperation,	*PStackValue,	*PRegisterValue),	// stack	reg	byte
+	ref shiftSR16	(*X86Generator,	*ShiftOperation,	*PStackValue,	*PRegisterValue),	// stack	reg	word
+	ref shiftSR32	(*X86Generator,	*ShiftOperation,	*PStackValue,	*PRegisterValue),	// stack	reg	dword
+	ref shiftVV64	(*X86Generator,	*ShiftOperation,	*PValue,	*PValue),	// stack	reg	qword
+	ref shiftSS8	(*X86Generator,	*ShiftOperation,	*PStackValue,	*PStackValue),	// stack	stack	byte
+	ref shiftSS16	(*X86Generator,	*ShiftOperation,	*PStackValue,	*PStackValue),	// stack	stack	word
+	ref shiftSS32	(*X86Generator,	*ShiftOperation,	*PStackValue,	*PStackValue),	// stack	stack	dword
+	ref shiftOO	(*X86Generator,	*ShiftOperation,	*PValue,	*PValue),	// stack	stack	qword
+	ref shiftSO8	(*X86Generator,	*ShiftOperation,	*PStackValue,	*PValue),	// stack	memory	byte
+	ref shiftSO16	(*X86Generator,	*ShiftOperation,	*PStackValue,	*PValue),	// stack	memory	word
+	ref shiftSO32	(*X86Generator,	*ShiftOperation,	*PStackValue,	*PValue),	// stack	memory	dword
+	ref shiftOO	(*X86Generator,	*ShiftOperation,	*PValue,	*PValue),	// stack	memory	qword
+	ref shiftXI8	(*X86Generator,	*ShiftOperation,	*PValue,	*PIntegerValue),	// stack	imm	byte
+	ref shiftXI16	(*X86Generator,	*ShiftOperation,	*PValue,	*PIntegerValue),	// stack	imm	word
+	ref shiftXI32	(*X86Generator,	*ShiftOperation,	*PValue,	*PIntegerValue),	// stack	imm	dword
+	ref shiftVV64	(*X86Generator,	*ShiftOperation,	*PValue,	*PValue),	// stack	imm	qword
+	ref shiftSO8	(*X86Generator,	*ShiftOperation,	*PStackValue,	*PValue),	// stack	other	byte
+	ref shiftSO16	(*X86Generator,	*ShiftOperation,	*PStackValue,	*PValue),	// stack	other	word
+	ref shiftSO32	(*X86Generator,	*ShiftOperation,	*PStackValue,	*PValue),	// stack	other	dword
+	ref shiftOO	(*X86Generator,	*ShiftOperation,	*PValue,	*PValue),	// stack	other	qword
+	ref shiftOR8	(*X86Generator,	*ShiftOperation,	*PValue,	*PRegisterValue),	// memory	reg	byte
+	ref shiftOR16	(*X86Generator,	*ShiftOperation,	*PValue,	*PRegisterValue),	// memory	reg	word
+	ref shiftOR32	(*X86Generator,	*ShiftOperation,	*PValue,	*PRegisterValue),	// memory	reg	dword
+	ref shiftVV64	(*X86Generator,	*ShiftOperation,	*PValue,	*PValue),	// memory	reg	qword
+	ref shiftOO	(*X86Generator,	*ShiftOperation,	*PValue,	*PValue),	// memory	stack	byte
+	ref shiftOO	(*X86Generator,	*ShiftOperation,	*PValue,	*PValue),	// memory	stack	word
+	ref shiftOO	(*X86Generator,	*ShiftOperation,	*PValue,	*PValue),	// memory	stack	dword
+	ref shiftOO	(*X86Generator,	*ShiftOperation,	*PValue,	*PValue),	// memory	stack	qword
+	ref shiftOO	(*X86Generator,	*ShiftOperation,	*PValue,	*PValue),	// memory	memory	byte
+	ref shiftOO	(*X86Generator,	*ShiftOperation,	*PValue,	*PValue),	// memory	memory	word
+	ref shiftOO	(*X86Generator,	*ShiftOperation,	*PValue,	*PValue),	// memory	memory	dword
+	ref shiftOO	(*X86Generator,	*ShiftOperation,	*PValue,	*PValue),	// memory	memory	qword
+	ref shiftXI8	(*X86Generator,	*ShiftOperation,	*PValue,	*PIntegerValue),	// memory	imm	byte
+	ref shiftXI16	(*X86Generator,	*ShiftOperation,	*PValue,	*PIntegerValue),	// memory	imm	word
+	ref shiftXI32	(*X86Generator,	*ShiftOperation,	*PValue,	*PIntegerValue),	// memory	imm	dword
+	ref shiftVV64	(*X86Generator,	*ShiftOperation,	*PValue,	*PValue),	// memory	imm	qword
+	ref shiftOO	(*X86Generator,	*ShiftOperation,	*PValue,	*PValue),	// memory	other	byte
+	ref shiftOO	(*X86Generator,	*ShiftOperation,	*PValue,	*PValue),	// memory	other	word
+	ref shiftOO	(*X86Generator,	*ShiftOperation,	*PValue,	*PValue),	// memory	other	dword
+	ref shiftOO	(*X86Generator,	*ShiftOperation,	*PValue,	*PValue),	// memory	other	qword
+	nil,					// other	reg	byte
+	nil,					// other	reg	word
+	nil,					// other		reg	dword
+	nil,					// other	reg	qword
+	nil,					// other	stack	byte
+	nil,					// other	stack	word
+	nil,					// other	stack	dword
+	nil,					// other	stack	qword
+	nil,					// other	memory	byte
+	nil,					// other	memory	word
+	nil,					// other	memory	dword
+	nil,					// other	memory	qword
+	nil,					// other	imm	byte
+	nil,					// other	imm	word
+	nil,					// other	imm	dword
+	nil,					// other	imm	qword
+	nil,					// other	other	byte
+	nil,					// other	other	word
+	nil,					// other	other	dword
+	nil,					// other	other	qword
+	
+	__shr64,	// builtin64
+	0x05]	// register (/r)
+//[cf]
+//[of]:sar
+static sar_operation = ShiftOperation [
+	ref shiftRR8	(*X86Generator,	*ShiftOperation,	*PRegisterValue,	*PRegisterValue),	// reg	reg	byte
+	ref shiftRR16	(*X86Generator,	*ShiftOperation,	*PRegisterValue,	*PRegisterValue),	// reg	reg	word
+	ref shiftRR32	(*X86Generator,	*ShiftOperation,	*PRegisterValue,	*PRegisterValue),	// reg	reg	dword
+	ref shiftVV64	(*X86Generator,	*ShiftOperation,	*PValue,	*PValue),	// reg	reg	qword
+	ref shiftRS8	(*X86Generator,	*ShiftOperation,	*PRegisterValue,	*PStackValue),	// reg	stack	byte
+	ref shiftRS16	(*X86Generator,	*ShiftOperation,	*PRegisterValue,	*PStackValue),	// reg	stack	word
+	ref shiftRS32	(*X86Generator,	*ShiftOperation,	*PRegisterValue,	*PStackValue),	// reg	stack	dword
+	ref shiftVV64	(*X86Generator,	*ShiftOperation,	*PValue,	*PValue),	// reg	stack	qword
+	ref shiftRO8	(*X86Generator,	*ShiftOperation,	*PRegisterValue,	*PValue),	// reg	memory	byte
+	ref shiftRO16	(*X86Generator,	*ShiftOperation,	*PRegisterValue,	*PValue),	// reg	memory	word
+	ref shiftRO32	(*X86Generator,	*ShiftOperation,	*PRegisterValue,	*PValue),	// reg	memory	dword
+	ref shiftVV64	(*X86Generator,	*ShiftOperation,	*PValue,	*PValue),	// reg	memory	qword
+	ref shiftXI8	(*X86Generator,	*ShiftOperation,	*PValue,	*PIntegerValue),	// reg	imm	byte
+	ref shiftXI16	(*X86Generator,	*ShiftOperation,	*PValue,	*PIntegerValue),	// reg	imm	word
+	ref shiftXI32	(*X86Generator,	*ShiftOperation,	*PValue,	*PIntegerValue),	// reg	imm	dword
+	ref shiftVV64	(*X86Generator,	*ShiftOperation,	*PValue,	*PValue),	// reg	imm	qword
+	ref shiftRO8	(*X86Generator,	*ShiftOperation,	*PRegisterValue,	*PValue),	// reg	other	byte
+	ref shiftRO16	(*X86Generator,	*ShiftOperation,	*PRegisterValue,	*PValue),	// reg	other	word
+	ref shiftRO32	(*X86Generator,	*ShiftOperation,	*PRegisterValue,	*PValue),	// reg	other	dword
+	ref shiftVV64	(*X86Generator,	*ShiftOperation,	*PValue,	*PValue),	// reg	other	qword
+	ref shiftSR8	(*X86Generator,	*ShiftOperation,	*PStackValue,	*PRegisterValue),	// stack	reg	byte
+	ref shiftSR16	(*X86Generator,	*ShiftOperation,	*PStackValue,	*PRegisterValue),	// stack	reg	word
+	ref shiftSR32	(*X86Generator,	*ShiftOperation,	*PStackValue,	*PRegisterValue),	// stack	reg	dword
+	ref shiftVV64	(*X86Generator,	*ShiftOperation,	*PValue,	*PValue),	// stack	reg	qword
+	ref shiftSS8	(*X86Generator,	*ShiftOperation,	*PStackValue,	*PStackValue),	// stack	stack	byte
+	ref shiftSS16	(*X86Generator,	*ShiftOperation,	*PStackValue,	*PStackValue),	// stack	stack	word
+	ref shiftSS32	(*X86Generator,	*ShiftOperation,	*PStackValue,	*PStackValue),	// stack	stack	dword
+	ref shiftOO	(*X86Generator,	*ShiftOperation,	*PValue,	*PValue),	// stack	stack	qword
+	ref shiftSO8	(*X86Generator,	*ShiftOperation,	*PStackValue,	*PValue),	// stack	memory	byte
+	ref shiftSO16	(*X86Generator,	*ShiftOperation,	*PStackValue,	*PValue),	// stack	memory	word
+	ref shiftSO32	(*X86Generator,	*ShiftOperation,	*PStackValue,	*PValue),	// stack	memory	dword
+	ref shiftOO	(*X86Generator,	*ShiftOperation,	*PValue,	*PValue),	// stack	memory	qword
+	ref shiftXI8	(*X86Generator,	*ShiftOperation,	*PValue,	*PIntegerValue),	// stack	imm	byte
+	ref shiftXI16	(*X86Generator,	*ShiftOperation,	*PValue,	*PIntegerValue),	// stack	imm	word
+	ref shiftXI32	(*X86Generator,	*ShiftOperation,	*PValue,	*PIntegerValue),	// stack	imm	dword
+	ref shiftVV64	(*X86Generator,	*ShiftOperation,	*PValue,	*PValue),	// stack	imm	qword
+	ref shiftSO8	(*X86Generator,	*ShiftOperation,	*PStackValue,	*PValue),	// stack	other	byte
+	ref shiftSO16	(*X86Generator,	*ShiftOperation,	*PStackValue,	*PValue),	// stack	other	word
+	ref shiftSO32	(*X86Generator,	*ShiftOperation,	*PStackValue,	*PValue),	// stack	other	dword
+	ref shiftOO	(*X86Generator,	*ShiftOperation,	*PValue,	*PValue),	// stack	other	qword
+	ref shiftOR8	(*X86Generator,	*ShiftOperation,	*PValue,	*PRegisterValue),	// memory	reg	byte
+	ref shiftOR16	(*X86Generator,	*ShiftOperation,	*PValue,	*PRegisterValue),	// memory	reg	word
+	ref shiftOR32	(*X86Generator,	*ShiftOperation,	*PValue,	*PRegisterValue),	// memory	reg	dword
+	ref shiftVV64	(*X86Generator,	*ShiftOperation,	*PValue,	*PValue),	// memory	reg	qword
+	ref shiftOO	(*X86Generator,	*ShiftOperation,	*PValue,	*PValue),	// memory	stack	byte
+	ref shiftOO	(*X86Generator,	*ShiftOperation,	*PValue,	*PValue),	// memory	stack	word
+	ref shiftOO	(*X86Generator,	*ShiftOperation,	*PValue,	*PValue),	// memory	stack	dword
+	ref shiftOO	(*X86Generator,	*ShiftOperation,	*PValue,	*PValue),	// memory	stack	qword
+	ref shiftOO	(*X86Generator,	*ShiftOperation,	*PValue,	*PValue),	// memory	memory	byte
+	ref shiftOO	(*X86Generator,	*ShiftOperation,	*PValue,	*PValue),	// memory	memory	word
+	ref shiftOO	(*X86Generator,	*ShiftOperation,	*PValue,	*PValue),	// memory	memory	dword
+	ref shiftOO	(*X86Generator,	*ShiftOperation,	*PValue,	*PValue),	// memory	memory	qword
+	ref shiftXI8	(*X86Generator,	*ShiftOperation,	*PValue,	*PIntegerValue),	// memory	imm	byte
+	ref shiftXI16	(*X86Generator,	*ShiftOperation,	*PValue,	*PIntegerValue),	// memory	imm	word
+	ref shiftXI32	(*X86Generator,	*ShiftOperation,	*PValue,	*PIntegerValue),	// memory	imm	dword
+	ref shiftVV64	(*X86Generator,	*ShiftOperation,	*PValue,	*PValue),	// memory	imm	qword
+	ref shiftOO	(*X86Generator,	*ShiftOperation,	*PValue,	*PValue),	// memory	other	byte
+	ref shiftOO	(*X86Generator,	*ShiftOperation,	*PValue,	*PValue),	// memory	other	word
+	ref shiftOO	(*X86Generator,	*ShiftOperation,	*PValue,	*PValue),	// memory	other	dword
+	ref shiftOO	(*X86Generator,	*ShiftOperation,	*PValue,	*PValue),	// memory	other	qword
+	nil,					// other	reg	byte
+	nil,					// other	reg	word
+	nil,					// other		reg	dword
+	nil,					// other	reg	qword
+	nil,					// other	stack	byte
+	nil,					// other	stack	word
+	nil,					// other	stack	dword
+	nil,					// other	stack	qword
+	nil,					// other	memory	byte
+	nil,					// other	memory	word
+	nil,					// other	memory	dword
+	nil,					// other	memory	qword
+	nil,					// other	imm	byte
+	nil,					// other	imm	word
+	nil,					// other	imm	dword
+	nil,					// other	imm	qword
+	nil,					// other	other	byte
+	nil,					// other	other	word
+	nil,					// other	other	dword
+	nil,					// other	other	qword
+	
+	__sar64,	// builtin64
+	0x07]	// register (/r)
+//[cf]
+//[cf]
+//[cf]
+
+.private
+//[of]:Utils
+//[of]:BinaryOperation
+struct BinaryOperation
+
+	attr functions	: [4 * 5 * 4] & (*X86Generator, *BinaryOperation, *PValue, *PValue)
+	attr builtin64	: BuiltinId	// The builtin function to call for 64 bit operation (2 operands on stack)
+	attr regRm	: Byte	// op reg, r/m
+	attr rmReg	: Byte	// op r/m, reg
+	attr accImm	: Byte	// op al/ax/eax, imm
+	attr rmImm	: Byte	// op r/m, imm
+	attr rmImmm	: Byte	// op r/m, imm (/reg)
+	attr unitReg	: Byte	// inc/dec reg (add/sub only)
+	attr unitRmm	: Byte	// inc/dec rm (/reg) (add/sub only)
+	attr cfRegRm	: Byte	// op reg, r/m with CF
+	attr cfRmReg	: Byte	// op r/m, reg with CF
+	attr cfRmImm	: Byte	// op r/m, imm with CF
+	attr cfRmImmm	: Byte	// op r/m, imm with CF (/reg)
+	attr rmm	: Byte	// op r/m (/reg)
+	attr isSigned	: Bool	// the operation is signed (div/mod only)
+
+	method call (generator, left, right)
+	
+		var index = (((left leftIndex * 5 ) + right rightIndex) * 4) : Integer + left size : Integer
+		self functions [index] call (generator, self, left, right)
+//[cf]
+//[of]:ShiftOperation
+struct ShiftOperation
+
+	attr functions	: [4 * 5 * 4] & (*X86Generator, *ShiftOperation, *PValue, *PValue)
+	attr builtin64	: BuiltinId	// The builtin function to call for 64 bit operation (2 operands on stack)
+	attr register	: Byte
+
+	method call (generator, left, right)
+	
+		var index = (((left leftIndex * 5 ) + right rightIndex) * 4) : Integer + left size : Integer
+		self functions [index] call (generator, self, left, right)
+//[cf]
+
+//[of]:FunctionBuckets
+const FunctionBucket = Vector (*Function)
+
+struct FunctionBuckets
+
+	attr buckets	: Dictionary (Hash, *FunctionBucket, 0, ref hash (Hash), ref isEqual (Hash, Hash))
+	attr count	: Size
+	attr maxKey	: Size
+	attr maxCount	: Size
+	
+	method initialize
+	
+		self buckets initialize
+		self count	= 0
+		self maxCount = 0
+		self maxKey = 0
+		
+	method release
+	
+		self buckets eachValue do bucket
+			bucket delete
+		end
+		self buckets release
+		
+	method add (f: *Function)
+	
+		var mc = f mcFunction
+		var pfunction = mc pfunction
+		var key = pfunction hash | 1
+		var bucket = self buckets [key]
+		if bucket isNil
+			bucket = FunctionBucket new
+			self buckets add (key, bucket)
+		end
+		bucket add (f)
+
+		if bucket size > self maxCount
+			self maxKey = key
+			self maxCount = bucket size
+		end
+		self count ++
+	
+	method each
+		self buckets eachValue do b
+			yield b
+		end
+	
+//[cf]
+//[cf]
+//[of]:Imports
+import "coff/coff"
+
+import "p-code-builder"
+import "p-code"
+import "object-file-\(backend)"
+import "x86"
+import "syntax-tree"
+import "commons"
+import "file"
+import "core"
+//[cf]

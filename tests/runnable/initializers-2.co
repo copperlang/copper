@@ -1,0 +1,37 @@
+//[c]Ensures that the code generator generates only one initialized
+//[c]structure and array for each initializer.
+//[c]
+
+struct Test
+	attr a : Int32
+	attr b : Int32
+
+const test = Test [1, 2]
+const t2 = test
+
+const a = [] Int32 [10, 11, 12]
+const b = a
+
+function .c .cdecl main
+
+	var x = test
+	var y = test
+	var z = t2
+	if x <> y
+		return 1
+	end
+	if x <> z
+		return 2
+	end
+
+	var a1 = a
+	var a2 = a
+	var a3 = b
+	if a1 <> a2
+		return 3
+	end
+	if a1 <> a3
+		return 4
+	end
+	
+	return 0

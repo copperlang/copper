@@ -1,0 +1,20 @@
+
+function .c .cdecl main
+
+	var res = 2
+	
+	// Force complex control flow in LLVM
+	var c = $a
+	if (c == $a or c == $A) and (c == $x or c == $X)
+		res += 1
+	else
+		res -= 1
+	end
+
+	if (c == $a and c == $A) or (c == $x and c == $X)
+		res += 1
+	else
+		res -= 1
+	end
+
+	return res

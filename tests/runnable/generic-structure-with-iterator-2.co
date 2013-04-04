@@ -1,0 +1,16 @@
+//[c]Test an iterator in a generic structure with an argument of the template
+//[c]
+struct A (T)
+	
+	method test (x: T)
+	
+		yield x - 3
+
+function .c .cdecl main
+
+	var a = {A (Int32)}
+	var sum = 2
+	a test (1) do n
+		sum += n
+	end
+	return sum

@@ -1,0 +1,15 @@
+
+struct A
+	attr a	: Int32
+
+struct B : A
+	attr b	: Int32
+
+struct C : A
+	attr c	: Int32
+
+function main
+	if true
+		return nil (C)
+	end
+	return nil (B)

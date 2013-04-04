@@ -1,0 +1,16 @@
+
+struct A
+	method a1
+		return true
+
+struct B
+	method b1
+		return 1
+
+struct S (T) : T
+	method f
+		return a1 (self)
+
+function main
+	var s = nil (S (A))
+	return f (s)

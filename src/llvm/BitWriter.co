@@ -1,0 +1,11 @@
+
+.c
+.cdecl
+
+import function LLVMWriteBitcodeToFile	(LLVMModuleRef, string)	-> (int)
+import function LLVMWriteBitcodeToFD	(LLVMModuleRef, int, int, int)	-> (int)
+
+.private
+const int	= Int32
+const string	= *[] Char8
+import "Core"

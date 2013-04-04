@@ -1,0 +1,12 @@
+struct A
+	attr x : Int32
+
+struct B : A
+	attr y	: Int32
+
+struct C : B
+	attr z	: Int32
+	
+function .c .cdecl main
+
+	return C @ y - 4

@@ -1,0 +1,65 @@
+
+function test_while
+
+	var t = 10
+	var i = 0
+	var n = 10
+	while i < n
+		t = t - 1
+		i = i + 1
+	end
+
+	return t
+
+function test_while_with_break
+
+	var t = 4
+	var i = 0
+	var n = 10
+	while i < n
+		t = t - 1
+		if i == 3
+			break
+		end
+		i = i + 1
+	end
+
+	return t
+
+function test_repeat_with_break
+
+	var t = 4
+	var i = 0
+	var n = 10
+	repeat
+		t = t - 1
+		if i == 3
+			break
+		end
+		i = i + 1
+	end
+
+	return t
+
+function test_repeat_with_return
+
+	var t = 4
+	var i = 0
+	var n = 10
+	repeat
+		t = t - 1
+		if i == 3
+			return t
+		end
+		i = i + 1
+	end
+
+function .c .cdecl main
+
+	var res = 0
+	res = res + test_while
+	res = res + test_while_with_break
+	res = res + test_repeat_with_break
+	res = res + test_repeat_with_return
+	
+	return res

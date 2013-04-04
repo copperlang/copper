@@ -1,0 +1,10 @@
+
+struct A
+	attr x	: Int32
+
+function main
+
+	var p = nil (Int16)
+	var q = nil (A)
+	
+	return p []

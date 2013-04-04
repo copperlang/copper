@@ -1,0 +1,72 @@
+const Integer	= Int32
+const Byte	= Unsigned8
+const String	= [] Char8
+
+struct Point
+	attr x	: Integer
+	attr y	: Integer
+	attr z	: Integer
+	attr w	: Integer
+	attr color	: Color
+	attr char	: Char16
+	attr bool	: Bool
+	attr bg	: * Color
+	attr theme	: [2] Color
+	attr prefs	: [2] * Color
+	attr display	: & (*Point) -> (Integer)
+	attr next	: *Point
+	attr title	: *String
+	attr title2	: *[] Char16
+	
+	method display_point
+		return x (self)
+
+struct Color
+	attr r	: Byte
+	attr g	: Byte
+	attr b	: Byte
+
+struct ColorAlpha : Color
+	attr a	: Byte
+
+struct EmptyStructure
+
+struct EndWithArray
+	attr size	: Unsigned32
+	attr array	: [] Int32
+
+const point	= Point [	1, 2, 13, 24, 255, 240, 128, $B, true, ColorAlpha [0, 10, 20, 255],
+		// theme
+		255, 255, 255,
+		127, 127, 127,
+		// prefs
+		ColorAlpha [80, 80, 20, 127],
+		ColorAlpha [100, 100, 30, 127],
+		// display
+		ref display_point (*Point),
+		nil,
+		'Ansi',
+		"Unicode" ]
+	
+const nul_char	= 0 : Char8
+const colors	= [] Color [255, 255, 255, 125, 126, 127]
+const name	= String [$a, $8, nul_char]
+
+function .c .cdecl main
+
+	var res = 0
+	
+	var dark = ColorAlpha [0, 10, 20, 255]
+	res += b (dark) : Integer - 20
+
+	var c = colors [1]
+	res += r (c) : Integer + g (c) : Integer + b (c) : Integer - 125 - 126 - 127
+			
+	res += call (display (point), point) - 1
+
+	var empty_array = [] Int32 []
+	var empty = EndWithArray [0]
+	var some_data = EndWithArray [0, 1, 2]
+	var empty_structure = EmptyStructure []
+	
+	return res

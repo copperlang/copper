@@ -1,0 +1,5 @@
+const CodeGenerator	= X86CodeGenerator
+const defaultOutputName	= "a.o"
+
+.private
+import "generator-x86"

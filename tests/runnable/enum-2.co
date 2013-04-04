@@ -1,0 +1,14 @@
+enum OptionId
+	oid_none
+
+function test (x: OptionId)
+
+function .c .cdecl main
+
+	var x = 1
+	x = oid_none	// it is a constant, it is mutated to the type of x !!!
+	
+	var y = oid_none	// check that oid_none is still an enum (only the value should have been mutated)
+	test (y)
+
+	return 0

@@ -1,0 +1,4859 @@
+//[of]:Builder
+//[of]:definition
+//[c]Builder Class
+//[c]
+//[c]	Build all modules
+//[c]
+struct Builder
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+//[c]DESCRIPTION
+//[c]	Initialize the compilation
+//[c]
+//[c]ARGUMENTS
+//[c]	bundle	--	The memory bundle to store the parse tree and all attached
+//[c]			objects.
+//[c]	module	--	A newly created module. It is the 'output' of the compiler.
+//[c]	source	--	The source code
+//[c]
+method initialize (	includePath	: *IncludePath,
+	defines	: *StringDictionary (String16),
+	verbose	: Bool,
+	program	: *Program, 
+	reportErrorCode	: & (Pointer, FileLocation, LineNumber, String16),
+	reportErrorData	: Pointer )
+
+	self includePath	= includePath
+	self defines	= defines
+	self verbose	= verbose
+	self program	= program
+	self pool	= program pool
+	self errorCount	= 0
+	self reportErrorCode	= reportErrorCode
+	self reportErrorData	= reportErrorData
+	self nameBuffer initialize
+	self nameIndex	= 1
+//[cf]
+//[of]:release
+method release
+
+	self nameBuffer release
+//[cf]
+//[cf]
+//[of]:compiling
+//[of]:compile
+//[c]Starts the compilation
+//[c]
+//[c]RETURN VALUE
+//[c]	Return true if the module has been compiled without errors.
+//[c]
+method compile (filename: String16)
+
+	return self loadModule (filename, nil, no_line_number)
+//[cf]
+//[of]:loadModule
+//[c]Loads a module
+//[c]	
+//[c]	The filename must be normalized.
+//[c]
+method loadModule (	filename	: String16, 
+	file	: FileLocation, 
+	line	: LineNumber)
+
+	// Test if already loaded
+	var module = self program findModule (filename)
+	if module notNil
+	
+		// Test for recursion
+		if module loading
+			self error (file, line, self err_recursive_import, filename)
+			return nil
+		end
+		
+		return module
+	end
+
+	// Load the file
+	var fb = {FileBuffer}
+	var code = fb initialize (filename, true)
+	if code <> fb_ok
+		self error (file, line, self err_import, filename)
+		return nil
+	end
+	var source = fb buffer : String8
+	
+	// Create the module
+	var parser = {Parser} local (self program, source, filename, self defines)
+	module = parser getModule
+	parser release
+	if module isNil
+		self reportParserError (parser error, filename)
+		return nil
+	end
+	
+	// Add it to the list of loaded modules
+	self program addModule (module)
+
+	// Mark it as loading
+	module loading = true
+
+	// Get the include path: create a copy of the path with the path of 
+	// the filename prepended
+	var path = filePath (self pool, filename)
+	var includePath = {IncludePath} local (self includePath, path)
+	
+	// Build it	
+	var moduleBuilder = {ModuleBuilder} local (self pool, self, self program, includePath, module, source)
+	fb release
+	var ok = moduleBuilder declare
+	if ok
+		ok = moduleBuilder define
+	end
+	moduleBuilder release
+	
+	// Mark it as loaded
+	module loading = false
+	
+	// Return the module or nil if the it is not successfully built
+	return ok cond module else nil
+//[cf]
+//[of]:getPublicName
+//[c]Computes the public name of the function
+//[c]
+//[c]REMARKS
+//[c]	This method is generic: it applies both to function and externs.
+//[c]
+method getPublicName (f)
+
+	if f directives namingConvention == nc_c
+		return f name
+	else
+		// Generate a copper name
+		var buffer = self nameBuffer
+		buffer removeAll
+		buffer addChar8 ($@)
+		var name = f name
+		buffer addMemoryBlock (name, name size)
+		buffer addUnsignedToAnsi (self nameIndex)
+		buffer addChar8 (0)
+		
+		self nameIndex ++
+
+		var size = buffer size
+		var publicName	= self pool allocateArray (Char8, size)
+		publicName memoryCopy (buffer string8, size)
+		return publicName
+	end
+//[cf]
+//[cf]
+//[of]:testing
+//[of]:hasErrors
+method hasErrors
+
+	return self errorCount <> 0
+//[cf]
+//[cf]
+//[of]:error
+//[of]:reportParserError
+method reportParserError (error: *ParserError, filename)
+
+	switch error code
+
+	case error_lexer
+		self reportLexerError (error lexerError, filename)
+
+	case error_syntax
+		var sb = {TempStringBuffer} local
+		sb << error token1
+		self error (filename, error line, self error_syntax_message, sb string)
+		sb release
+
+	case error_syntax_expected
+		var sb1 = {TempStringBuffer} local
+		var sb2 = {TempStringBuffer} local
+		sb1 << error token1
+		error token2 add (sb2, error integer2, error string2)
+		self error (filename, error line, self error_syntax_expected_message, sb1 string, sb2 string)
+		sb2 release
+		sb1 release
+
+	end
+//[cf]
+//[of]:reportLexerError
+method reportLexerError (error: *LexerError, file)
+
+	var line = error line
+	
+	switch error code
+	case error_unexpected_eof_in_string
+		self error (file, line, self error_unexpected_eof_in_string_message)
+	case error_unexpected_eol_in_string
+		self error (file, line, self error_unexpected_eol_in_string_message)
+	case error_string_too_long
+		self error (file, line, self error_string_too_long_message)
+	case error_unexpected_eof_in_char
+		self error (file, line, self error_unexpected_eof_in_char_message)
+	case error_invalid_escape_char
+		self error (file, line, self error_invalid_escape_char_message)
+	case error_invalid_token
+		self error (file, line, self error_invalid_token_message)
+	case error_undefined_string_constant
+		self error (file, line, self error_undefined_string_constant_message)
+	end
+//[cf]
+//[of]:error
+method error (file: FileLocation, line: LineNumber, fmt: String16, ...)
+
+	var buffer = {MemoryBuffer} local
+	each_extra do arg
+		buffer << arg
+	end
+	self errorWithArguments (file, line, fmt, buffer)
+	buffer release
+
+method errorWithArguments (file: FileLocation, line: LineNumber, fmt: String16, arguments: *MemoryBuffer)
+
+	// Increase number of errors
+	self errorCount ++
+	
+	var args	= {MemoryReader} local (arguments base)
+	var s	= {TempStringBuffer} local
+	var p	= fmt
+	repeat 
+		var c= p []
+		p ++
+		if c isNul
+			break
+		elsif c == $#
+			c = p []
+			p ++
+			if c == $s
+				s << args read (String8)
+			elsif c == $u
+				s << args read (String16)
+			elsif c == $i
+				s << args read (Unsigned)
+			elsif c == $t
+				s << args read (*Type)
+			elsif c==$x
+				s << args read (*ValueList)
+			elsif c==$f
+				s << args read (*Function)
+			else
+				s << c
+			end
+		else
+			s << c
+		end
+	end
+
+	// Notify the compiler
+	self reportErrorCode call (self reportErrorData, file, line, s string)
+	s release
+//[cf]
+//[cf]
+
+:private
+//[of]:constants
+static err_import	= "cannot import '#u'"
+static err_recursive_import	= "recursive import of '#u'"
+	
+// Lexer Errors	
+static error_unexpected_eof_in_string_message	= "unexpected end of file in string"
+static error_unexpected_eol_in_string_message	= "unexpected end of line in string"
+static error_string_too_long_message	= "string too long"
+static error_unexpected_eof_in_char_message	= "unexpected end of file in character"
+static error_invalid_escape_char_message	= "invalid escape character"
+static error_invalid_token_message	= "invalid character"
+static error_undefined_string_constant_message	= "undefined string constant"
+	
+// Parser Errors	
+static error_syntax_expected_message	= "syntax error: expecting #u but found #u"
+static error_syntax_message	= "syntax error: #u unexpected"
+//[cf]
+//[of]:attributes
+attr includePath	: *IncludePath	// The path to look for source files
+attr defines	: *StringDictionary (String16)	// The command line defines
+attr verbose	: Bool	// Dump internal information
+attr program	: *Program	// The program to build
+attr pool	: *MemoryPool	// Bundle to store the modules
+attr errorCount	: Unsigned	// Number of errors in this module
+attr reportErrorCode	: & (Pointer, FileLocation, LineNumber, String16)	// Function to report an error
+attr reportErrorData	: Pointer	// First argument to pass to the report error function
+attr nameBuffer	: MemoryBuffer	// Buffer to generate c names
+attr nameIndex	: Offset	// Index to generate a unique name
+//[cf]
+//[cf]
+//[of]:Module Builder
+//[of]:definition
+//[c]Module Builder class
+//[c]
+struct ModuleBuilder
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+//[c]DESCRIPTION
+//[c]	Initialize the compilation
+//[c]
+//[c]ARGUMENTS
+//[c]	builder	--	The builder session
+//[c]	module	--	A newly created module. It is the 'output' of the module builder.
+//[c]	source	--	The source code
+//[c]
+method initialize (	pool	: *MemoryPool,
+	builder	: *Builder,
+	program	: *Program,
+	includePath	: *IncludePath,
+	module	: *Module,
+	source	: String8)
+
+	self pool	= pool
+	self builder	= builder
+	self program	= program
+	self includePath	= includePath
+ 	self moduleContext	= self globalModuleContext
+	self evaluatingContext	= nil
+	self breakContext	= nil
+	self currentLocalPool	= nil
+	
+	self stack initialize
+	self integerConstants initialize
+	self globalModuleContext initialize (nil, module, nil, nil, nil, nil)
+	self localPools initialize
+//[cf]
+//[of]:release
+method release
+
+	self localPools each do e
+		e release
+	end
+
+	self integerConstants release
+	self stack release
+//[cf]
+//[cf]
+//[of]:compiling
+//[of]:declare
+//[c]Starts the compilation
+//[c]
+//[c]RETURN VALUE
+//[c]	Return true if the module has been compiled without errors.
+//[c]
+method declare
+
+	var status = self processImports
+	if status notOk
+		return false
+	end
+
+	self module eachGlobalAlias do a
+		status |= self declareAlias (a, nil, nil)
+	end
+	
+	self module eachGlobalStructure do s
+		status |= self declareStructure (s)
+	end
+	
+	self module eachGlobalEnumeration do e
+		status |= self declareEnumeration (e)
+	end
+
+	self module eachGlobalVariables do v
+		status |= self declareVariables (v)
+	end
+	
+	self module eachGlobalFunction do f
+		status |= self declareFunction (f, nil, nil)
+	end
+	
+	self module eachGlobalExternFunction do f
+		status |= self declareExternFunction (f)
+	end
+
+	if status notOk
+		return false
+	end
+
+	// The type to extend must be declared before, so this step
+	// must be performed after declaring all aliases and types.
+	self module eachGlobalExtension do e
+		status |= self declareExtension (e)
+	end
+
+	// All done
+	return status isOk
+//[cf]
+//[of]:define
+method define
+
+	// Define all global variables
+	var status = cs_ok
+	self module eachGlobalVariables do v
+		status |= self defineVariables (v)
+	end
+	if status notOk
+		return false
+	end
+
+	while not self stack isEmpty
+		var definition = self stack removeLast
+		if definition isFunction
+			self defineFunction (definition : *Function)
+		elsif definition isType
+			self defineStructure (definition asTypeDefinition type asStructure)
+		else
+			assertFailure ("Invalid definition on stack")
+		end
+	end
+		
+//[c]	if self builder verbose
+//[c]
+//[c]		var module = self module
+//[c]		var t = {TempStringBuffer} local
+//[c]		
+//[c]		// Here, the stack must be empty,
+//[c]		// no function should be partial, broken
+//[c]		module eachFunction do f
+//[c]			if f partial and not f failed and f used
+//[c]				t removeAll
+//[c]				t << "***** BROKEN : "
+//[c]				t << f
+//[c]				puts (t string)
+//[c]			end
+//[c]		end
+//[c]		
+//[c]		// Dump all functions
+//[c]		module eachFunction do f
+//[c]			if not f failed and f used
+//[c]				t removeAll
+//[c]				t << f
+//[c]				puts (t string)
+//[c]			end
+//[c]		end
+//[c]		
+//[c]		// List unused functions
+//[c]		puts ("Unused Functions:")
+//[c]		module eachFunction do f
+//[c]			if not f used
+//[c]				t removeAll
+//[c]				t << \t
+//[c]				t << f
+//[c]				puts (t string)
+//[c]			end
+//[c]		end
+//[c]		
+//[c]		t release
+//[c]
+//[c]	end
+		
+	return not self builder hasErrors
+//[cf]
+//[cf]
+
+:private
+//[of]:constants
+//[c]
+//[c]Messages
+//[c]
+//[c]	#s	string
+//[c]	#u	unicode string
+//[c]	#x	signature
+//[c]	#i	integer
+//[c]	#t	type
+//[c]	#f	function
+//[c]
+
+// Module Builder	
+static error_conflicting_definition_1	= "conflicting definition: #s"
+static error_conflicting_definition_2	= "first definition"
+static error_instruction_never_executed	= "this instruction will never be executed"
+static error_infinite_recursion	= "infinite recursion with #s"
+static error_infinite_loop_in_iterator	= "infinite loop in iterator"
+static error_incompatible_return_types	= "return #x is not compatible with #x"
+static error_incompatible_cond_values	= "#x is not compatible with #x"
+static error_incompatible_yield_arguments	= "yield: #x is not compatible with #x"
+static error_missing_return	= "return #x is missing at the end of the function"
+static error_conflicting_signature	= "conflicting signature in recursion with #s#x"
+static error_no_matching_definition	= "can't find a definition for #s#x"
+static error_private_definition	= "private definition for #s#x"
+static error_cant_evaluate_type	= "can't evaluate the type"
+static error_not_structure	= "#t is not a structure"
+static error_unknown_attribute	= "Unknown attribute #s"
+static error_undefined_attribute_size	= "undefined size of attribute #s"
+static error_parameter_not_a_valid_constant	= "a parameter of #s is not a valid constant"
+static err_variable_mismatch	= "wrong number of variables, expected #i but found #i"
+static err_assign_mismatch	= "wrong number of left expressions, expected #i but found #i"
+static err_argument_mismatch	= "wrong number of arguments, expected #i but found #i"
+static err_assign_not_lvalue	= "can't assign, the left expression is not a lvalue"
+static err_invalid_pointer_comparison	= "can't compare a #t with a #t"
+static err_not_a_boolean_expression	= "the expression is not a boolean expression"
+static err_no_loop	= "break must be inside a loop or an iterator"
+static err_not_an_integer	= "the expression is not an integer"
+static err_not_a_constant	= "the expression is not a constant"
+static err_cant_upcast	= "can't cast: a #t is not a #t"
+static err_recursive_function_import	= "recursive call to import"
+static err_mismatch_argument	= "argument #i: #t is not a #t"
+static err_integer_overflow	= "integer constant is out of range for an #t"
+static err_char_op_arg_2_not_integer	= "second argument of operation to char must be an integer"
+static err_char_op_arg_2_different_size	= "second argument of operation to char must be an integer of same size as char"
+static error_not_a_simple_type	= "#t is not a simple type"
+static err_cast_with_different_size	= "can't cast #t to #t: different size"
+static err_too_many_values	= "too many values"
+static err_missing_value	= "missing values"
+static err_not_constant_value	= "not a constant value"
+static err_cant_define_function	= "--- error while defining the function '#f'"
+static err_invalid_array_diff_type	= "substract to array pointer: invalid second argument: '#t': it must be an integer or a '#t'"
+static err_no_block	= "unexpected block"
+static err_missing_block	= "block missing"
+static err_not_in_function	= "this expression can not be outside a function"
+static err_not_pointer_to_structure	= "super: '#t' is not a pointer to a structure"
+static err_not_pointer_to_function	= "call: '#t' is not a pointer to a function"
+static err_not_pointer	= "'#t' is not a pointer"
+static err_not_enumeration	= "'#t' is not an enumeration"
+static err_type_not_an_integer	= "'#t' is not an integer type"
+static err_no_parent_structure	= "super: '#t' has no parent"
+static err_not_a_function	= "'#s' is not a function"
+static err_cannot_be_a_type	= "the expression cannot be a type"
+static err_initializer_type	= "initializer: '#t' is neither a structure nor an array"
+static err_initializer_missing_value	= "initializer: missing value"
+static err_initializer_too_many_values	= "initializer: too many values"
+static err_not_a_numerical_expression	= "the expression is not a numerical expression"
+static err_switch_duplicate	= "switch: duplicate constant"
+//[cf]
+//[of]:attributes
+attr builder	: *Builder	// The global builder
+attr program	: *Program	// The program
+attr pool	: *MemoryPool	// Memory pool to store the objects of the parse tree
+attr includePath	: *IncludePath	// The include path
+attr stack	: DefinitionStack	// The stack of functions to define
+attr moduleContext	: *ModuleContext	// The module of the global object currently being defined
+attr evaluatingContext	: *EvaluatingContext	// The stack of functions being evaluated (we can't rely on function context since yield pops items)
+attr breakContext	: *BreakContext	// The current inner loop - The loop is stored outside the function context because of inline functions and yields
+attr integerConstants	: IntegerConstantDictionary	// To detect duplicates in switches (stored here to optimize memory allocations)
+attr globalModuleContext	: ModuleContext	// The global module context
+attr localPools	: LocalPool LinkCollection	// The stack of recyclable memory pools for blocks
+attr currentLocalPool	: *LocalPool	// Pointer to the current block pool in the localPools collection
+//[cf]
+//[of]:imports
+//[of]:processImports
+method processImports
+
+	var status = cs_ok
+	self module eachImport do i
+		status |= self processImport (i)
+	end
+	return status
+//[cf]
+//[of]:processImport
+method processImport (imp: *Import)
+
+	// Load the module
+	var filename	= self getFullName (imp name)
+	var module	= self builder loadModule (filename, imp module filename, imp line)
+	if module isNil
+		return cs_invalid
+	end
+
+	// Add the module to the list of imports of the module
+	self module addImport (module)
+	
+	// Import all public definitions
+	var status = cs_ok
+	module eachPublicDefinition do d
+		status |= self addGlobalDefinition (d, imp visibility)
+	end
+	return status
+//[cf]
+//[of]:getFullName
+method getFullName (moduleName: String16)
+
+	var filename	= moduleName
+	var fullname	= {TempStringBuffer} local
+	
+	var p = self includePath
+	while p notNil
+
+		fullname removeAll
+		fullname << p path
+		if fullname notEmpty and not fullname endsWithChar ($/)
+			fullname << $/
+		end
+		fullname << filename
+		fullname << ".co"
+
+		fullname string toOSname
+
+		if fullname string fileExists
+			var size	= fullname size + 1
+			var chars	= self pool allocateArray (Char16, size)
+			memoryCopy (chars, fullname string, size * Char size)
+			filename = chars
+			break
+		end
+		p = p next
+		
+	end
+
+	fullname release
+	return filename
+//[cf]
+//[cf]
+//[of]:declarations
+//[of]:declareAlias 
+method declareAlias (alias: *Alias, context: *Type, structure: *StructureType)
+
+	alias implicitType	= context
+	alias structure	= structure
+	
+	if context isNil
+		return self addGlobalDefinition (alias, alias visibility)
+	else
+		return self addContextualDefinition (context, alias)
+	end
+//[cf]
+//[of]:declareVariables
+method declareVariables (moduleVariables: *ModuleVariables)
+
+	var status = cs_ok
+	moduleVariables variables each do v
+		status |= self addGlobalDefinition (v, v visibility)
+	end
+	return status
+//[cf]
+//[of]:declareStructure
+method declareStructure (definition: *Definition)
+
+	if definition isType
+
+		// Add it to the stack to be defined later
+		self stack add (definition)
+		
+	end
+	
+	// Declare the structure or generic structure
+	return self addGlobalDefinition (definition, definition visibility)
+//[cf]
+//[of]:declareEnumeration
+method declareEnumeration (definition: *Definition)
+
+	// Declare the enumeration
+	var status = self addGlobalDefinition (definition, definition visibility)
+
+	// Declare each enumeration value
+	var enumeration = definition asTypeDefinition type asEnumeration
+	enumeration eachEnumerationValue do v
+		status |= self addGlobalDefinition (v, v visibility)
+	end
+	
+	return status
+//[cf]
+//[of]:declareFunction
+//[c]Declares a function
+//[c]
+method declareFunction (definition: *Definition, context: *Type, structure: *StructureType)
+
+	if definition code == d_function
+		(definition: *Function) implicitType	= context
+		(definition: *Function) structure	= structure
+	else
+		(definition: *GenericFunction) implicitType	= context
+		(definition: *GenericFunction) structure	= structure
+	end
+	
+	// Add entry points: a global function named main or any function 
+	// marked with the directive .entry
+	if definition code == d_function and context isNil
+		if definition name isEqual ('main')
+			(definition: *Function) directives entry = true
+		end
+		if definition directives entry
+			// Mark the function as used
+			(definition: *Function) use
+			// Add the root to the stack
+			self stack add (definition: *Function)
+		end
+	end
+	
+	if context isNil
+		return self addGlobalDefinition (definition, definition visibility)
+	else
+		return self addContextualDefinition (context, definition)
+	end
+//[cf]
+//[of]:declareExternFunction
+//[c]Declares an extern function
+//[c]
+method declareExternFunction (f: *Definition)
+
+	return self  addGlobalDefinition (f, f visibility)
+//[cf]
+//[of]:declareExtension
+method declareExtension (extension: *Extension)
+
+	var typeExpression	= extension typeExpression
+
+	// Get the type
+	var status = self evaluateSimpleType (typeExpression)
+	if status notOk
+		return status
+	end
+	var type = typeExpression constantType
+
+	// Declare all functions
+	extension functions each do f
+		status |= self declareFunction (f, type, nil)
+	end
+
+	return status
+//[cf]
+//[of]:declareStructureFunctions
+method declareStructureFunctions (structure: *StructureType)
+
+	var pointer	= self getPointerType (structure)
+	var status	= cs_ok
+	structure eachFunction do definition
+		status |= self declareFunction (definition, pointer, structure)
+	end
+
+	return status
+//[cf]
+//[cf]
+//[of]:definitions
+//[of]:defineVariables
+method defineVariables (moduleVariables: *ModuleVariables)
+
+	// Evaluate the expressions
+	var status = self evaluateExpressionList (moduleVariables expressions)
+	if status notOk
+		return status
+	end
+
+	var values = moduleVariables expressions values
+	values each do value
+		status |= self checkConstant (moduleVariables, value)
+	end
+	
+	// Check that the number of values is the same as the number of variables
+	var valueNumber	= values size
+	var variableNumber	= moduleVariables variables size
+	if variableNumber <> valueNumber
+		self error (moduleVariables, self err_variable_mismatch, valueNumber, variableNumber)
+		return cs_invalid
+	end
+	
+	// Assign the type to each variable
+	eachDual (moduleVariables variables, values) do variable, value
+		variable setType (value type)
+	end
+	
+	return status
+//[cf]
+//[of]:defineFunctionSignature
+//[c]Defines the type of arguments and the returned types
+//[c]
+//[c]	This method defines the function if we don't know the type yet.
+//[c]	If we know the type, we don't need the function to be fully 
+//[c]	defined (the function can be still partial).
+//[c]
+method defineFunctionSignature (f: *Function)
+
+	if f returnValues notNil
+		return cs_ok
+	end
+	
+	return self defineFunction (f)
+//[cf]
+//[of]:defineFunction
+method defineFunction (f: *Function)
+
+	// The function is already defined
+	if f defined
+		return cs_ok
+	end
+	
+	if f evaluating
+	
+		// The called function is being evaluated:
+		// we can set the 'has exit' flag to all functions evaluated below 
+		// because there is a potential exit path (it is not yet an infinite 
+		// recursion).
+		//
+		//	A
+		//	| \
+		//	B |
+		//	| /
+		//	C
+		// Starting with A:
+		// A calls B
+		// B calls C
+		// C calls A
+		// When recursing on A, we can mark B and C with exit flag (but not A).
+		//
+		var ec = self evaluatingContext
+		while ec func <> f
+			ec func hasExit = true
+			ec = ec parent
+		end
+		
+		return cs_broken
+	end
+	
+	// Previous attempt to define the function has failed
+	if f failed
+		return cs_invalid
+	end
+
+	// Set the 'evaluating' flag to detect recursive calls
+	self createEvaluatingContext ({EvaluatingContext}, f)
+	var status = self createModuleContext (	{ModuleContext}, 
+		f module,
+		f structure,
+		f implicitType,
+		f)
+	status |= self defineFunctionArguments (f)
+	var bc = {BlockContext}
+	self createBlockContext (bc, nil)
+
+	// Declare the arguments
+	f eachArgument do a
+		// Optional arguments (var args) have no name
+		if a name notEmpty
+			status |= self addLocalDefinition (bc definitions, a)
+		end
+	end
+	var va = f variableArguments
+	if va notNil
+		status |= self addLocalDefinition (bc definitions, va)
+		status |= self addLocalDefinition (bc definitions, va extraSize)
+		status |= self addLocalDefinition (bc definitions, va eachExtra)
+	end
+	
+	var breakContext = self breakContext
+	self breakContext = nil
+	if status isOk
+		// Set the public name
+		// Remark: the type of arguments must be successfully defined before
+		f publicName = self builder getPublicName (f)
+	
+		status = self defineFunctionBody (f)
+	end
+	
+	if status isInvalid
+		f failed = true
+	end
+	self breakContext = breakContext
+	self destroyBlockContext
+	self destroyModuleContext
+	self destroyEvaluatingContext
+	return status
+//[cf]
+//[of]:defineFunctionArguments
+method defineFunctionArguments (f: *Function)
+
+	// Configure all user arguments
+	// * evaluate the type of the argument
+	// * mark the argument as generalizable
+	var first = true
+	f eachArgument do argument
+	
+		// The argument is already defined if the function is instanciated
+		if argument type isNil
+		
+			var type = {*Type}
+			if first and f implicitType notNil
+				// It is the first implicit argument: use the implicit type
+				type = f implicitType
+			else			
+				// Evaluate the type
+				var status = self evaluateSimpleType (argument typeExpression)
+				if status notOk
+					return status
+				end
+				type = argument typeExpression constantType
+			end
+			argument configure (type, true)
+		end
+		first = false
+	end
+
+	return cs_ok
+//[cf]
+//[of]:defineFunctionBody
+//[c]Define the body of the function
+//[c]
+//[c]RETURN VALUE
+//[c]	Returns true if the body is valid.
+//[c]
+method defineFunctionBody (f: *Function)
+
+	var mc = self moduleContext
+	
+	var body = f body
+	var status = self evaluateBlock (body)
+	if status isInvalid
+		// Failure while evaluating the body: exit now
+		return status
+	end
+	
+	// Add an implicit return without parameter if we are sure that the 
+	// block is not terminated.
+	if not body broken and not body terminated and not body couldBeTerminated
+	
+		// Update the signature of the function
+		var ok = self mergeValues (empty_values)
+		if not ok
+			self error (f, self error_missing_return, mc returnValues)
+			return cs_invalid
+		end
+		
+		// Flag the function with 'has exit'
+		f hasExit = true
+		
+	end
+		
+	if not f hasExit
+		// The function does not have an exit: it is an infinite recursion
+		self error (f, self error_infinite_recursion, f name)
+		return cs_invalid
+	end
+	
+	if mc returnValues isNil
+		// There is an exit, but still no signature, let's try again later
+		self stack add (f)
+		return cs_broken
+	end
+		
+	// Hooray ! There is a signature
+	
+	if f returnValues isNil
+		// There was no previous signature
+		f returnValues = mc returnValues
+	else
+		// There was a previous signature
+		if not f returnValues equals (mc returnValues)
+			self error (f, self error_conflicting_signature, f name, mc returnValues)
+			return cs_invalid
+		end
+	end
+
+	// We have a signature but the function is still partial
+	if body partial
+		// We'll finish the job later
+		self stack add (f)
+		return cs_ok
+	end
+	
+	// Mark the function as successfully defined
+	f defined = true
+	return cs_ok
+//[cf]
+//[of]:defineAlias
+method defineAlias (alias: *Alias)
+
+	// The function is already defined
+	if notNil (constant (alias values [0]))
+		return cs_ok
+	end
+	
+	// Previous attempt has failed
+	if alias failed
+		return cs_invalid
+	end
+	
+	if alias evaluating
+		self error (alias, self error_infinite_recursion, alias name)
+		return cs_invalid
+	end
+	
+	// Set the 'evaluating' flag to detect recursive calls
+	alias evaluating = true
+	
+	var status = self createModuleContext (	{ModuleContext}, 
+		alias module,
+		alias structure,
+		alias implicitType,
+		nil)
+	status |= self evaluateExpression (alias expression)
+	self destroyModuleContext
+	
+	// The expression must be an alias singleton
+	if status isOk
+		var values = alias expression values
+		if values size == 0
+			self error (alias, self err_missing_value)
+			status = cs_invalid
+		elsif values size > 1
+			self error (alias, self err_too_many_values)
+			status = cs_invalid
+		elsif not values [0] isMeta and not values [0] isConstant
+			self error (alias, self err_not_constant_value)
+			status = cs_invalid
+		else
+			alias setValue (values [0])
+		end
+	end
+
+	if status isInvalid
+		alias failed = true
+	end
+	alias evaluating = false
+	return status
+//[cf]
+//[of]:defineExternFunction
+method defineExternFunction (f: *ExternFunction)
+
+	// The function is already defined
+	if f returnValues notNil
+		return cs_ok
+	end
+
+	// Previous attempt to define the function has failed
+	if f failed
+		return cs_invalid
+	end
+
+	// The function is already being defined:
+	// the function	must be evaluated in the arguments or return type.
+	// It is an error anyway.
+	if f evaluating
+		self error (f, self err_recursive_function_import)
+		f failed = true
+		return cs_invalid
+	end
+	
+	// Set the 'evaluating' flag to detect recursive calls
+	f evaluating = true
+	
+	var status = self createModuleContext (	{ModuleContext}, 
+		f module,
+		nil,
+		nil,
+		nil)
+	status |= self defineExternFunctionContent (f)
+	self destroyModuleContext
+	if status isInvalid
+		f failed = true
+	end
+
+	// Set the public name
+	// Remark: the type of argument must be successfully defined before
+	if status isOk and f publicName isNil
+		f publicName = self builder getPublicName (f)
+	end
+	
+	f evaluating = false
+	return status
+	
+method defineExternFunctionContent (f: *ExternFunction)
+
+	var status = cs_ok
+	
+	// Evaluate the type of the arguments
+	f argumentExpressions each do e
+		status |= self evaluateSimpleType (e)
+		if status isBroken
+			return status
+		end
+	end
+
+	// Evaluate the type of the returned types
+	var returnExpressions = f returnExpressions
+	if returnExpressions notNil
+		f returnExpressions each do e
+			status |= self evaluateSimpleType (e)
+			if status isBroken
+				return status
+			end
+		end
+	end
+	
+	if status notOk
+		return status
+	end
+	
+	// Now everything is ok, let's create the signatures
+	var pool = self pool
+	var argumentTypes = pool new (TypeList)
+	f argumentExpressions each do e
+		argumentTypes add ( pool, self getType (e))
+	end
+	f argumentTypes	= argumentTypes
+
+	if returnExpressions notNil
+		var returnValues = pool newValueList (returnExpressions size)
+		var i = 0 s
+		returnExpressions each do e
+			returnValues set (i, pool new (ExpressionValue, self getType (e), false, nil))
+			i ++
+		end
+		f returnValues	= returnValues
+	else
+		f returnValues	= empty_values
+	end
+
+	return cs_ok
+//[cf]
+//[of]:defineType
+method defineType (type: *Type)
+
+	if type isPointer
+		return self defineType (type asPointer target)
+	else
+		// Same as type size if not a pointer
+		return self defineTypeSize (type)
+	end
+//[cf]
+//[of]:defineTypeSize
+method defineTypeSize (type: *Type)
+
+	if type isStructure
+		return self defineStructure (type asStructure)
+	elsif type isEnumeration
+		return self defineEnumeration (type asEnumeration)
+	else
+		return cs_ok
+	end
+//[cf]
+//[of]:defineStructure
+//[c]Defines a structure (non generic)
+//[c]
+//[c]RETURN VALUE
+//[c]	Returns true if the structure is valid.
+//[c]
+method defineStructure (structure: *StructureType)
+
+	if structure defined
+		return cs_ok
+	end
+	
+	if structure failed
+		return cs_invalid
+	end
+	
+	// Consider defined if there is a recursion
+	if structure evaluating
+		return cs_ok
+	end
+	
+	var status = self createModuleContext (	{ModuleContext}, 
+		structure definition module,
+		structure,
+		nil,	// implicit type -- it should be a pointer to the structure
+		nil)
+
+	structure evaluating = true
+	status |= self defineStructureContent (structure)
+	structure evaluating = false
+	self destroyModuleContext
+	
+	if status isInvalid
+		structure failed = true
+	elsif status == cs_ok
+		structure defined = true
+	end
+	
+	return status
+//[cf]
+//[of]:defineStructureContent
+//[c]Defines the structure content
+//[c]
+//[c]REMARKS
+//[c]	It is not possible to declare functions and attributes before the
+//[c]	definition of the structure, because it is required to know the parent
+//[c]	structure to detect conflicts
+//[c]
+method defineStructureContent (structure: *StructureType)
+
+//[c]	 
+//[c]	 Define the parent if there should be once and it is not defined yet
+//[c]	 
+	var parentExpression = structure parentExpression
+	if structure parentStructure isNil and parentExpression notNil
+
+		// Get the expression	
+		var status = self evaluateType (parentExpression)
+		if status notOk
+			return status
+		end
+		
+		var parentType = parentExpression constantType
+		
+		// It must be a structure
+		if not parentType isStructure
+			self error (parentExpression, self error_not_structure, parentType)
+			return cs_invalid
+		end
+		
+		// The structure must be defined
+		status = self defineStructure (parentType asStructure)
+		if status notOk
+			return status
+		end
+
+		structure setParentStructure (parentType asStructure, self program)
+	end
+
+//[c]
+//[c]	Declare aliases
+//[c]
+	var pointer	= self getPointerType (structure)
+	var status	= cs_ok
+	structure eachAlias do a
+		status |= self declareAlias (a, pointer, structure)
+	end
+
+//[c]
+//[c]	Declare and define the attributes
+//[c]	
+	structure eachAttribute do attribute
+		status |= self defineStructureAttribute (structure, pointer, attribute)
+		if status isBroken
+			return status
+		end
+	end
+
+	if status notOk
+		return status
+	end
+
+//[c]
+//[c]	Compute the size, align and offset of each attribute
+//[c]
+	var sum = 0 s
+	var alignMax = 1 s
+
+	var parent = structure parentStructure
+	if parent notNil
+		var align = parent align
+		if align > alignMax
+			alignMax = align
+		end
+		align --
+		sum += align
+		sum &= not align
+		sum += parent size
+	end
+
+	structure eachAttribute do a
+		var st = a storageType
+		var align = st align
+		if align > alignMax
+			alignMax = align
+		end
+		align --
+		sum += align
+		sum &= not align
+		a offset = sum
+		sum += st size
+	end
+
+	structure align = alignMax
+	alignMax --
+	sum += alignMax
+	sum &= not alignMax
+	structure size = sum
+	
+//[c]	
+//[c]	Declare functions
+//[c]	
+	status |= self declareStructureFunctions (structure)
+	return status
+//[cf]
+//[of]:defineStructureAttribute
+method defineStructureAttribute (	structure	: *StructureType, 
+	pointer	: *Type, 
+	attribute	: *Attribute)
+
+	// The attribute is already defined ?
+	if attribute isDefined
+		return cs_ok
+	end
+	
+	// Get the type of the attribute
+	var status = self evaluateType (attribute typeExpression)
+	if status notOk
+		return status
+	end
+	
+	var type = attribute typeExpression constantType
+	
+	status = self defineTypeSize (type)
+	if status notOk
+		return status
+	end
+	
+	if type size == undefined_size
+		self error (attribute, self error_undefined_attribute_size, attribute name)
+		return cs_invalid
+	end
+	
+	attribute configure (type, self program)
+	
+	// Everything is ok, add the attribute to the dictionary of the structure
+	return self addContextualDefinition (pointer, attribute)
+//[cf]
+//[of]:defineEnumeration
+method defineEnumeration (enumeration: *EnumerationType)
+
+	if enumeration defined
+		return cs_ok
+	end
+	
+	if enumeration failed
+		return cs_invalid
+	end
+	
+	if enumeration evaluating
+		self error (enumeration definition, self error_infinite_recursion, enumeration name)
+		return cs_invalid
+	end
+	
+	enumeration evaluating = true
+
+	// Declare all functions
+	var status = cs_ok
+	enumeration functions each do f
+		status |= self declareFunction (f, enumeration, nil)
+	end
+
+	// Define enumeration values
+	status |= self createModuleContext (	{ModuleContext}, 
+		enumeration definition module,	// module
+		nil,	// structure
+		enumeration,	// context
+		nil)
+	status |= self defineEnumerationValues (enumeration)
+	self destroyModuleContext
+
+	enumeration evaluating = false
+	
+	if status isInvalid
+		enumeration failed = true
+	elsif status == cs_ok
+		enumeration defined = true
+	end
+	
+	return status
+//[cf]
+//[of]:defineEnumerationValues
+method defineEnumerationValues (enumeration: *EnumerationType)
+
+	// Evaluate the storage type
+	var type = self program uint32Type: *Type
+	var typeExpression = enumeration storageTypeExpression
+	if typeExpression notNil
+		var status = self evaluateType (typeExpression)
+		if status notOk
+			return status
+		end
+		type = typeExpression constantType
+		if not type isInteger
+			self error (enumeration definition, self err_type_not_an_integer, type)
+			return cs_invalid
+		end
+	end
+	enumeration storageType = type
+	
+	// Update the size of the type
+	enumeration size	= type size
+	enumeration align	= type size
+	
+	var currentValue = 0 : Unsigned64
+	enumeration eachEnumerationValue do v
+	
+		// Evaluate the value if any
+		var expression = v expression
+		if expression notNil
+			var status = self evaluateConstantInteger (expression)
+			var integ = 0:Unsigned64
+			currentValue = integ
+			if status notOk
+				return status
+			end
+			var value	= expression firstValue
+			var constant	= value constant
+			var integer	= constant asInteger value
+			currentValue = integer
+		end
+		
+		// Create the constant
+		var constant = self pool new (IntegerConstant, currentValue)
+		
+		// Assign the constant to the enumeration value
+		v setConstant (constant)
+	
+		// Next value
+		currentValue ++
+	end
+
+	enumeration next = currentValue
+		
+	return cs_ok
+//[cf]
+//[cf]
+//[of]:instructions
+//[of]:evaluateBlock
+method evaluateBlock (block: *Block)
+
+	self createBlockContext ({BlockContext}, block)
+
+	// Reset flags
+	block broken	= false
+	block partial	= false
+	block terminated	= false
+	block couldBeTerminated	= false
+
+	var status = cs_ok
+	block eachInstruction do instruction
+	
+		// We are not expecting more instruction in the block
+		if block terminated
+			self error (instruction, self error_instruction_never_executed)
+			status = cs_invalid
+			break
+		end
+		
+		// Evaluate the instruction
+		// An invalid instruction does not terminate the evaluation of the block.
+		status = self evaluateInstruction (instruction)
+		
+		// Do not try to evaluate the rest of the block
+		// as some variables could be missing, resulting too many
+		// errors
+		if status isInvalid
+			break
+		end
+		
+		// If the block is broken, we must stop evaluating instructions
+		// otherwise we could have errors that shouldn't be.
+		if status isBroken
+			block setBroken
+			
+			// The caller will check the flag separately from the invalid status
+			// (most blocks are conditionally executed, so the parent block
+			// won't be broken if this one is broken).
+			status &= not cs_broken
+			
+			break
+		end
+		
+	end
+	
+	self destroyBlockContext
+	return status
+//[cf]
+//[of]:evaluateInstruction
+method evaluateInstruction (instruction: *Instruction)
+
+	switch instruction code
+	case i_evaluate
+		return self evaluateEvaluate (instruction : *EvaluateInstruction)
+	case i_assign
+		return self evaluateAssign (instruction : *AssignInstruction)
+	case i_variable
+		return self evaluateVariable (instruction : *VariableInstruction)
+	case i_return
+		return self evaluateReturn (instruction : *ReturnInstruction)
+	case i_if
+		return self evaluateIf (instruction : *IfInstruction)
+	case i_while
+		return self evaluateWhile (instruction : *WhileInstruction)
+	case i_break
+		return self evaluateBreak (instruction : *BreakInstruction)
+	case i_switch
+		return self evaluateSwitch (instruction : *SwitchInstruction)
+	case i_yield
+		return self evaluateYield (instruction : *YieldInstruction)
+	else
+		assertFailure ("Unsupported instruction")
+		return cs_invalid
+	end
+//[cf]
+//[of]:evaluateEvaluate
+method evaluateEvaluate (instruction: *EvaluateInstruction)
+
+	return self evaluateExpressionList (instruction values)
+//[cf]
+//[of]:evaluateAssign
+method evaluateAssign (instruction: *AssignInstruction)
+
+	// Evaluate right values
+	var status = self evaluateExpressionList (instruction rightValues)
+	if status notOk
+		return status
+	end
+
+	// Evaluate left values
+	status = self evaluateExpressionList (instruction leftValues)
+	if status notOk
+		return status
+	end
+
+	// Check that the number of values is the same as the number of variables
+	var pool	= self pool
+	var leftValues	= instruction leftValues values
+	var rightValues	= instruction rightValues values
+	var leftNumber	= leftValues size
+	var rightNumber	= rightValues size
+	if leftNumber <> rightNumber
+		self error (instruction, self err_assign_mismatch, rightNumber, leftNumber)
+		return cs_invalid
+	end
+
+	// Ensure that each pair are compatibles and each left expression can be assigned
+	leftNumber each do i
+		var leftValue	= leftValues [i]
+		var rightValue	= rightValues [i]
+		var leftType	= leftValue type
+		status |= self checkCompatible (instruction, i, rightValue, leftType)
+		status |= self checkLvalue (instruction, leftValue)
+	end
+	if status notOk
+		return status
+	end
+
+	return cs_ok
+//[cf]
+//[of]:evaluateVariable
+method evaluateVariable (instruction: *VariableInstruction)
+
+	var status = self evaluateExpressionList (instruction expressions)
+	if status notOk
+		return status
+	end
+
+	// Check that the number of values is the same as the number of variables
+	var values	= instruction expressions values
+	var valueNumber	= values size
+	var variableNumber	= instruction variables size
+	if variableNumber <> valueNumber
+		self error (instruction, self err_variable_mismatch, valueNumber, variableNumber)
+		return cs_invalid
+	end
+	
+	// Assign the type to each variable
+	eachDual (instruction variables, values) do variable, value
+		variable setType (type (value))
+	end
+	
+	// Everything is ok: add the variable to the dictionary of the current block
+	var blockContext = self blockContext
+	instruction variables each do v
+		status |= self addLocalDefinition (blockContext definitions, v)
+	end
+	return status
+//[cf]
+//[of]:evaluateReturn
+method evaluateReturn (instruction: *ReturnInstruction)
+
+	// Read the list of expressions
+	var expressions = instruction expressions
+	if expressions notNil
+		var status = self evaluateExpressionList (instruction expressions)
+		if status notOk
+			return status
+		end
+	end
+
+	// Update the values
+	var values = instruction values
+	if values isNil
+		if expressions notNil
+			values = expressions values
+		else
+			values = empty_values
+		end
+		instruction values = values
+	end
+	
+	// Update the signature of the function
+	var ok = self mergeValues (values)
+	if not ok
+		self error (instruction, self error_incompatible_return_types, values, self moduleContext returnValues)
+		return cs_invalid
+	end
+	
+	// Flag the function with 'has exit'
+	self moduleContext func hasExit = true
+	
+	// Flag the block as terminated
+	self setBlockTerminated
+	return cs_ok
+//[cf]
+//[of]:evaluateIf
+method evaluateIf (instruction: *IfInstruction)
+
+	var status = cs_ok
+	
+	// Evaluate each condition/action
+	var hasElseBlock = false
+	instruction eachRule do rule
+		
+		// Evaluate the condition (the else rule has no condition)
+		if rule condition notNil
+			status |= self evaluateCondition (rule condition)
+		else
+			hasElseBlock = true
+		end
+		
+		// Evaluate the block
+		status |= self evaluateBlock (rule block)
+
+	end
+
+	// The if has an else block: at least one block is executed, test
+	// if the instruction is a terminator.
+	if hasElseBlock
+		var broken = true
+		var terminated = true
+		var couldBeTerminated = true
+		instruction eachRule do rule
+			var block = rule block
+			
+			// One path not broken: the instruction is not broken
+			if not block broken
+				broken = false
+			end
+			
+			// One path not terminated: the instruction is not terminated
+			if not block terminated
+				terminated = false
+			end
+			
+			// One path not broken and not terminated: the instruction can not be terminated
+			if not block broken and not block terminated
+				couldBeTerminated = false
+			end
+			
+		end
+		
+		if broken
+			status |= cs_broken
+		end
+			
+		if terminated
+			instruction terminated = true
+			self setBlockTerminated
+		end
+
+		if couldBeTerminated
+			self setBlockCouldBeTerminated
+		end
+		
+	end
+
+	return status
+//[cf]
+//[of]:evaluateWhile
+method evaluateWhile (instruction: *WhileInstruction)
+
+	var status	= cs_ok
+	
+	// Evaluate the condition if there is one (repeat is just a while
+	// without condition).
+	var condition = instruction condition
+	if condition notNil
+		status |= self evaluateCondition (condition)
+		if status isBroken
+			return status
+		end
+	end
+	
+	// Evaluate the block
+	self createBreakContext ({BreakContext}, instruction, nil)
+	var block = instruction block
+	status |= self evaluateBlock (block)
+	self destroyBreakContext
+	
+	// If the block is always evaluated and it is broken,
+	// then the current block is also broken
+	if condition isNil and block broken
+		return status | cs_broken
+	end
+	
+	// If the instruction is a repeat but the block has a
+	// break, the instruction is not a terminator
+	if condition isNil and not instruction hasBreak
+		self setBlockTerminated
+	end
+		
+	return cs_ok
+//[cf]
+//[of]:evaluateBreak
+method evaluateBreak (brk: *BreakInstruction)
+
+	// Find the break context
+	var breakContext = self breakContext
+	if breakContext isNil
+		self error (brk, self err_no_loop)
+		return cs_invalid
+	end
+	
+	brk expression	= breakContext expression
+	var instruction	= breakContext instruction
+	brk instruction	= instruction
+	
+	// Mark the instruction as having a 'break'
+	if instruction notNil
+		instruction hasBreak = true
+	end
+	
+	// Flag the block as terminated
+	self setBlockTerminated
+	return cs_ok
+//[cf]
+//[of]:evaluateSwitch
+method evaluateSwitch (instruction: *SwitchInstruction)
+
+	// Evaluate the value
+	var status = self evaluateExpression (instruction value)
+	if status notOk
+		return status
+	end
+	
+	var expression	= instruction value
+	var expressionValues	= expression values
+	if not (expressionValues size == 1 and isIntegerOrChar (type (expressionValues [0])))
+		self error (instruction, self err_not_a_numerical_expression)
+		return cs_invalid
+	end
+	
+	// Evaluate each choice
+	var hasElseBlock = false
+	instruction eachChoice do choice
+		var values	= choice values
+		var block	= choice block
+
+		// Evaluate each value
+		var localStatus = self evaluateExpressionList (values)
+		if localStatus isOk
+			var position = 0 s
+			values eachValue do value
+				status |= self checkConstant (instruction, value)
+				status |= self checkCompatible (instruction, position, value, type (expressionValues [0]))
+			end
+			position ++
+		end
+		status |= localStatus
+		
+		if values size == 0
+			hasElseBlock = true
+		end
+		
+		// Evaluate the block
+		status |= self evaluateBlock (block)
+		
+	end
+	
+	// Check for duplicates
+	if status isOk
+		self integerConstants removeAll
+		instruction eachChoice do choice
+			choice values eachValue do v
+				var constant = v constant : *IntegerConstant
+				if self integerConstants hasValue (constant)
+					self error (instruction, self err_switch_duplicate)
+					status |= cs_invalid
+				else
+					self integerConstants add (constant)
+				end
+			end
+		end
+	end
+
+	// The switch has an else block: at least one block is executed, test
+	// if the instruction is a terminator.
+	if hasElseBlock
+		var broken = true
+		var terminated = true
+		var couldBeTerminated = true
+		instruction eachChoice do choice
+			var block = choice block
+			
+			// One path not broken: the instruction is not broken
+			if not block broken
+				broken = false
+			end
+			
+			// One path not terminated: the instruction is not terminated
+			if not block terminated
+				terminated = false
+			end
+			
+			// One path not broken and not terminated: the instruction can not be terminated
+			if not block broken and not block terminated
+				couldBeTerminated = false
+			end
+		end
+		
+		if broken
+			status |= cs_broken
+		end
+			
+		if terminated
+			instruction terminated = true
+			self setBlockTerminated
+		end
+		
+		if couldBeTerminated
+			self setBlockCouldBeTerminated
+		end
+	end
+
+	return status
+//[cf]
+//[of]:evaluateYield
+method evaluateYield (instruction: *YieldInstruction)
+
+	// Read the list of arguments
+	var status = self evaluateExpressionList (instruction arguments)
+	if status notOk
+		return status
+	end
+	
+	// Set / Update the type of arguments of the yield
+	var f = self moduleContext func
+	var values = instruction arguments values
+	if f blockValues isNil
+		f blockValues = values duplicate (self pool)
+	else
+		var ok = f blockValues merge (values, self program)
+		if not ok
+			self error (instruction, self error_incompatible_yield_arguments, f blockValues, values)
+			return cs_invalid
+		end
+	end
+	
+	return cs_ok
+//[cf]
+//[cf]
+//[of]:expressions
+//[of]:evaluateExpressionList
+method evaluateExpressionList (expressions: *ExpressionList)
+
+	var status = cs_ok
+	expressions each do e
+		status |= self evaluateExpression (e)
+		// Stop as soon as the block is broken, but continue if the 
+		// expression is invalid (report the maximum number of errors).
+		if status isBroken
+			return status
+		end
+	end
+	
+	if status isOk
+		expressions computeValues (self pool)
+	end
+	
+	return status
+//[cf]
+
+//[of]:evaluateCondition
+method evaluateCondition (expression: *Expression)
+
+	var status = self evaluateExpression (expression)
+	if status notOk
+		return status
+	end
+	
+	if not expression isBoolean
+		self error (expression, self err_not_a_boolean_expression)
+		return cs_invalid
+	end
+	
+	return cs_ok
+//[cf]
+//[of]:evaluateType
+method evaluateType (expression: *Expression)
+
+	// Get the expression
+	var status = self evaluateExpression (expression)
+	if status notOk
+		return status
+	end
+	
+	// It must be a type
+	if expression values size <> 1 or not isMeta (expression values [0])
+		self error (expression, self error_cant_evaluate_type)
+		return cs_invalid
+	end
+	
+	return cs_ok
+//[cf]
+//[of]:evaluateSimpleType
+//[c]Same as 'evaluate constant type' but the type must be a simple type
+//[c]
+method evaluateSimpleType (expression: *Expression)
+
+	var status = self evaluateType (expression)
+	if status notOk
+		return status
+	end
+	
+	// It must be a simple type
+	var type = expression constantType
+	if not type isSimple
+		self error (expression, self error_not_a_simple_type, type)
+		return cs_invalid
+	end
+	
+	return cs_ok
+//[cf]
+//[of]:evaluateConstantInteger
+method evaluateConstantInteger (expression: *Expression)
+
+	// Get the expression
+	var status = self evaluateExpression (expression)
+	if status notOk
+		return status
+	end
+	
+	// It must be an integer
+	var values = expression values
+	if not (values size == 1 and isIntegerOrChar (type (values [0])))
+		self error (expression, self err_not_an_integer)
+		return cs_invalid
+	end
+	
+	// It must be a constant
+	return self checkConstant (expression, values [0])
+//[cf]
+
+//[of]:evaluateExpression
+method evaluateExpression (expression: *Expression)
+
+	// Important: never re-evaluate an expression because of some mutations
+	// such as integer cast, making the expression non re-evaluable
+	if expression values notNil
+		return cs_ok
+	end
+	
+	switch expression code
+	case e_literal_char_8
+		return self evaluateLiteralChar8 (expression : *IntegerExpression)
+	case e_literal_char_16
+		return self evaluateLiteralChar16 (expression : *IntegerExpression)
+	case e_literal_string_8
+		return self evaluateLiteralString8 (expression : *String8Expression)
+	case e_literal_string_16
+		return self evaluateLiteralString16 (expression : *String16Expression)
+	case e_literal_integer
+		return self evaluateLiteralInteger (expression : *IntegerExpression)
+	case e_definition
+		return self evaluateDefinition (expression: *DefinitionExpression)
+	case e_minimal_and, e_minimal_or
+		return self evaluateBooleanMinimalOperation (expression: *PairExpression)
+	case e_function_type
+		return self evaluateFunctionType (expression: *FunctionTypeExpression)
+	case e_function
+		return self evaluateFunction (expression: *FunctionExpression)
+	case e_offset
+		return self evaluateOffset (expression: *OffsetExpression)
+	case e_cond
+		return self evaluateCond (expression: *CondExpression)
+	else
+		assertFailure ("Unsupported expression")
+		return cs_invalid
+	end
+//[cf]
+//[of]:evaluateLiteralChar8
+method evaluateLiteralChar8 (expression: *IntegerExpression)
+
+	expression values = self newIntegerSingleton (self program char8Type, expression integer)
+	return cs_ok
+//[cf]
+//[of]:evaluateLiteralChar16
+method evaluateLiteralChar16 (expression: *IntegerExpression)
+
+	expression values = self newIntegerSingleton (self program char16Type, expression integer)
+	return cs_ok
+//[cf]
+//[of]:evaluateLiteralString8
+method evaluateLiteralString8 (expression: *String8Expression)
+
+	var pool 	= self pool
+	var string	= expression string
+	var constant	= pool new (String8Constant, self program, string)
+	var values	= self newValue (self program string8Type, false, constant)
+	
+	expression values = values
+	return cs_ok
+//[cf]
+//[of]:evaluateLiteralString16
+method evaluateLiteralString16 (expression: *String16Expression)
+
+	var pool 	= self pool
+	var string	= expression string
+	var constant	= pool new (String16Constant, self program, string)
+	var values	= self newValue (self program string16Type, false, constant)
+	
+	expression values = values
+	return cs_ok
+//[cf]
+//[of]:evaluateLiteralInteger
+method evaluateLiteralInteger (expression: *IntegerExpression)
+
+	expression values = self newIntegerSingleton (self program int32Type, expression integer)
+	return cs_ok
+//[cf]
+//[of]:evaluateDefinition
+method evaluateDefinition (expression: *DefinitionExpression)
+
+	// Read the list of arguments
+	var status = self evaluateExpressionList (expression arguments)
+	
+	// Do not try to evaluate this expression if one or more argument is invalid.
+	// Also stop evaluation if the block is broken
+	if status notOk
+		return status
+	end
+	
+	// Find the definition if not known yet
+	if expression definition isNil
+		var definition = self getDefinition (expression, expression name, expression argumentValues)
+		if definition isNil
+			return cs_invalid
+		end
+		
+		expression definition = definition
+	end
+
+	// Get the values of the expression if not known yet
+	if expression values notNil
+		return cs_ok
+	end
+	
+	var definition	= expression definition
+	var arguments	= expression argumentValues
+	var arg1	= ExpressionValue nil
+	var arg2	= ExpressionValue nil
+	if arguments size > 0
+		arg1 = arguments [0]
+		if arguments size > 1
+			arg2 = arguments [1]
+		end
+	end
+
+	// Check the block once for all
+	status = self checkInlineBlock (expression)
+	if status notOk
+		return cs_invalid
+	end
+
+	switch definition code
+	case d_alias
+		return self evaluateAlias (expression, definition: *Alias)
+	case d_function
+		return self evaluateFunctionCall (expression, arguments, definition asFunction)
+	case d_extern_function
+		return self evaluateExternFunctionCall (expression, arguments, definition asExternFunction)
+	case d_argument
+		return self evaluateArgument (expression, definition asArgument)
+	case d_variable
+		return self evaluateVariable (expression, definition asVariable)
+	case d_global_variable
+		return self evaluateGlobalVariable (expression, definition asGlobalVariable)
+	case d_attribute
+		return self evaluateAttribute (expression, arg1, definition asAttribute)
+	case d_parameter
+		return self evaluateParameter (expression, definition asParameter)
+	case d_enumeration_value
+		return self evaluateEnumerationValue (expression, definition asEnumerationValue)
+	case d_type
+		return self evaluateType (expression, definition asTypeDefinition)
+	case d_true
+		return self evaluateBooleanLiteral (expression, self program trueValues)
+	case d_false
+		return self evaluateBooleanLiteral (expression, self program falseValues)
+	case d_nil
+		return self evaluateNil (expression)
+	case d_variable_arguments
+		return self evaluateVariableArguments (expression, definition asVariableArguments)
+	case d_extra_size
+		return self evaluateExtraSize (expression, definition asExtraDefinition)
+	case d_each_extra
+		return self evaluateEachExtra (expression, definition asExtraDefinition)
+	case d_typeof
+		return self evaluateTypeOfValue (expression, arg1)
+
+//[of]:	meta
+	case d_meta_local
+		return self evaluateMetaLocal (expression, arg1)
+	case d_meta_cast
+		return self evaluateMetaCast (expression, arg1, arg2)
+	case d_meta_pointer
+		return self evaluateMetaPointer (expression, arg1)
+	case d_meta_size
+		return self evaluateMetaSize (expression, arg1)
+	case d_meta_next
+		return self evaluateMetaNext (expression, arg1)
+	case d_meta_nil
+		return self evaluateMetaNil (expression, arg1)
+	case d_meta_array_1
+		return self evaluateMetaArray1 (expression, arg1)
+	case d_meta_array_2
+		return self evaluateMetaArray2 (expression, arg1, arg2)
+	case d_meta_target
+		return self evaluateMetaTarget (expression, arg1)
+	case d_meta_initialize
+		return self evaluateMetaInitialize (expression, arguments)
+//[cf]
+//[of]:	integer
+	case	d_integer_add,	
+		d_integer_sub, 	
+		d_integer_mul, 	
+		d_integer_div, 	
+		d_integer_mod,	
+		d_integer_and,	
+		d_integer_or,	
+		d_integer_xor	
+			return self evaluateIntegerBinaryOperation (expression, definition asOperation, arg1, arg2)
+	case	d_integer_shl,	
+		d_integer_shr	
+			return self evaluateIntegerShift (expression, definition asOperation, arg1, arg2)
+	case	d_integer_eq,	
+		d_integer_ne,	
+		d_integer_le,	
+		d_integer_lt,	
+		d_integer_ge,	
+		d_integer_gt	
+			return self evaluateIntegerBinaryComparison (expression, definition asOperation, arg1, arg2)
+	case	d_integer_pos, 	
+		d_integer_neg,	
+		d_integer_not	
+			return self evaluateIntegerUnaryOperation (expression, definition asOperation, arg1)
+	case	d_integer_assign_add,	
+		d_integer_assign_sub, 	
+		d_integer_assign_mul, 	
+		d_integer_assign_div, 	
+		d_integer_assign_mod,	
+		d_integer_assign_and,	
+		d_integer_assign_or,	
+		d_integer_assign_xor	
+			return self evaluateIntegerAssignOperation (expression, arg1, arg2)
+	case	d_integer_assign_inc,	
+		d_integer_assign_dec	
+			return self evaluateUnaryAssignOperation (expression, arg1)
+	case	d_integer_assign_shl,	
+		d_integer_assign_shr	
+			return self evaluateIntegerAssignShift (expression, arg1, arg2)
+//[cf]
+//[of]:	char
+	case	d_char_add
+		return self evaluateCharAdd (expression, definition asOperation, arg1, arg2)
+	
+	case	d_char_sub
+		return self evaluateCharSub (expression, definition asOperation, arg1, arg2)
+		
+	case	d_char_eq,
+		d_char_ne,
+		d_char_le,
+		d_char_lt,
+		d_char_ge,
+		d_char_gt
+		return self evaluateCharBinaryComparison (expression, definition asOperation, arg1, arg2)
+		
+	case	d_char_assign_add,
+		d_char_assign_sub
+		return self evaluateCharAssignOperation (expression, definition asOperation, arg1, arg2)
+	
+	case	d_char_assign_inc,
+		d_char_assign_dec
+		return self evaluateUnaryAssignOperation (expression, arg1)
+//[cf]
+//[of]:	boolean
+	case	d_boolean_and,
+		d_boolean_or,
+		d_boolean_eq,
+		d_boolean_ne
+		return self evaluateBooleanBinaryOperation (expression, definition asOperation, arg1, arg2)
+		
+	case	d_boolean_not
+		return self evaluateBooleanUnaryOperation (expression, definition asOperation)
+		
+	case	d_boolean_assign_and,
+		d_boolean_assign_or
+		return self evaluateBooleanAssignOperation (expression, arg1, arg2)
+//[cf]
+//[of]:	pointer
+	case	d_pointer_eq,
+		d_pointer_ne
+		return self evaluatePointerCompare (expression, arg1, arg2)
+		
+	case	d_pointer_dereference
+		return self evaluatePointerDereference (expression, arg1)
+		
+	case	d_pointer_super
+		return self evaluatePointerSuper (expression, arg1)
+		
+	case	d_pointer_call
+		return self evaluatePointerCall (expression, arguments)
+//[cf]
+//[of]:	array
+	case	d_array_index
+		return self evaluateArrayIndex (expression, arg1, arg2)
+		
+	case	d_array_index_0
+		return self evaluateArrayIndex0 (expression, arg1)
+		
+	case	d_array_add
+		return self evaluateArrayAdd (expression, arg1, arg2)
+		
+	case	d_array_sub
+		return self evaluateArraySub (expression, arg1, arg2)
+		
+	case	d_array_le,
+		d_array_lt,
+		d_array_ge,
+		d_array_gt
+		return self evaluateArrayBinaryComparison (expression, arg1, arg2)
+	case	d_array_assign_add,
+		d_array_assign_sub
+		return self evaluateArrayAssignOperation (expression, arg1, arg2)
+		
+	case	d_array_assign_inc,
+		d_array_assign_dec
+		return self evaluateUnaryAssignOperation (expression, arg1)
+//[cf]
+
+	else
+		assertFailure ("Evaluating unknown definition")
+		return cs_invalid
+	end
+//[cf]
+//[of]:evaluateFunctionType
+method evaluateFunctionType (expression: *FunctionTypeExpression)
+
+	var status = self evaluateExpressionList (expression argumentExpressions)
+	if status notOk
+		return status
+	end
+	
+	status = self evaluateExpressionList (expression returnTypeExpressions)
+	if status notOk
+		return status
+	end
+
+	// Pass 1 - check types
+	// Use a two passes system to avoid allocating multiple times
+	// 2 list of types because of the multipass.
+	expression argumentExpressions eachValue do value
+		var type = self getSimpleType (expression, value)
+		if type isNil
+			status |= cs_invalid
+		end
+	end
+	expression returnTypeExpressions eachValue do value
+		var type = self getSimpleType (expression, value)
+		if type isNil
+			status |= cs_invalid
+		end
+	end
+	if status notOk
+		return status
+	end
+
+	// Pass 2 - create the list of types
+	var pool	= self pool
+	var types	= pool new (TypeList)
+	expression argumentExpressions eachValue do value
+		var type = self getSimpleType (expression, value)
+		types add (pool, type)
+	end
+	var returnTypes = pool new (TypeList)
+	expression returnTypeExpressions eachValue do value
+		var type = self getSimpleType (expression, value)
+		returnTypes add (pool, type)
+	end
+	
+	// Get the function type
+	var functionType	= self getFunctionType (expression callingConvention, types, returnTypes)
+	var pointerType	= self getPointerType (functionType)
+	var meta	= pointerType meta
+	
+	expression values = self newValue (meta, false, nil)
+	return cs_ok
+//[cf]
+//[of]:evaluateFunction
+method evaluateFunction (expression: *FunctionExpression)
+
+	var pool	= self pool
+
+	// Read the list of arguments
+	var status = self evaluateExpressionList (expression typeExpressions)
+	
+	// Do not try to evaluate this expression if one or more argument is invalid.
+	// Also stop evaluation if the block is broken
+	if status notOk
+		return status
+	end
+	
+	// Convert the values of meta (if not done already)
+	if expression argumentValues isNil
+		var metaValues	= expression typeExpressions values
+		var n	= metaValues size
+		var values	= pool newValueList (n)
+		n each do i
+			var meta = self getSimpleType (expression, metaValues [i])
+			if meta isNil
+				status |= cs_invalid
+			else
+				status |= self defineType (meta)
+				values set (i, pool new (ExpressionValue, meta, false, nil))
+			end
+		end
+		if status notOk
+			return status
+		end
+		expression argumentValues = values
+	end
+	
+	// Find the definition (if not known yet)
+	if expression func isNil
+		var definition = self getDefinition (expression, expression name, expression argumentValues)
+		if definition isNil
+			return cs_invalid
+		end
+		
+		// It must be a function or an extern function
+		var code = definition code
+		if code == d_function 
+			status = self checkFunctionCall (expression, expression argumentValues, definition asFunction, true)
+		elsif code == d_extern_function
+			status = self checkExternFunctionCall (expression, expression argumentValues, definition asExternFunction, true)
+		else
+			self error (expression, self err_not_a_function, expression name)
+			status = cs_invalid
+		end
+		if status notOk
+			return status
+		end
+		
+		expression func = definition
+	end
+
+	// Compute the function type
+	var f = expression func asPrototype
+	
+	// Calling convention
+	var callingConvention = f callingConvention
+	
+	// Get the types
+	var types = pool new (TypeList)
+	expression argumentValues each do v
+		types add (pool, v type)
+	end
+
+	// Get the return types
+	var returnTypes = pool new (TypeList)
+	f returnValues each do v
+		returnTypes add (pool, v type)
+	end
+	
+	var functionType	= self getFunctionType (callingConvention, types, returnTypes)
+	var pointerType	= self getPointerType (functionType)
+	var constant	= pool new (FunctionConstant, self program, f)
+	expression values	= self newValue (pointerType, false, constant)
+	return cs_ok
+//[cf]
+//[of]:evaluateOffset
+method evaluateOffset (expression: *OffsetExpression)
+
+	// Get the type
+	var status = self evaluateType (expression typeExpression)
+	if status notOk
+		return status
+	end
+	var type = expression typeExpression constantType
+	
+	// The type must be a structure
+	if not type isStructure
+		self error (expression, self error_not_structure, type)
+		return cs_invalid
+	end
+	
+	// Define the type
+	status = self defineType (type)
+	if status notOk
+		return status
+	end
+
+	var structure = type asStructure
+	
+	// Find the attribute
+	var name = expression attributeName
+	var attribute = {*Attribute}
+	repeat
+		attribute = structure findAttribute (name)
+		if attribute notNil
+			break
+		end
+		structure = structure parentStructure
+		if structure isNil
+			self error (expression, self error_unknown_attribute, name)
+			return cs_invalid
+		end
+	end
+	expression attribute	= attribute
+		
+	// Create the value
+	expression values = self program sizeValues
+	return cs_ok
+//[cf]
+//[of]:evaluateCond
+method evaluateCond (expression: *CondExpression)
+
+	// Evaluate the expressions
+	// expressions are independent and can be all evaluated without checking
+	// the broken status
+	var status = self evaluateCondition (expression condition)
+	status |= self evaluateExpressionList (expression first)
+	status |= self evaluateExpressionList (expression second)
+	if status notOk
+		return status
+	end
+	
+
+	// Compute the values
+	var values = expression first values duplicate (self pool)
+	var ok = values merge (expression second values, self program)
+	if not ok
+		self error (expression, self error_incompatible_cond_values, expression second values, expression first values)
+		return cs_invalid
+	end
+	
+	expression values = values
+	return cs_ok
+//[cf]
+
+//[of]:evaluateAlias
+method evaluateAlias (expression: *Expression, alias: *Alias)
+
+	var status = self defineAlias (alias)
+	if status notOk
+		return status
+	end
+
+	alias use
+
+	// The values must be duplicated as integer and char values are mutables
+	// e.g.
+	// 	const zero = 0	// the initial value is an int32
+	// 	1:Int8 + zero	// changes the type of the value to a byte
+	// 	1:Int64 + zero	// changes the type of the value to an int64
+	//
+	var values = alias values copy (self pool)
+	
+	expression values = values
+	return cs_ok
+//[cf]
+//[of]:evaluateFunctionCall
+method evaluateFunctionCall (	expression	: *DefinitionExpression, 
+	arguments	: *ValueList, 
+	func	: *Function)
+
+	var status = self checkFunctionCall (expression, arguments, func, false)
+	if status notOk
+		return status
+	end
+	
+	if func hasYield
+		var inlineBlock	= expression inlineBlock
+		var block = inlineBlock instructions
+
+		// Create the list of arguments of the block:
+		// Merge the types expected from the function (blockValues)
+		// and the list of ids in the inline block.
+		if inlineBlock arguments isNil
+			inlineBlock arguments = self pool new (ArgumentList)
+			eachDual (inlineBlock parameters, func blockValues) do p, v
+				var a = self pool new (Argument, p module, p line, p name, nil)
+				a configure (v type, false)
+				inlineBlock arguments add (self pool, a)
+			end
+		end
+				
+		// Create a block context to get a scope for arguments
+		var bc = {BlockContext}
+		self createBlockContext (bc, block)
+		
+		// Declare the arguments
+		inlineBlock arguments each do a
+			status |= self addLocalDefinition (bc definitions, a)
+		end
+	
+		// Evaluate block
+		if status isOk
+			self createBreakContext ({BreakContext}, nil, expression)
+			status	= self evaluateBlock (block)
+			self destroyBreakContext
+		end
+		
+		self destroyBlockContext
+		
+		// Assign the values only if the status is ok and the block is
+		// complete (i.e. not broken and not partial). Because we need
+		// to re-evaluate the function call later and it is done only if the
+		// 'values' attribute is not set.
+		if status isOk and not block broken and not block partial
+			expression values = func returnValues
+		end
+	else
+		expression values = func returnValues
+	end
+	
+	return status
+//[cf]
+//[of]:evaluateExternFunctionCall
+method evaluateExternFunctionCall (	expression	: *Expression, 
+	arguments	: *ValueList, 
+	f	: *ExternFunction)
+
+	var status = self checkExternFunctionCall (expression, arguments, f, false)
+	if status notOk
+		return status
+	end
+	
+	expression values = f returnValues
+	return cs_ok
+//[cf]
+//[of]:evaluateArgument
+method evaluateArgument (	expression	: *Expression, 
+	definition	: *Argument)
+
+	// The type of an argument may not be defined
+	// (it happens when the function is an entry point)
+	var status	= self defineType (definition type)
+	if status notOk
+		return status
+	end
+
+	expression values = definition values
+	return cs_ok
+//[cf]
+//[of]:evaluateGlobalVariable
+method evaluateGlobalVariable (	expression	: *Expression, 
+	definition	: *GlobalVariable)
+
+	expression values = definition values
+	definition use
+	return cs_ok
+//[cf]
+//[of]:evaluateVariable
+method evaluateVariable (expression: *Expression, definition: *Variable)
+
+	expression values = definition values
+	return cs_ok
+//[cf]
+//[of]:evaluateAttribute
+method evaluateAttribute (	expression	: *Expression, 
+	arg	: *ExpressionValue, 
+	definition	: *Attribute)
+
+	var type	= definition storageType
+	var status	= self defineType (type)
+	if status notOk
+		return status
+	end
+	
+	expression values = definition values
+	return cs_ok
+//[cf]
+//[of]:evaluateParameter
+method evaluateParameter (	expression	: *Expression, 
+	definition	: *Parameter)
+
+	expression values = definition values
+	return cs_ok
+//[cf]
+//[of]:evaluateEnumerationValue
+method evaluateEnumerationValue (	expression	: *Expression, 
+	definition	: *EnumerationValue)
+
+	var enumeration	= definition enumeration
+	var status = self defineEnumeration (enumeration)
+	if status notOk
+		return status
+	end
+
+	// Create a new value on each evaluation as it is a constant and
+	// constants are mutables		
+	expression values = self pool new (ValueList1, enumeration, false, definition constant)
+	return cs_ok
+//[cf]
+//[of]:evaluateNil
+method evaluateNil (expression: *Expression)
+
+	expression values = self program nilPointerValues
+	return cs_ok
+//[cf]
+//[of]:evaluateVariableArguments
+method evaluateVariableArguments (	expression	: *DefinitionExpression, 
+	variableArguments	: *VariableArguments)
+
+	expression values = variableArguments values
+	return cs_ok
+//[cf]
+//[of]:evaluateExtraSize
+method evaluateExtraSize (	expression	: *DefinitionExpression, 
+	definition	: *ExtraDefinition)
+
+	var extraDefinition	= expression definition asExtraDefinition
+	var variableArguments	= extraDefinition variableArguments
+	var extraSize	= variableArguments size
+
+	expression values = self newIntegerSingleton (self program uint32Type, extraSize : Unsigned64)
+	return cs_ok
+//[cf]
+//[of]:evaluateEachExtra
+method evaluateEachExtra (	expression	: *DefinitionExpression, 
+	definition	: *ExtraDefinition)
+
+	var pool	= self pool
+	var variableArguments	= definition variableArguments
+	var inlineBlock	= expression inlineBlock
+	var parameters	= inlineBlock parameters
+	var parameterCount	= parameters size
+	
+	// Check the number of arguments
+	if parameterCount <> 1
+		self error (expression, self err_argument_mismatch, 1, parameterCount)
+		return cs_invalid
+	end
+
+	// Create the blocks
+	var blocks = inlineBlock eachExtraBlocks
+	if blocks isNil
+		blocks	= pool new (BlockList)
+		inlineBlock eachExtraBlocks = blocks
+		
+		var instructions = inlineBlock instructions
+		variableArguments size each do i
+			blocks add (pool, instructions copy (pool, self block))
+		end
+	end
+
+	// Evaluate blocks
+	eachDual (blocks, variableArguments returnArguments) do block, argument
+	
+		// Create a block context to get a scope for arguments
+		var bc = {BlockContext}
+		self createBlockContext (bc, block)
+		
+		// Declare the argument
+		// Hack: change the name of the argument
+		// The name should be empty or the name of a previous each-extra
+		argument name = parameters first name
+		var status = self addLocalDefinition (bc definitions, argument)
+		
+		// Evaluate the block
+		if status isOk
+			status = self evaluateBlock (block)
+		end
+
+		self destroyBlockContext
+		
+		if status notOk
+			return status
+		end
+	end
+
+	expression values = empty_values
+	return cs_ok
+//[cf]
+//[of]:evaluateType
+method evaluateType (	expression	: *Expression, 
+	definition	: *TypeDefinition)
+
+	expression values = definition values
+	return cs_ok
+//[cf]
+//[of]:evaluateTypeOfValue
+method evaluateTypeOfValue (	expression	: *DefinitionExpression, 
+	argument	: *ExpressionValue)
+
+	var type	= argument type
+	if type isMeta
+		self error (expression, self err_cannot_be_a_type)
+		return cs_invalid
+	end
+	
+	expression values = self newValue (type meta, false, nil)
+	return cs_ok
+//[cf]
+
+//[of]:evaluateIntegerBinaryOperation
+method evaluateIntegerBinaryOperation (	expression	: *Expression, 
+	definition	: *OperationDefinition, 
+	left	: *ExpressionValue, 
+	right	: *ExpressionValue )
+
+	// The type of the operation (Int8 .. Int64, Unsigned8 .. Unsigned64)
+	var type = left type
+	
+	// 1. Try to mutate the second argument to the type of the first one
+	var status = self checkCompatible (expression, 1, right, type)
+	if status notOk
+		return status
+	end
+	
+	// 2. If both values are constant, evaluate
+	if left areConstants (right)
+		var n1	= left constantInteger
+		var n2	= right constantInteger
+		var result	= type evaluateIntegerBinaryOperation (n1, n2, definition code)
+		
+		expression values = self newIntegerSingleton (type, result)
+		expression code = e_literal_integer	// mutate the expression
+	else
+		// The type of the operation is given by the definition (it avoids 
+		// the creation of an object). But for enumeration we must create
+		// the list of values as the type is derived.
+		var values = definition values
+		if values isNil
+			values	= self newValue (type, false, nil)
+		end
+		expression values = values
+	end
+
+	return cs_ok
+//[cf]
+//[of]:evaluateIntegerBinaryComparison
+method evaluateIntegerBinaryComparison (	expression	: *Expression, 
+	definition	: *OperationDefinition, 
+	left	: *ExpressionValue, 
+	right	: *ExpressionValue )
+
+	// The type of the operation (Int8 .. Int64, Unsigned8 .. Unsigned64)
+	var type = left type
+	
+	// 1. Try to mutate the second argument to the type of the first one
+	var status = self checkCompatible (expression, 1, right, type)
+	if status notOk
+		return status
+	end
+	
+	// 2. If both values are constant, evaluate
+	if left areConstants (right)
+		var n1	= left constantInteger
+		var n2	= right constantInteger
+		var result	= type evaluateIntegerBinaryComparison (n1, n2, definition code)
+		
+		expression values = self newBooleanSingleton (result)
+		expression code = e_literal_boolean	// mutate the expression
+	else
+		expression values = self program booleanValues
+	end
+	return cs_ok
+//[cf]
+//[of]:evaluateIntegerUnaryOperation
+method evaluateIntegerUnaryOperation (	expression	: *Expression, 
+	definition	: *OperationDefinition, 
+	argument	: *ExpressionValue )
+
+	// The type of the operation (Int8 .. Int64, Unsigned8 .. Unsigned64)
+	var type = argument type
+	
+	// If the value is constant, evaluate
+	if argument isConstant
+		var n	= argument constantInteger
+		var result	= type evaluateIntegerUnaryOperation (n, definition code)
+		
+		expression values = self newIntegerSingleton (type, result)
+		expression code = e_literal_integer	// mutate the expression
+	else
+		// The type of the operation is given by the definition (it avoids 
+		// the creation of an object). But for enumeration we must create
+		// the list of values as the type is derived.
+		var values = definition values
+		if values isNil
+			values	= self newValue (type, false, nil)
+		end
+		expression values = values
+	end
+
+	return cs_ok
+//[cf]
+//[of]:evaluateIntegerShift
+method evaluateIntegerShift (	expression	: *Expression, 
+	definition	: *OperationDefinition, 
+	left	: *ExpressionValue, 
+	right	: *ExpressionValue )
+
+	// The type of the operation (Int8 .. Int64, Unsigned8 .. Unsigned64)
+	var type = left type
+	
+	// 1. Try to mutate the second argument to an unsigned byte
+	var status = self checkCompatible (expression, 1, right, self program uint8Type)
+	if status notOk
+		return status
+	end
+	
+	// 2. If both values are constant, evaluate
+	if left areConstants (right)
+		var n1	= left constantInteger
+		var n2	= right constantInteger
+		var result	= type evaluateIntegerBinaryOperation (n1, n2, definition code)
+		
+		expression values = self newIntegerSingleton (type, result)
+		expression code = e_literal_integer	// mutate the expression
+	else
+		// The type of the operation is given by the definition (it avoids 
+		// the creation of an object). But for enumeration we must create
+		// the list of values as the type is derived.
+		var values = definition values
+		if values isNil
+			values	= self newValue (type, false, nil)
+		end
+		expression values = values
+	end
+	
+	return cs_ok
+//[cf]
+//[of]:evaluateIntegerAssignOperation
+method evaluateIntegerAssignOperation (	expression	: *Expression, 
+	left	: *ExpressionValue, 
+	right	: *ExpressionValue )
+
+	// The type of the operation (Int8 .. Int64, Unsigned8 .. Unsigned64)
+	var type = left type
+	
+	// Try to mutate the second argument to the type of the first one
+	var status = self checkCompatible (expression, 1, right, type)
+	status |= self checkLvalue (expression, left)
+	if status notOk
+		return status
+	end
+	
+	expression values = empty_values
+	return cs_ok
+//[cf]
+//[of]:evaluateIntegerAssignShift
+method evaluateIntegerAssignShift (	expression	: *Expression, 
+	left	: *ExpressionValue, 
+	right	: *ExpressionValue )
+
+	var status = self checkCompatible (expression, 1, right, self program uint8Type)
+	status |= self checkLvalue (expression, left)
+	if status notOk
+		return status
+	end
+
+	expression values = empty_values
+	return cs_ok
+//[cf]
+
+//[of]:evaluateCharAdd
+method evaluateCharAdd (	expression	: *Expression, 
+	definition	: *OperationDefinition, 
+	charArgument	: *ExpressionValue, 
+	offsetArgument	: *ExpressionValue)
+
+	var charType	= charArgument type	// Char8 or Char16
+	var offsetType	= offsetArgument type
+	
+	if not offsetType isInteger
+		self error (expression, self err_char_op_arg_2_not_integer)
+		return cs_invalid
+	end
+	
+	if offsetArgument isConstant
+		
+		// If both values are constant, evaluate
+		if charArgument isConstant
+			var n1	= charArgument constantInteger
+			var n2	= offsetArgument constantInteger
+			var result	= n1 + n2
+			
+			expression values	= self newIntegerSingleton (charType, result)
+			expression code	= charType isChar8 cond e_literal_char_8 else e_literal_char_16	// mutate the expression
+		else
+			// The type of the operation is given by the definition
+			// (it avoids the creation of an object)
+			expression values = definition values
+		end
+		
+	else
+		if charType size <> offsetType size
+			self error (expression, self err_char_op_arg_2_different_size)
+			return cs_invalid
+		end
+		
+		// The type of the operation is given by the definition
+		// (it avoids the creation of an object)
+		expression values = definition values
+	end
+	
+	return cs_ok
+//[cf]
+//[of]:evaluateCharSub
+method evaluateCharSub (	expression	: *Expression, 
+	definition	: *OperationDefinition, 
+	charArgument	: *ExpressionValue, 
+	offsetArgument	: *ExpressionValue)
+
+	var charType	= charArgument type	// Char8 or Char16
+	var offsetType	= offsetArgument type
+
+//[c]
+//[c]	Char minus char
+//[c]
+	if offsetType isChar
+
+		// Both chars must have the same size
+		if charType size <> offsetType size
+			self error (expression, self err_char_op_arg_2_different_size)
+			return cs_invalid
+		end
+		
+		// The resulting type
+		var program	= self program
+		var differenceType	= charType isChar8 cond program int8Type else program int16Type
+		
+		// If both values are constant, evaluate
+		if charArgument areConstants (offsetArgument)
+			var n1	= charArgument constantInteger
+			var n2	= offsetArgument constantInteger
+			var result	= n1 - n2
+			
+			expression values	= self newIntegerSingleton (differenceType, result)
+			expression code	= e_literal_integer	// mutate the expression
+		else
+			expression values = self newValue (differenceType, false, nil)
+		end
+		
+//[c]
+//[c]	Char minus integer
+//[c]	
+	else
+				
+		if not offsetType isInteger
+			self error (expression, self err_char_op_arg_2_not_integer)
+			return cs_invalid
+		end
+		
+		if offsetArgument isConstant
+			
+			// If both values are constant, evaluate
+			if charArgument isConstant
+				var n1	= charArgument constantInteger
+				var n2	= offsetArgument constantInteger
+				var result	= n1 - n2
+				var values	= self newIntegerSingleton (charType, result)
+				
+				expression values = values
+				expression code = charType isChar8 cond e_literal_char_8 else e_literal_char_16	// mutate the expression
+			else
+				// The type of the operation is given by the definition
+				// (it avoids the creation of an object)
+				expression values = definition values
+			end
+			
+		else
+			if charType size <> offsetType size
+				self error (expression, self err_char_op_arg_2_different_size)
+				return cs_invalid
+			end
+			
+			// The type of the operation is given by the definition
+			// (it avoids the creation of an object)
+			expression values = definition values
+		end
+	
+	end
+	
+	return cs_ok
+//[cf]
+//[of]:evaluateCharBinaryComparison
+method evaluateCharBinaryComparison (	expression	: *Expression, 
+	definition	: *OperationDefinition, 
+	left	: *ExpressionValue, 
+	right	: *ExpressionValue )
+
+	var status = self checkCompatible (expression, 1, right, left type)
+	if status notOk
+		return status
+	end
+	
+	// If both values are constant, evaluate
+	if left areConstants (right)
+	
+		var c1	= left constantInteger
+		var c2	= right constantInteger
+		var result	= left type evaluateCharBinaryComparison (c1, c2, definition code)
+		
+		expression values = self newBooleanSingleton (result)
+		expression code = e_literal_boolean	// mutate the expression
+
+	else
+		expression values = self program booleanValues
+	end
+
+	return cs_ok
+//[cf]
+//[of]:evaluateCharAssignOperation
+method evaluateCharAssignOperation (	expression	: *Expression, 
+	definition	: *OperationDefinition, 
+	charArgument	: *ExpressionValue, 
+	offsetArgument	: *ExpressionValue )
+
+	var charType	= charArgument type	// Char8 or Char16
+	var offsetType	= offsetArgument type
+	
+	var status = self checkInteger (expression, offsetType)
+	status |= self checkLvalue (expression, charArgument)
+	if status notOk
+		return status
+	end
+	
+	if offsetArgument isConstant
+		// constant of any size is ok
+	elsif charType size <> offsetType size
+		self error (expression, self err_char_op_arg_2_different_size)
+		return cs_invalid
+	end
+	
+	expression values = empty_values
+	return cs_ok
+//[cf]
+
+//[of]:evaluateBooleanLiteral
+method evaluateBooleanLiteral (	expression	: *DefinitionExpression, 
+	values	: *ValueList)
+
+	expression values = values
+	return cs_ok
+//[cf]
+//[of]:evaluateBooleanBinaryOperation
+method evaluateBooleanBinaryOperation (	expression	: *Expression, 
+	definition	: *OperationDefinition, 
+	left	: *ExpressionValue, 
+	right	: *ExpressionValue )
+
+	var status = self checkCompatible (expression, 1, right, left type)
+	if status notOk
+		return status
+	end
+	
+	expression values = self program booleanValues
+	return cs_ok
+//[cf]
+//[of]:evaluateBooleanUnaryOperation
+method evaluateBooleanUnaryOperation (	expression	: *Expression, 
+	definition	: *OperationDefinition)
+
+	expression values = self program booleanValues
+	return cs_ok
+//[cf]
+//[of]:evaluateBooleanAssignOperation
+method evaluateBooleanAssignOperation (	expression	: *Expression, 
+	left	: *ExpressionValue, 
+	right	: *ExpressionValue)
+
+	var status = self checkCompatible (expression, 1, right, left type)
+	status |= self checkLvalue (expression, left)	
+	if status notOk
+		return status
+	end
+	
+	expression values = empty_values
+	return cs_ok
+//[cf]
+//[of]:evaluateBooleanMinimalOperation
+method evaluateBooleanMinimalOperation (expression: *PairExpression)
+
+	var first	= expression first
+	var second	= expression second
+	
+	var status = self evaluateCondition (first)
+	status |= self evaluateCondition (second)
+	if status notOk
+		return status
+	end
+	
+	expression values = self program booleanValues
+	return cs_ok
+//[cf]
+
+//[of]:evaluatePointerCompare
+method evaluatePointerCompare (	expression	: *Expression, 
+	left	: *ExpressionValue, 
+	right	: *ExpressionValue)
+
+	// Either the first expression matches the second one or the second one matches the first one
+	var t1 = left type
+	var t2 = right type
+	if not (t1 match (t2) or t2 match (t1))
+		self error (expression, self err_invalid_pointer_comparison, t1, t2)
+		return cs_invalid
+	end
+	
+	// The type of the operation is given by the definition
+	expression values = self program booleanValues
+	return cs_ok
+//[cf]
+//[of]:evaluatePointerDereference
+method evaluatePointerDereference (	expression	: *Expression, 
+	argument	: *ExpressionValue)
+
+	// Get the effective type of the target
+	// Either the first expression matches the second one or the second one matches the first one
+	var pointerType	= argument type asPointer
+	var targetType	= pointerType target
+	var effectiveType	= self getEffectiveType (targetType)
+	var lvalue	= targetType isLvalue
+
+	var status = self defineType (targetType)
+	if status notOk
+		return status
+	end
+	
+	// Create the values of the type
+	expression values = self newValue (effectiveType, lvalue, nil)
+	return cs_ok
+//[cf]
+//[of]:evaluatePointerSuper
+method evaluatePointerSuper (	expression	: *Expression, 
+	argument	: *ExpressionValue)
+
+	var pointerType	= argument type asPointer
+	var targetType	= pointerType target
+	
+	if not targetType isStructure
+		self error (expression, self err_not_pointer_to_structure, pointerType)
+		return cs_invalid
+	end
+	
+	var parent = targetType asStructure parentStructure
+	if parent isNil
+		self error (expression, self err_no_parent_structure, targetType)
+		return cs_invalid
+	end
+	
+	var parentPointer = self getPointerType (parent)
+
+	expression values = self newValue (parentPointer, false, nil)
+	return cs_ok
+//[cf]
+//[of]:evaluatePointerCall
+method evaluatePointerCall (	expression	: *DefinitionExpression, 
+	arguments	: *ValueList)
+
+	var pointerType	= asPointer (type (arguments [0]))
+	var targetType	= pointerType target
+	
+	if not targetType isFunction
+		self error (expression, self err_not_pointer_to_function, pointerType)
+		return cs_invalid
+	end
+
+	// Get the function type
+	var functionType = targetType asFunction
+	
+	// Check number of arguments
+	if arguments size <> functionType types size + 1
+		self error (expression, self err_argument_mismatch, functionType types size + 1, arguments size)
+		return cs_invalid
+	end
+	
+	// Check arguments
+	var i = 1 s	// Skip function pointer
+	functionType eachType do expectedType
+		var currentType	= type (arguments [i])
+		if not currentType match (expectedType)
+			self error (expression, self err_mismatch_argument, (i - 1 + 1), currentType, expectedType)
+			return cs_invalid
+		end
+		i ++
+	end
+	
+	// Create the return type
+	var returnValues = self pool newValueList (functionType returnTypes size)
+	i = 0
+	functionType eachReturnType do type
+		returnValues set (i, self pool new (ExpressionValue, type, false, nil))
+		i ++
+	end
+	expression values = returnValues
+	return cs_ok
+//[cf]
+
+//[of]:evaluateArrayIndex
+method evaluateArrayIndex (	expression	: *Expression, 
+	arrayArgument	: *ExpressionValue, 
+	indexArgument	: *ExpressionValue )
+
+	var pointerType	= arrayArgument type asPointer
+	var arrayType	= pointerType target asArray
+	var cellType	= arrayType cellType
+	var lvalue	= cellType isLvalue
+	var effectiveType	= self getEffectiveType (cellType)
+	
+	var status = self defineType (cellType)
+	if status notOk
+		return status
+	end
+	
+	// The index must be an integer (any size, signed/unsigned accepted)
+	status = self checkInteger (expression, indexArgument type)
+	if status notOk
+		return status
+	end
+
+	expression values = self newValue (effectiveType, lvalue, nil)
+	return cs_ok
+//[cf]
+//[of]:evaluateArrayIndex0
+method evaluateArrayIndex0 (	expression	: *Expression, 
+	arrayArgument	: *ExpressionValue)
+
+	var pointerType	= arrayArgument type asPointer
+	var arrayType	= pointerType target asArray
+	var cellType	= arrayType cellType
+	var lvalue	= cellType isLvalue
+	var effectiveType	= self getEffectiveType (cellType)
+
+	var status = self defineType (cellType)
+	if status notOk
+		return status
+	end
+	
+	expression values = self newValue (effectiveType, lvalue, nil)
+	return cs_ok
+//[cf]
+//[of]:evaluateArrayAdd
+method evaluateArrayAdd (	expression	: *Expression, 
+	arrayArgument	: *ExpressionValue, 
+	offsetArgument	: *ExpressionValue )
+
+	var pointerType	= arrayArgument type asPointer
+	var indexType	= offsetArgument type
+	var arrayType	= pointerType target asArray
+	
+	// The index must be an integer (any size, signed/unsigned accepted)
+	var status = self checkInteger (expression, indexType)
+	if status notOk
+		return status
+	end
+	
+	expression values = arrayType values
+	return cs_ok
+//[cf]
+//[of]:evaluateArraySub
+method evaluateArraySub (	expression	: *Expression, 
+	arrayArgument	: *ExpressionValue, 
+	offsetArgument	: *ExpressionValue )
+
+	var pointerType	= arrayArgument type asPointer
+	var indexType	= offsetArgument type
+	var arrayType	= pointerType target asArray
+	
+	if indexType isInteger
+	
+		// array - integer: pointer translation
+		expression values = arrayType values
+	
+	elsif indexType == pointerType
+	
+		// array - array: distance
+		expression values = self program sizeValues
+	
+	else
+		self error (expression, self err_invalid_array_diff_type, indexType, pointerType)
+		return cs_invalid
+	end
+	
+	return cs_ok
+//[cf]
+//[of]:evaluateArrayAssignOperation
+method evaluateArrayAssignOperation (	expression	: *Expression, 
+	left	: *ExpressionValue, 
+	right	: *ExpressionValue)
+
+	var status = self checkInteger (expression, right type)
+	status |= self checkLvalue (expression, left)
+	if status notOk
+		return status
+	end
+	
+	expression values = empty_values
+	return cs_ok
+//[cf]
+//[of]:evaluateArrayBinaryComparison
+method evaluateArrayBinaryComparison (	expression	: *Expression, 
+	left	: *ExpressionValue, 
+	right	: *ExpressionValue )
+
+	// The second argument must be the same as the first one
+	var status = self checkCompatible (expression, 1, right, left type)
+	if status notOk
+		return status
+	end
+	
+	expression values = self program booleanValues
+	return cs_ok
+//[cf]
+
+//[of]:evaluateMetaLocal
+//[c]Evaluate {type}
+//[c]
+method evaluateMetaLocal (expression: *DefinitionExpression, arg: *ExpressionValue)
+
+	// Get the type of the first value
+	var type = self getType (expression, arg)
+	if type isNil
+		return cs_invalid
+	end
+	
+	// Define the type
+	var status = self defineType (type)
+	if status notOk
+		return status
+	end
+
+	var effectiveType	= self getEffectiveType (type)
+	var constant	= Constant nil
+	
+	// If there is no block, it is a global object
+	if self block isNil
+		// Create a global constant
+		constant = self pool new (UninitializedConstant, self program, type)
+	end
+	
+	// Create the value
+	expression values = self newValue (effectiveType, false, constant)
+	return cs_ok
+//[cf]
+//[of]:evaluateMetaCast
+//[c]Upcasts a value to a pointer to the given type
+//[c]
+method evaluateMetaCast (	expression	: *Expression, 
+	typeArgument	: *ExpressionValue, 
+	valueArgument	: *ExpressionValue)
+
+	var pool	= self pool
+
+	// Get the target type
+	var targetType = self getSimpleType (expression, typeArgument)
+	if targetType isNil
+		return cs_invalid
+	end
+
+	var status = self defineType (targetType)
+	if status notOk
+		return status
+	end
+	
+	// Get the type of the value
+	var valueType = valueArgument type
+
+	// Integer conversion ?
+	if valueType isIntegerOrChar
+	
+		// If the argument is a constant, evaluate
+		if valueArgument isConstant
+			var constant	= valueArgument constant asInteger
+			var n	= constant value
+			var values	= self newValue (targetType, false, constant)
+			var code	= e_literal_integer
+			if targetType isChar8
+				code = e_literal_char_8
+			elsif targetType isChar16 
+				code = e_literal_char_16
+			end
+			
+			expression values = values
+			expression code = code	// mutate the expression
+			return cs_ok
+		end
+	
+	else
+	
+		// Ensure that the sizes are identical
+		if targetType size <> valueType size
+			self error (expression, self err_cast_with_different_size, valueType, targetType)
+			return cs_invalid
+		end
+		
+	end
+	
+	expression values = self newValue (targetType, false, valueArgument constant)
+	return cs_ok
+//[cf]
+//[of]:evaluateMetaPointer
+//[c]Evaluate * expression
+//[c]
+method evaluateMetaPointer (	expression	: *Expression, 
+	typeArgument	: *ExpressionValue)
+
+	// Get the type of the first value
+	var type = self getType (expression, typeArgument)
+	if type isNil
+		return cs_invalid
+	end
+	
+	// Get the pointer type of this type
+	var pointerType = self getPointerType (type)
+
+	// Get the meta type
+	var meta = pointerType meta
+	
+	// Create the value
+	var values = self newValue (meta, false, nil)
+	
+	expression values = values
+	return cs_ok
+//[cf]
+//[of]:evaluateMetaSize
+method evaluateMetaSize (	expression	: *Expression, 
+	argument	: *ExpressionValue)
+
+	// Get the type
+	var type = self getType (expression, argument)
+	if type isNil
+		return cs_invalid
+	end
+	
+	var status = self defineTypeSize (type)
+	if status notOk
+		return status
+	end
+	
+	expression values = self program sizeValues
+	return cs_ok
+//[cf]
+//[of]:evaluateMetaNext
+method evaluateMetaNext (	expression	: *DefinitionExpression, 
+	argument	: *ExpressionValue)
+
+	// Get the type
+	var type = self getType (expression, argument)
+	if type isNil
+		return cs_invalid
+	end
+	
+	var status = self defineType (type)
+	if status notOk
+		return status
+	end
+	
+	// The type must be an enumeration
+	if not type isEnumeration
+		self error (expression, self err_not_enumeration, type)
+		return cs_invalid
+	end
+
+	var enumerationType	= type asEnumeration
+	expression values	= self newIntegerSingleton (enumerationType, enumerationType next)
+	return cs_ok
+//[cf]
+//[of]:evaluateMetaNil
+method evaluateMetaNil (	expression	: *Expression, 
+	typeArgument	: *ExpressionValue)
+
+	// Get the type of the first value
+	var type = self getType (expression, typeArgument)
+	if type isNil
+		return cs_invalid
+	end
+	
+	var status = self defineType (type)
+	if status notOk
+		return status
+	end
+	
+	// Get the pointer type of this type
+	var pointerType = self getPointerType (type)
+	
+	// Create a signature	
+	var values = self newValue (pointerType, false, constant_nil)
+	
+	expression values = values
+	return cs_ok
+//[cf]
+//[of]:evaluateMetaArray1
+method evaluateMetaArray1 (	expression	: *DefinitionExpression, 
+	typeArgument	: *ExpressionValue)
+
+	// Get the type of the first value
+	var cellType = self getType (expression, typeArgument)
+	if cellType isNil
+		return cs_invalid
+	end
+	
+	var status = self defineTypeSize (cellType)
+	if status notOk
+		return status
+	end
+	
+	// Create the type
+	var type	= self getArrayType (cellType, 0)
+	
+	// Setup the expression
+	expression values = self newValue (type meta, false, nil)
+	return cs_ok
+//[cf]
+//[of]:evaluateMetaArray2
+method evaluateMetaArray2 (	expression	: *DefinitionExpression, 
+	typeArgument	: *ExpressionValue, 
+	sizeArgument	: *ExpressionValue)
+
+	// Get the type of the first value
+	var cellType = self getType (expression, typeArgument)
+	if cellType isNil
+		return cs_invalid
+	end
+	
+	var status = self defineTypeSize (cellType)
+	if status notOk
+		return status
+	end
+	
+	// Get the size
+	var constant = self getConstantInteger (expression, 1, sizeArgument, self program uint64Type)
+	if constant isNil
+		return cs_invalid
+	end
+	var size = constant value : Size
+	
+	// Create the array
+	var type = self getArrayType (cellType, size)
+	
+	// Setup the expression
+	expression values = self newValue (type meta, false, nil)
+	return cs_ok
+//[cf]
+//[of]:evaluateMetaTarget
+method evaluateMetaTarget (	expression	: *DefinitionExpression, 
+	argument	: *ExpressionValue)
+
+	// Get the type
+	var type = self getType (expression, argument)
+	if type isNil
+		return cs_invalid
+	end
+	
+	var status = self defineType (type)
+	if status notOk
+		return status
+	end
+	
+	// The type must be a pointer
+	if not type isPointer
+		self error (expression, self err_not_pointer, type)
+		return cs_invalid
+	end
+
+	var pointerType	= type asPointer
+	var targetType	= pointerType target
+	var meta	= targetType meta
+	var values	= self newValue (meta, false, nil)
+	
+	expression values = values
+	return cs_ok
+//[cf]
+//[of]:evaluateMetaInitialize
+method evaluateMetaInitialize (	expression	: *DefinitionExpression, 
+	arguments	: *ValueList)
+
+	// Get the type
+	var type = self getType (expression, arguments [0])
+	if type isNil
+		return cs_invalid
+	end
+
+	var status = self defineType (type)
+	if status notOk
+		return status
+	end
+	
+	if type isStructure
+		
+		var status, index  = self checkStructureInitializer (expression, type asStructure, arguments, 1) // skip type
+		if status notOk
+			return status
+		end
+		// unread values ?
+		if index <> arguments size
+			self error (expression, self err_initializer_too_many_values)
+			return cs_invalid
+		end
+		
+		var pointerType	= self getPointerType (type)
+		var constant	= self pool new (StructureConstant, self program, type asStructure, arguments)
+		var values	= self newValue (pointerType, false, constant)
+		
+		expression values = values
+		return cs_ok
+	
+	elsif type isArray
+	
+		var status, index = self checkArrayInitializer (expression, type asArray, arguments, 1) // skip type
+		if status notOk
+			return status
+		end
+		// unread values ?
+		if index <> arguments size
+			self error (expression, self err_initializer_too_many_values)
+			return cs_invalid
+		end
+		
+		var pointerType	= self getPointerType (type)
+		var constant	= self pool new (ArrayConstant, self program, type asArray, arguments)
+		var values	= self newValue (pointerType, false, constant)
+		
+		expression values = values
+		return cs_ok
+		
+	else
+		self error (expression, self err_initializer_type, type)
+		return cs_invalid
+	end
+//[cf]
+
+//[of]:evaluateUnaryAssignOperation
+//[c]This function is common to integer, chars, array
+//[c]
+method evaluateUnaryAssignOperation (	expression	: *Expression, 
+	argument	: *ExpressionValue)
+
+	var status = self checkLvalue (expression, argument)
+	if status notOk
+		return status
+	end
+	
+	expression values = empty_values
+	return cs_ok
+//[cf]
+//[cf]
+//[of]:types
+//[of]:getPointerType
+method getPointerType (type: *Type)
+
+	return self program getPointerType (type)
+//[cf]
+//[of]:getEffectiveType
+method getEffectiveType (type: *Type)
+
+	return self program getEffectiveType (type)
+//[cf]
+//[of]:getArrayType
+method getArrayType (cellType: *Type, arraySize: Size)
+
+	return self program getArrayType (cellType, arraySize)
+//[cf]
+//[of]:getFunctionType
+method getFunctionType (	callingConvention	: CallingConvention,
+	types	: *TypeList,
+	returnTypes	: *TypeList)
+
+	return self program getFunctionType (callingConvention, types, returnTypes)
+//[cf]
+//[cf]
+//[of]:utils
+//[of]:newIntegerSingleton
+method newIntegerSingleton (type: *Type, n: Unsigned64)
+
+	var constant	= self pool new (IntegerConstant, n)
+	var values	= self newValue (type, false, constant)
+	return values
+//[cf]
+//[of]:newBooleanSingleton
+method newBooleanSingleton (b: Bool)
+	
+	if b
+		return self program trueValues
+	else
+		return self program falseValues
+	end
+//[cf]
+//[of]:newValue
+//[c]Create a list of values with a single value
+//[c]
+method newValue (	type	: *Type,
+	lvalue	: Bool,
+	constant	: *Constant)
+
+	var value	= self pool new (ExpressionValue, type, lvalue, constant)
+	var values	= self pool newValueListWithValue (value)
+	return values
+//[cf]
+
+//[of]:getDefinition
+//[c]Find the first matching definition
+//[c]
+//[c]	If the definition found is a generic function, a function is automatically
+//[c]	instanciated and declared (so next time the non generic will be returned
+//[c]	first).
+//[c]	
+//[c]RETURN VALUE
+//[c]	The definition or nil if no definition found.
+//[c]
+method getDefinition (	location	: *Location, 
+	name	: String8, 
+	values	: *ValueList)
+
+	// Find a definition in the current scope
+	var n = values size
+	var firstType = Type nil
+	if n > 0 
+		firstType = values [0] type
+	end
+	var definition, context = self lookupDefinition (name, firstType, n)
+	if definition isNil
+		self error (location, self error_no_matching_definition, name, values)
+		return nil
+	end
+	
+	// Check visibility
+	if context notNil and definition isPrivate
+		// Get the context from where the definition is requested
+		var from	= Type nil
+		if self moduleContext notNil
+			from = self moduleContext implicitType
+		end
+	
+		if from <> context
+			self error (location, self error_private_definition, name, values)
+			return nil
+		end
+	end
+	
+	// A generic function must be instanciated
+	if definition code == d_generic_function
+		
+		var generic = definition asGenericFunction
+
+		// Is there already an instance of this function ?
+		var f = generic findInstance (values)
+		
+		if f isNil
+			
+			f = self instanciateFunction (generic, values)
+			if f isNil
+				return nil
+			end
+			
+			// Add it to the list of instances of the generic
+			generic addInstance (self pool, f)
+
+		end
+		
+		definition = f
+		
+	// A generic structure must be instanciated
+	elsif definition code == d_generic_structure
+		
+		var genericStructure = definition asGenericStructure
+		
+		// Ensure that all arguments are valid constants
+		// (must be either a type or a constant)
+		values each do value
+			if not value isMeta and not value isConstant
+				self error (location, self error_parameter_not_a_valid_constant, genericStructure name)
+				return nil
+			end
+		end
+		
+		// Is there already an instance of this structure ?
+		var structure = genericStructure findStructure (values)
+		if structure isNil
+			// Create a structure from the generic one
+			structure = self instanciateStructure (genericStructure, values)
+			
+			//var sb = {StringBuffer} local
+			//sb << "Instanciating " << structure
+			//sb string puts
+			//sb release
+			
+			// Add it to the stack to be defined later
+			self stack add (structure definition)
+			
+			// Add it to the list of instances of the generic structure
+			genericStructure add (self pool, structure)
+		end
+			
+		// Create the definition to the structure
+		definition	= structure definition
+			
+	end
+	
+	return definition
+//[cf]
+//[of]:lookupDefinition
+method lookupDefinition (	name	: String8, 
+	context	: *Type, 
+	n	: Size)
+
+//[c]	
+//[c]	1. Block Contexts (local variables, arguments, structure parameters)
+//[c]	
+	if self moduleContext notNil
+		var block = self moduleContext blockContext
+		while block notNil
+			var definition = block definitions findDefinition (name, n)
+			if definition notNil
+				return definition, nil
+			end
+			block = block parent
+		end
+	end
+	
+//[c]	
+//[c]	2. Contextual definitions
+//[c]	
+	if context notNil
+		var type = context
+		while type notNil
+			var definition = type findDefinition (name, n)
+			if definition notNil
+				return definition, type
+			end
+			type = type parent
+		end
+	end
+//[c]	
+//[c]	3. Global definitions
+//[c]	
+	return self module findDefinition (name, n), nil
+//[cf]
+//[of]:mergeValues
+//[c]Merges a signature with the current signature of the function
+//[c]
+//[c]RETURN VALUE
+//[c]	Returns true if the signature is compatible, false otherwise.
+//[c]
+method mergeValues (values: *ValueList)
+
+	return self moduleContext merge (values, self pool, self program)
+//[cf]
+//[of]:getSimpleType
+method getSimpleType (expression: *Expression, value: *ExpressionValue)
+
+	var type = self getType (expression, value)
+	if type isNil
+		return type
+	end
+	
+	// It must be a simple type
+	if not type isSimple
+		self error (expression, self error_not_a_simple_type, type)
+		return nil
+	end
+	
+	return type
+//[cf]
+//[of]:getType
+method getType (expression: *Expression)
+
+	if expression values size == 1 and expression values [0] isMeta
+		return expression constantType
+	end
+	
+	self error (expression, self error_cant_evaluate_type)
+	return nil
+//[cf]
+//[of]:getType
+method getType (expression: *Expression, value: *ExpressionValue)
+
+	if value isMeta
+		return value type asMeta type
+	end
+	
+	self error (expression, self error_cant_evaluate_type)
+	return nil
+//[cf]
+//[of]:getConstantInteger
+method getConstantInteger (	location	: *Location, 
+	position	: Offset, 
+	value	: *ExpressionValue, 
+	type	: *Type)
+
+	var status = self checkConstant (location, value)
+	status |= self checkCompatible (location, position, value, type)
+	if status notOk
+		return nil
+	end
+	
+	return value constant asInteger
+//[cf]
+
+//[of]:instanciateStructure
+//[c]Instanciates a structure from a generic structure and a list of parameters
+//[c]
+method instanciateStructure (	generic	: *GenericStructureDefinition, 
+	values	: *ValueList)
+
+	var pool	= self pool
+
+	// Copy the parent expression
+	var parentExpression = generic parentExpression copy (pool, nil)
+		
+	// Create parameters
+	var parameters = pool new (ParameterList)
+	eachDual (values, generic parameters) do value, id
+		parameters addNew (pool, id module, id line, id name, value)
+	end
+
+	// Create attributes
+	var attributes = pool new (AttributeList)
+	generic attributes each do a
+		attributes add (pool, a copy (pool))
+	end
+
+	// Create definitions
+	var functions = pool new (DefinitionList)
+	generic functions each do d
+		var copy = {*Definition}
+		switch d code
+		case d_function
+			copy = d asFunction copy (pool)
+		case d_generic_function
+			copy = d asGenericFunction copy (pool)
+		end
+		functions add (pool, copy)
+	end
+
+	// Create aliases
+	var aliases = pool new (AliasList)
+	generic aliases each do a
+		aliases add (pool, a copy (pool))
+	end
+
+		
+	// Create the structure
+	var structure = pool new (	StructureType, 
+		generic module, 
+		generic line, 
+		self program, 
+		generic directives, 
+		generic name, 
+		parentExpression, 
+		attributes, 
+		functions, 
+		aliases,
+		parameters)
+	return structure
+//[cf]
+//[of]:instanciateFunction
+method instanciateFunction (	generic	: *GenericFunction, 
+	values	: *ValueList)
+
+	// Create the list of arguments
+	// The list of arguments must be created in the context of the module of the generic function
+	var status = self createModuleContext (	{ModuleContext}, 
+		generic module,
+		generic structure,
+		nil,
+		nil)
+	if status notOk
+		self destroyModuleContext
+		return nil
+	end
+	
+	var arguments, extra	= self createArgumentList (	generic, 
+			generic implicitType, 
+			generic arguments, 
+			generic variable,
+			values )
+	self destroyModuleContext
+	if arguments isNil
+		return nil
+	end
+
+	// Create a copy of the body
+	var body = generic body copy (self pool, nil)
+	
+	// Create the function
+	var f = self pool new (	Function, 
+		generic module, 
+		generic line, 
+		generic directives,
+		generic name,
+		arguments, 
+		body,
+		generic hasYield )
+
+	f variableArguments	= extra
+	f implicitType	= generic implicitType
+	f structure	= generic structure
+	return f
+//[cf]
+//[of]:createArgumentList
+method createArgumentList (	location	: *Location,
+	implicitType	: *Type,
+	sourceArguments	: *ArgumentList,
+	variable	: Bool,
+	values	: *ValueList )
+
+	// Create the list of arguments
+	var pool	= self pool
+	var arguments	= pool new (ArgumentList)
+	var extra	= VariableArguments nil
+	
+	// Initialize named arguments
+	var first	= true
+	var index	= 0 s
+	sourceArguments each do source
+		
+		// Copy the argument from the source
+		var argument = source copy (pool)
+		arguments add (pool, argument)
+
+		// Get type and generalizable flag
+		var type	= {*Type}
+		var generalizable	= {Bool}
+		
+		if first and implicitType notNil
+			
+			type	= implicitType
+			generalizable	= true
+			
+		else
+			
+			if argument typeExpression notNil
+				// Evaluate the type
+				var status = self evaluateSimpleType (argument typeExpression)
+				if status notOk
+					return nil, nil
+				end
+				type	= argument typeExpression constantType
+				generalizable	= true
+			else
+				type	= type (values [index])
+				generalizable	= false
+			end
+		end
+		argument configure (type, generalizable)
+		
+		first = false
+		index ++
+	end
+	
+	// Add remaining arguments as anonymous arguments
+	var n = values size
+	if variable
+		var extraArguments	= pool new (ArgumentList)
+		var variableValues	= pool newValueList (n - index)
+		var i = 0 s
+		while index < n
+			var value = values [index]
+			
+			// Create and configure the argument
+			var argument = pool new (Argument, location module, location line, '', nil)
+			argument configure (value type, false)
+
+			// Add it to the list of arguments
+			arguments add (pool, argument)
+			
+			// Add it to the list of extra arguments (for 'each_extra')
+			extraArguments add (pool, argument)
+			
+			// Add it to the list of values (for '...')
+			variableValues set (i, pool new (ExpressionValue, value type, false, nil))
+			
+			index ++
+			i ++
+		end
+
+		extra = pool new (VariableArguments, location module, location line, extraArguments, variableValues)
+	end
+	
+	return arguments, extra
+//[cf]
+
+//[of]:createModuleContext
+//[c]Creates a new module context
+//[c]
+//[c]ARGUMENTS
+//[c]	mc	--	The pointer to store the module context information
+//[c]	module	--	The module that will become the current module
+//[c]	global	--	if true, the previous function context is erased to prevent
+//[c]			looking for local variables when defining global.
+//[c]			e.g. a function using a structure, forcing to define it.
+//[c]
+method createModuleContext (	mc	: *ModuleContext, 
+	module	: *Module,
+	structure	: *StructureType,
+	implicitType	: *Type,
+	func	: *Function)
+
+	mc initialize (	self moduleContext, 
+		module, 
+		structure,
+		implicitType,
+		func,
+		self getLocalPool)
+
+	self moduleContext = mc
+	
+	// Declare the parameters
+	var status = cs_ok
+	if structure notNil
+		var bc = mc structureContext
+		self createBlockContext (bc, nil)
+		structure eachParameter do p
+			status |= self addLocalDefinition (bc definitions, p)
+		end
+	end
+
+	return status
+//[cf]
+//[of]:destroyModuleContext
+method destroyModuleContext
+
+	var mc = self moduleContext
+
+	// Destroy the structure's block context
+	if mc structure notNil
+		self destroyBlockContext
+	end
+	
+	// Restore the previous context
+	self moduleContext	= mc parent
+	self releaseLocalPool
+//[cf]
+//[of]:createBlockContext
+method createBlockContext (blockContext: *BlockContext, block: *Block)
+	
+	var mc = self moduleContext
+	blockContext initialize (mc blockContext, block, mc pool)
+	mc blockContext = blockContext
+//[cf]
+//[of]:destroyBlockContext
+method destroyBlockContext
+
+	// Restore the previous block context
+	var mc = self moduleContext
+	mc blockContext = mc blockContext parent
+//[cf]
+//[of]:createBreakContext
+method createBreakContext (breakContext: *BreakContext, instruction: *WhileInstruction, expression: *DefinitionExpression)
+
+	breakContext initialize (self breakContext, instruction, expression)
+	self breakContext = breakContext
+//[cf]
+//[of]:destroyBreakContext
+method destroyBreakContext
+
+	// Restore the previous loop context
+	var lc = self breakContext
+	self breakContext = lc parent
+//[cf]
+//[of]:createEvaluatingContext
+method createEvaluatingContext (ec: *EvaluatingContext, f: *Function)
+
+	f evaluating	= true
+	ec parent	= self evaluatingContext
+	ec func	= f
+	
+	self evaluatingContext = ec
+//[cf]
+//[of]:destroyEvaluatingContext
+method destroyEvaluatingContext
+
+	var ec = self evaluatingContext
+	ec func evaluating = false
+	self evaluatingContext = ec parent
+//[cf]
+
+//[of]:getLocalPool
+//[c]Get a new block pool
+//[c]
+method getLocalPool
+
+	var e = self currentLocalPool
+	if e isNil
+		e = self localPools firstElement
+	else
+		e = e nextSibling
+	end
+	
+	if e isNil
+		// No more pool: create a new one
+		e = self pool new (LocalPool)
+		self localPools add (e)
+	else
+		// recycle this one
+		e reset
+	end
+	
+	self currentLocalPool = e
+	return e pool
+//[cf]
+//[of]:releaseLocalPool
+method releaseLocalPool
+
+	self currentLocalPool = self currentLocalPool previousSibling
+//[cf]
+
+//[of]:module
+//[c]Returns the current module
+//[c]
+method module
+
+	return self moduleContext module
+//[cf]
+//[of]:blockContext
+method blockContext
+
+	var mc = self moduleContext
+	if mc isNil
+		return nil
+	end
+	
+	return mc blockContext
+//[cf]
+//[of]:block
+//[c]Returns the current block or nil
+//[c]
+method block
+
+	var bc = self blockContext
+	if bc isNil
+		return nil
+	end
+	return bc block
+//[cf]
+
+//[of]:setBlockTerminated
+//[c]Changes the 'terminated' status of the current block
+//[c]
+method setBlockTerminated
+
+	self block terminated = true
+//[cf]
+//[of]:setBlockCouldBeTerminated
+//[c]Changes the 'could be terminated' status of the current block
+//[c]
+method setBlockCouldBeTerminated
+
+	self block couldBeTerminated = true
+//[cf]
+
+//[of]:addLocalDefinition
+method addLocalDefinition (dictionary: *DefinitionDictionary, definition: *Definition)
+
+	var conflictingDefinition = dictionary add (definition)
+	if conflictingDefinition notNil
+		self error (definition, self error_conflicting_definition_1, definition name)
+		if conflictingDefinition module notNil
+			self error (conflictingDefinition, self error_conflicting_definition_2)
+		end
+		return cs_invalid
+	end
+	
+	return cs_ok
+//[cf]
+//[of]:addGlobalDefinition
+method addGlobalDefinition (definition: *Definition, visibility: Visibility)
+
+	var conflictingDefinition = self module addDefinition (definition, visibility)
+	if conflictingDefinition isNil
+		return cs_ok
+	end
+	
+	self error (definition, self error_conflicting_definition_1, definition name)
+	if conflictingDefinition module notNil
+		self error (conflictingDefinition, self error_conflicting_definition_2)
+	end
+	return cs_invalid
+//[cf]
+//[of]:addContextualDefinition
+method addContextualDefinition (type: *Type, definition: *Definition)
+
+	var conflictingDefinition = type addDefinition (self pool, definition)
+	if conflictingDefinition isNil
+		return cs_ok
+	end
+	
+	self error (definition, self error_conflicting_definition_1, definition name)
+	self error (conflictingDefinition, self error_conflicting_definition_2)
+	return cs_invalid
+//[cf]
+//[cf]
+//[of]:checks
+//[of]:checkInlineBlock
+//[c]Check the presence or absence of inline block depending on the definition
+//[c]
+method checkInlineBlock (expression: *DefinitionExpression)
+
+	var definition	= expression definition
+	var code	= definition code
+	var inlineBlock	= expression inlineBlock
+	var blockExpected	= code == d_each_extra or (code == d_function and definition asFunction hasYield)
+	
+	if blockExpected
+		if inlineBlock isNil
+			self error (expression, self err_missing_block)
+			return cs_invalid
+		end
+	else
+		if inlineBlock notNil
+			self error (expression, self err_no_block)
+			return cs_invalid
+		end
+	end
+
+	return cs_ok
+//[cf]
+//[of]:checkFunctionCall
+method checkFunctionCall (	expression	: *Expression, 
+	arguments	: *ValueList, 
+	f	: *Function,
+	exactMatch	: Bool)
+
+	var status = self defineFunctionSignature (f)
+	
+	// 1. If the callee is invalid, the caller function is invalid too
+	if status isInvalid
+		// Report an error again to show the caller
+		self error (expression, self err_cant_define_function, f)
+		return status
+	end
+	
+	// 2. The define did not find the signature of the function, the expression is broken too
+	if status isBroken
+		return status
+	end
+
+	// Check match only when the function is defined as the arguments are not known before
+	status = self checkMatch (expression, f arguments, arguments, exactMatch)
+	if status notOk
+		return status
+	end
+	
+	// Mark the function as used
+	f use
+	return cs_ok
+//[cf]
+//[of]:checkExternFunctionCall
+method checkExternFunctionCall (	expression	: *Expression, 
+	arguments	: *ValueList, 
+	f	: *ExternFunction,
+	exactMatch	: Bool)
+
+	var status = self defineExternFunction (f)
+	if status notOk
+		return status
+	end
+	
+	// Check the type of arguments
+	// There is no need to compare the number of arguments because the
+	// lookup wouldn't have found this definition if the number of arguments
+	// didn't match.
+	var i = 0 s
+	f eachArgumentType do t
+		if exactMatch
+			status |= self checkExact (expression, i, arguments [i], t)
+		else
+			status |= self checkCompatible (expression, i, arguments [i], t)
+		end
+		i ++
+	end
+	if status notOk
+		return status
+	end
+	
+	// Mark the function as used
+	f use
+	return cs_ok
+//[cf]
+//[of]:checkInsideFunction
+//[c]Ensures that the expression is evaluated inside a function
+//[c]
+//[c]	Some expressions are evaluated outside a function, such as global variable
+//[c]	initializers, type of arguments, type of attributes and so on.
+//[c]	There is no function context and sub-objects in such a case, making some
+//[c]	expressions un-evaluable (e.g. yield, ...)
+//[c]
+method checkInsideFunction (expression: *Expression)
+
+	var mc = self moduleContext
+	if mc notNil and mc func notNil
+		return cs_ok
+	end
+
+	self error (expression, self err_not_in_function)
+	return cs_invalid
+//[cf]
+//[of]:checkMatch
+method checkMatch (	location	: *Location, 
+	arguments	: *ArgumentList, 
+	values	: *ValueList,
+	exactMatch	: Bool)
+
+	var i = 0 s
+	var status = cs_ok
+	arguments each do a
+		var type	= a type
+		var value	= values [i]
+		if exactMatch
+			status |= self checkExact (location, i, value, type)
+		else
+			status |= self checkCompatible (location, i, value, type)
+		end
+		i ++
+	end
+	return status
+//[cf]
+//[of]:checkInteger
+method checkInteger (location: *Location, type: *Type)
+
+	if type isInteger
+		return cs_ok
+	end
+	
+	self error (location, self err_not_an_integer)
+	return cs_invalid
+//[cf]
+//[of]:checkLvalue
+method checkLvalue (	location	: *Location, 
+	value	: *ExpressionValue)
+
+	if not value isLvalue
+		self error (location, self err_assign_not_lvalue)
+		return cs_invalid
+	end
+	
+	return cs_ok
+//[cf]
+//[of]:checkExact
+method checkExact (	location	: *Location, 
+	position	: Offset, 
+	value	: *ExpressionValue, 
+	type	: *Type )
+
+	var sourceType = value type
+	if sourceType <> type
+		self error (location, self err_mismatch_argument, position + 1, sourceType, type)
+		return cs_invalid
+	end
+	
+	return cs_ok
+//[cf]
+//[of]:checkCompatible
+method checkCompatible (	location	: *Location, 
+	position	: Offset, 
+	value	: *ExpressionValue, 
+	type	: *Type )
+
+	var sourceType = value type
+	// Nothing to do if the value is already of the expected type
+	if sourceType == type
+		return cs_ok
+	end
+
+	if type isInteger
+	
+		// We apply conversion on constants only
+		// and the type must be an integer
+		if not value isConstant or not sourceType isInteger
+			self error (location, self err_mismatch_argument, position + 1, sourceType, type)
+			return cs_invalid
+		end
+	
+		// Check limits
+		// n is unsigned 64 bit
+		// negative numbers are signed-extended to 64 bits
+		var n = value constant asInteger value
+		if not type checkIntegerLimits (n)
+			self error (location, self err_integer_overflow, type)
+			return cs_invalid
+		end
+		
+		// Mutate the type of the value
+		value type = type
+		
+	elsif type isChar
+	
+		// We apply conversion on constants only
+		// and the type must be an integer
+		if not (value isConstant and sourceType isIntegerOrChar)
+			self error (location, self err_mismatch_argument, position + 1, sourceType, type)
+			return cs_invalid
+		end
+
+		// Mutate the type of the value
+		value type = type
+		
+	elsif not value type match (type)
+		self error (location, self err_mismatch_argument, position + 1, sourceType, type)
+		return cs_invalid
+	end
+	
+	return cs_ok
+//[cf]
+//[of]:checkConstant
+method checkConstant (location: *Location, value: *ExpressionValue)
+
+	if not value isConstant
+		self error (location, self err_not_a_constant)
+		return cs_invalid
+	end
+	return cs_ok
+//[cf]
+//[of]:checkStructureInitializer
+method checkStructureInitializer (	expression	: *DefinitionExpression, 
+	structure	: *StructureType, 
+	arguments	: *ValueList, 
+	index	: Size)
+
+	var status = cs_ok
+	var pos = index
+	
+	if structure parentStructure notNil
+		status, pos = self checkStructureInitializer (expression, structure parentStructure, arguments, pos)
+		if status notOk
+			return status, pos
+		end
+	end
+	
+	// Read the values against attribute
+	structure eachAttribute do a
+		status, pos = self checkInitializer (expression, a storageType, arguments, pos)
+		if status notOk
+			return status, pos
+		end
+	end
+
+	return cs_ok, pos
+//[cf]
+//[of]:checkArrayInitializer
+method checkArrayInitializer (expression: *DefinitionExpression, arrayType: *ArrayType, arguments: *ValueList, index: Size)
+
+	var cellType	= arrayType cellType
+	var arraySize	= arrayType arraySize
+	var i	= 0 s
+	var pos	= index
+	repeat
+		// automatic size ?
+		if arraySize == 0 
+			if pos == arguments size
+				break
+			end
+		elsif i == arraySize
+			break
+		end
+		
+		var status	= {CompilationStatus}
+		status, pos	= self checkInitializer (expression, cellType, arguments, pos)
+		if status notOk
+			return status, pos
+		end
+		i ++
+	end
+	
+	return cs_ok, pos
+//[cf]
+//[of]:checkInitializer
+method checkInitializer (	expression	: *DefinitionExpression, 
+	type	: *Type, 
+	arguments	: *ValueList, 
+	index	: Size)
+
+	// If the type is an array, check the array
+	if type isArray
+		return self checkArrayInitializer (expression, type asArray, arguments, index)
+	end
+	
+	// If the type is a structure, check the structure
+	if type isStructure
+		return self checkStructureInitializer (expression, type asStructure, arguments, index)
+	end
+	
+	// Check enough argument
+	if index >= arguments size
+		self error (expression, self err_initializer_missing_value)
+		return cs_invalid, index
+	end
+	
+	// It must be a constant
+	var value = arguments [index]
+	var status = self checkConstant (expression, value)
+	status |= self checkCompatible (expression, index - 1, value, type)	// - 1 because the first argument is the type
+	return status, index + 1
+//[cf]
+//[cf]
+//[of]:errors
+//[of]:error
+method error (location: *Location, fmt: String16, ...)
+
+	self builder error (location module filename, location line, fmt, ...)
+//[cf]
+//[cf]
+//[cf]
+//[of]:CompilationStatus
+//[of]:definition
+//[c]The evaluation (definition) process propagates a status with two pieces of information
+//[c]
+//[c]broken
+//[c]	The evaluation can not be performed yet because of a recursion. We must 
+//[c]	interrupt the evaluation of the current block because it may depend on
+//[c]	preceding evaluation.
+//[c]
+//[c]	It is not an error as the block can be re-evaluated later.
+//[c]
+//[c]invalid
+//[c]	An unrecoverable error is found. 
+//[c]	
+//[c]	An invalid status does not interrupt evaluation immediately because
+//[c]	it is better to report a maximum number of errors, but an invalid
+//[c]	element is never evaluated again (so errors won't be reported twice).
+//[c]
+enum CompilationStatus
+
+	cs_ok	= 0	// The value is important because it is the combination of two flags
+	cs_broken	= 1
+	cs_invalid	= 2
+	cs_broken_and_invalid	= 3
+//[cf]
+//[of]:testing
+//[of]:isBroken
+method isBroken
+
+	return (self & 1) <> 0
+//[cf]
+//[of]:isInvalid
+method isInvalid
+
+	return (self & 2) <> 0
+//[cf]
+//[of]:isOk
+method isOk
+
+	return self == cs_ok
+//[cf]
+//[of]:notOk
+method notOk
+
+	return self <> cs_ok
+//[cf]
+//[cf]
+//[cf]
+
+.private
+//[of]:Utils
+//[of]:EvaluatingContext
+struct EvaluatingContext
+	
+	attr parent	: *EvaluatingContext
+	attr func	: *Function
+//[cf]
+//[of]:DefinitionStack
+//[of]:definition
+//[c]A definition stack is a stack of functions and structures to be define
+//[c]
+//[c]	Defining a function may require to re-define this function later in case of recursion.
+//[c]	
+//[c]	Defining a function may instanciate new structures from generic ones. This
+//[c]	newly created structures must be defined.
+//[c]	
+//[c]	Defining a new structure may add new function to be defined (release).
+//[c]
+struct DefinitionStack
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+method initialize
+
+	self vector initialize (1024)
+//[cf]
+//[of]:release
+method release
+
+	self vector release
+//[cf]
+//[cf]
+//[of]:adding - removing
+//[of]:add
+method add (definition: *Definition)
+
+	// Add only if the function is not already on the stack
+	self vector each do d
+		if d == definition
+			return
+		end
+	end
+	
+	self vector add (definition)
+//[cf]
+//[of]:removeLast
+method removeLast
+
+	var last	= self vector size - 1
+	var definition	= self vector [last]
+	self vector remove (last)
+	return definition
+//[cf]
+//[cf]
+//[of]:testing
+//[of]:isEmpty
+method isEmpty
+
+	return self vector isEmpty
+//[cf]
+//[cf]
+
+:private
+//[of]:attributes
+attr vector	: Vector (*Definition)
+//[cf]
+//[cf]
+//[of]:ModuleContext
+//[of]:definition
+struct ModuleContext
+
+	attr parent	: *ModuleContext	// The parent context or nil
+	attr module	: *Module	// The current module
+	attr structure	: *StructureType	// The structure of the object(s) being defined (attributes, methods, aliases)
+	attr implicitType	: *Type	// The context of the function or nil (to access private definitions)
+	attr func	: *Function	// The function being defined
+	attr blockContext	: *BlockContext	// The current block context
+	attr pool	: *MemoryPool	// The temporary pool for block contexts
+			
+	attr returnValues	: *ValueList	// The type of values returned by the function to assign to the function at the end if everything is ok
+			// and if it doesn't conflict with a previous types
+			
+	attr structureContext	: BlockContext	// Block context to store structure parameters (if any)
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+method initialize (	parent	: *ModuleContext, 
+	module	: *Module, 
+	structure	: *StructureType,
+	implicitType	: *Type,
+	func	: *Function,
+	pool	: *MemoryPool)
+
+	self parent	= parent
+	self module	= module
+	self structure	= structure
+	self implicitType	= implicitType
+	self func	= func
+	self pool	= pool
+	self blockContext	= nil
+	self returnValues	= nil
+//[cf]
+//[cf]
+//[of]:merging
+//[of]:merge
+//[c]Merges a signature with the current signature of the function
+//[c]
+//[c]RETURN VALUE
+//[c]	Returns true if the signature is compatible, false otherwise.
+//[c]
+method merge (	values	: *ValueList, 
+	pool	: *MemoryPool, 
+	program	: *Program)
+
+	if self func notNil
+		self func returnNumber ++
+  	end
+	if self returnValues isNil
+		self returnValues = values duplicate (pool)
+		return true
+	else
+		return self returnValues merge (values, program)
+	end
+//[cf]
+//[cf]
+//[cf]
+//[of]:BlockContext
+//[of]:definition
+struct BlockContext
+
+	attr parent	: *BlockContext	// The context of the caller function or nil
+	attr block	: *Block	// The block being evaluated
+	attr pool	: *MemoryPool	// The memory bundle to store locals
+	attr definitions	: DefinitionDictionary	// The local definitions (local variables)
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+method initialize (	parent	: *BlockContext, 
+	block	: *Block,
+	pool	: *MemoryPool)
+
+	self parent	= parent
+	self block	= block
+	self pool	= pool
+	
+	self definitions initialize (self pool, 64)
+//[cf]
+//[cf]
+//[cf]
+//[of]:BreakContext
+//[of]:definition
+struct BreakContext
+
+	attr parent	: *BreakContext	// The parent loop or nil
+	attr instruction	: *WhileInstruction	// The while/repeat statement or nil
+	attr expression	: *DefinitionExpression	// The call to an iterator or nil
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+method initialize (	parent	: *BreakContext, 
+	instruction	: *WhileInstruction,
+	expression	: *DefinitionExpression )
+
+	self parent	= parent
+	self instruction	= instruction
+	self expression	= expression
+//[cf]
+//[cf]
+//[cf]
+//[of]:IntegerConstantDictionary
+//[of]:definition
+struct IntegerConstantDictionary : Dictionary (	*IntegerConstant, *IntegerConstant, nil,
+	ref hash	(*IntegerConstant),
+	ref isEqual	(*IntegerConstant, *IntegerConstant))
+//[cf]
+//[of]:adding - removing
+//[of]:add
+method add (constant: *IntegerConstant)
+
+	self super add (constant, constant)
+//[cf]
+//[cf]
+//[of]:testing
+//[of]:has value
+method hasValue (c: *IntegerConstant) 
+	
+	return notNil (self [c])
+//[cf]
+//[cf]
+//[cf]
+//[of]:LocalPool
+//[of]:definition
+struct LocalPool : LocalPool LinkCollectionElement
+
+	attr pool	: MemoryPool
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+method initialize
+
+	self pool initialize (16384)
+//[cf]
+//[of]:release
+method release
+
+	self pool release
+//[cf]
+//[of]:reset
+method reset
+
+	self pool reset
+//[cf]
+//[cf]
+//[cf]
+//[cf]
+//[of]:Imports
+import "parser"
+import "syntax-tree"
+import "lexer"
+import "commons"
+import "file"
+import "core"
+//[cf]

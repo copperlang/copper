@@ -1,0 +1,84 @@
+# GNU Makefile to build copper
+#
+# Usage:
+#	gmake	-- Build the COFF version
+#	gmake BACKEND=elf	-- Build the ELF version
+#	gmake BACKEND=llvm	-- Build the LLVM version
+#
+# Required Variables
+#	LLVMLIB	-- the path to the LLVM lib files
+#
+# OPTIONS
+# Debug:
+#	DEBUG=1
+#
+# Profiling:
+#	CFLAGS=-debug LFLAGS="/debug /fixed:no"
+#
+# Building with a specified COFF compiler:
+#	COPPER=<path to copper-coff.exe>
+#
+# Building with a specified LLVM compiler:
+#	COPPERLLVM=<path to copper-llvm.exe>
+
+
+OUTDIR=.
+COPPER=boot\copper.exe
+CFLAGS=
+LINK=link
+LFLAGS=
+OS=windows
+BACKEND=coff
+
+ifdef DEBUG
+  CFLAGS += -debug
+  LFLAGS += /debug
+endif
+
+.SILENT:
+
+all: $(OUTDIR)/copper-$(BACKEND).exe
+
+$(OUTDIR)/copper-coff.exe: $(OUTDIR)/copper-coff.obj
+	@echo Linking...
+	$(LINK) $(LFLAGS) /nologo /defaultlib:msvcrt /incremental:no $? /out:$@
+
+$(OUTDIR)/copper-elf.exe: $(OUTDIR)/copper-elf.obj
+	@echo Linking...
+	$(LINK) $(LFLAGS) /nologo /defaultlib:msvcrt /incremental:no $? /out:$@
+
+$(OUTDIR)/copper-llvm.exe: $(OUTDIR)/copper-llvm.obj
+	@echo Linking...
+	$(LINK) $(LFLAGS) /nologo /defaultlib:msvcrt /LIBPATH:$(LLVMLIB) $? shell32.lib advapi32.lib LLVMSupport.lib LLVMCore.lib LLVMBitWriter.lib /out:$@
+
+$(OUTDIR)/copper-$(BACKEND).obj: \
+	src/elf/elf.co \
+	src/builder.co \
+	src/generator-llvm.co \
+	src/generator-coff.co \
+	src/generator-elf.co \
+	src/generator-x86.co \
+	src/object-file-coff.co \
+	src/object-file-elf.co \
+	src/commons.co \
+	src/core.co \
+	src/file.co \
+	src/file-windows.co \
+	src/lexer.co \
+	src/parser.co \
+	src/p-code-builder.co \
+	src/p-code.co \
+	src/syntax-tree.co \
+	src/x86.co \
+	src/target-32.co \
+	src/target-64.co \
+	src/main.co
+ifdef COPPERLLVM
+	@echo Compiling bc...
+	$(COPPERLLVM) -I src -D backend=$(BACKEND) -D os=$(OS) -D target=32 $(CFLAGS) -o $(OUTDIR)\copper-$(BACKEND).bc src\main.co
+	@echo Compiling obj...
+	llc -filetype=obj $(OUTDIR)\copper-$(BACKEND).bc -o $@
+else
+	@echo Compiling...
+	$(COPPER) -I src -D backend=$(BACKEND) -D os=$(OS) -D target=32 $(CFLAGS) -o $@ src\main.co
+endif

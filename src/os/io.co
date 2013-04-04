@@ -1,0 +1,33 @@
+.c
+.cdecl
+
+struct FILE
+struct DIR
+struct DIRENT
+const Mode = Unsigned32
+
+import function file_exists	(String) -> (Int32)
+import function file_size	(String) -> (Size)
+import function file_last_modification	(String) -> (Unsigned32)
+import function file_read_only	(String) -> (Int32)
+import function file_is_directory	(String) -> (Int32)
+import function fputs_stderr	(String)
+import function dirent_name	(*DIRENT) -> (String)
+import function dirent_is_directory	(*DIRENT) -> (Int32)
+import function dir_open	(String) -> (*DIR)
+import function dir_read	(*DIR) -> (*DIRENT)
+import function dir_close	(*DIR)
+	
+import function fopen	(String, String) -> (*FILE)
+import function fclose	(*FILE) -> (Int32)
+import function fread	(Bytes, Size, Size, *FILE) -> (Size)
+import function fwrite	(Bytes, Size, Size, *FILE) -> (Size)
+import function getenv	(String) -> (String)
+import function getcwd	(String, Size) -> (String)
+import function mkdir	(String, Mode) -> (Int32)
+
+.private
+
+const String	= *[] Char8
+const Size	= Unsigned32
+const Bytes	= *[] Unsigned8

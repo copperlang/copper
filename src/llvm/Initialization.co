@@ -1,0 +1,17 @@
+
+.c
+.cdecl
+
+import function LLVMInitializeCore	(LLVMPassRegistryRef)
+import function LLVMInitializeTransformUtils	(LLVMPassRegistryRef)
+import function LLVMInitializeScalarOpts	(LLVMPassRegistryRef)
+import function LLVMInitializeInstCombine	(LLVMPassRegistryRef)
+import function LLVMInitializeIPO	(LLVMPassRegistryRef)
+import function LLVMInitializeInstrumentation	(LLVMPassRegistryRef)
+import function LLVMInitializeAnalysis	(LLVMPassRegistryRef)
+import function LLVMInitializeIPA	(LLVMPassRegistryRef)
+import function LLVMInitializeCodeGen	(LLVMPassRegistryRef)
+import function LLVMInitializeTarget	(LLVMPassRegistryRef)
+
+.private
+import "Core"

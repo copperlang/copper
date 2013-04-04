@@ -1,0 +1,19 @@
+// Regression test: bad generated code with LLVM 
+
+struct A
+struct B : A
+struct C : A
+
+function b
+	return B nil
+
+function c
+	return C nil
+
+function test
+	return true
+
+function .c .cdecl main
+
+	var x = test cond b else c
+	return 0

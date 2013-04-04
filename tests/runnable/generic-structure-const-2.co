@@ -1,0 +1,19 @@
+//[c]Pass function pointers to generic structures
+//[c]
+function test1 (x)
+	return x + 1
+
+function test2 (x)
+	return x * 2
+
+struct B (F)
+	method f (x)
+		return F call (x)
+
+function .c .cdecl main
+
+	var res = 0
+	res	+= { B (ref test1 (Int32)) } f (5)	// 6
+	res	+= { B (ref test2 (Int32)) } f (6)	// 12
+	
+	return res - 6 - 12

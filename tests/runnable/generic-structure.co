@@ -1,0 +1,18 @@
+struct Dummy (T, c)
+
+	attr x : T
+	
+	method f (a : Char8)
+		// Try to pass parameters to another function
+		x (self) = g (a, T, c)
+
+function g (a: Char8, T, c)
+
+	return a : T + c
+
+function .c .cdecl main
+
+	var dummy = {Dummy (Int32, 10)}
+	f (dummy, $A)
+	var res = x (dummy) - 75
+	return res

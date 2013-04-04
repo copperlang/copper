@@ -1,0 +1,11 @@
+//[c]This is an indirect but valid recursion
+//[c]
+
+function f (x)
+	if x > 0
+		return f (0)
+	end
+	return 1
+
+function main
+	f (1)

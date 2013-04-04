@@ -1,0 +1,51 @@
+
+function test_terminal_if
+
+	if true
+		return 0
+	elsif true
+		return 9
+	else
+		return 9
+	end
+
+function .c .cdecl main
+
+	var res = 0
+
+	var t = 1
+	if true
+		t = 0
+	end
+	res = res + t
+	
+	t = 0
+	if false
+		t = 2
+	end
+	res = res + t
+
+	t = 3
+	if false
+		t = 4
+	elsif true
+		t = 0
+	else
+		t = 5
+	end
+	res = res + t
+
+	t = 6
+	if false
+		t = 7
+	elsif false
+		t = 8
+	else
+		t = 0
+	end
+	res = res + t
+
+	t = test_terminal_if
+	res = res + t
+	
+	return res

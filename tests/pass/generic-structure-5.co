@@ -1,0 +1,13 @@
+// This test checks uses the right 'T' in initialize: 
+// i.e. the structure parameter, not the argument from dummy.
+
+struct S (T)
+	attr object	: T
+	method initialize (object: T)
+		object (self) = object
+
+function dummy (T, s, obj)
+	initialize (s, obj)
+
+function main
+	dummy (Char8, nil (S(Int32)), 123)

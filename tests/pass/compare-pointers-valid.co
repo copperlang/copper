@@ -1,0 +1,15 @@
+
+struct A
+	attr x	: Int32
+
+struct B : A
+
+struct C : A
+
+function main
+
+	var a = nil (A)
+	var b = nil (B)
+	var c = nil (C)
+	
+	return a == c

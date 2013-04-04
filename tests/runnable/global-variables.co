@@ -1,0 +1,20 @@
+struct A
+	attr value : Int32
+
+global x = A nil
+global y = 13
+global a, b = 2, 3
+
+global str = "Unused global"
+
+function .c .cdecl main
+
+	if x <> nil
+		return 1
+	end
+	
+	x = {A}
+	x value = 20
+	y += 2
+
+	return x value - y - a - b

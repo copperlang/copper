@@ -1,0 +1,1267 @@
+//[of]:ObjectFile
+//[of]:definition
+struct ObjectFile
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+method initialize (pool: *MemoryPool)
+
+	self pool	= pool
+	self dataBuffer	= pool allocateArray (Byte, 65536)
+
+	self constantStrings8 initialize
+	self constantStrings16 initialize
+	
+	self null	initialize (self sndx_null)
+	self shstrtab	initialize (self sndx_shstrtab)
+	self strtab	initialize (self sndx_strtab)
+	self text	initialize (self sndx_text, SHF_ALLOC | SHF_EXECINSTR, 0x90, self reltext)
+	self data	initialize (self sndx_data, SHF_ALLOC | SHF_WRITE, 0, self reldata)
+	self reltext	initialize (self sndx_rel_text, self sndx_symtab, self sndx_text, pool)
+	self reldata	initialize (self sndx_rel_text, self sndx_symtab, self sndx_data, pool)
+	self bss	initialize (self sndx_bss)
+	self symtab	initialize (self sndx_symtab, pool, self strtab)
+	
+	// Give a name to sections
+	var s = self shstrtab
+	s	setName (s, '.shstrtab')
+	self strtab	setName (s, '.strtab')
+	self text	setName (s, '.text')
+	self reltext	setName (s, '.rel.text')
+	self data	setName (s, '.data')
+	self reldata	setName (s, '.rel.data')
+	self bss	setName (s, '.bss')
+	self symtab	setName (s, '.symtab')
+
+	self addSection (self sndx_text)
+	self addSection (self sndx_data)
+	self addSection (self sndx_bss)
+
+method addSection (ndx: Offset)
+
+	var sym = self pool allocateMemory (ELFSymbol)
+	sym initializeSection (ndx)
+	self symtab add (sym)
+//[cf]
+//[of]:release
+method release
+
+	self shstrtab release
+	self strtab release
+	self symtab release
+	self constantStrings8 release
+	self constantStrings16 release
+//[cf]
+//[cf]
+//[of]:accessing
+//[of]:firstByte
+//[c]The first position (to compute relative offset)
+//[c]
+attr firstByte	: Bytes
+//[cf]
+//[of]:nextByte
+//[c]The write position in the code buffer.
+//[c]
+attr nextByte	: Bytes
+//[cf]
+//[of]:virtualAddress
+//[c]Returns the current virtual address of the next byte to be written
+//[c]
+method virtualAddress
+
+	return self object offset + (self nextByte - self firstByte)
+//[cf]
+
+//[of]:textSection
+method textSection
+
+	return self text : *ObjectSection
+//[cf]
+//[of]:dataSection
+method dataSection
+
+	return self data : *ObjectSection
+//[cf]
+//[of]:getString8
+method getString8 (string: String8)
+
+	var object = self constantStrings8 [string]
+	if object isNil
+		object = self newStatic
+		self data beginObject (object, align_byte)
+		self data endObject (object, string : Bytes, (string size + 1) * Char8 size)
+		object updateSymbol
+		self constantStrings8 add (string, object)
+	end
+	
+	return object : *ObjectData
+//[cf]
+//[of]:getString16
+method getString16 (string: String16)
+
+	var object = self constantStrings16 [string]
+	if object isNil
+		object = self newStatic
+		self data beginObject (object, align_word)
+		self data endObject (object, string:Bytes, (string size + 1) * Char16 size)
+		object updateSymbol
+		self constantStrings16 add (string, object)
+	end
+	
+	return object : *ObjectData
+//[cf]
+//[cf]
+//[of]:creating
+//[of]:createData
+//[c]Creates a data object
+//[c]
+//[c]REMARKS
+//[c]	The object is not added to a section yet.
+//[c]
+method createData (code: Bytes, size: Size)
+
+	return self pool new (ELFObject, code, size) : *ObjectData
+//[cf]
+//[of]:createStatic
+//[c]Creates a static object
+//[c]
+//[c]REMARKS
+//[c]	The object is not added to a section yet.
+//[c]
+method createStatic
+
+ 	return self newStatic : *ObjectStatic
+//[cf]
+//[of]:createFunction
+//[c]Creates a new function
+//[c]
+//[c]ARGUMENTS
+//[c]	f	-- the function
+//[c]	section	-- the section
+//[c]	debug	-- true if debug object
+//[c]
+//[c]REMARKS
+//[c]	The object is not added to any section yet but symbols can be added to 
+//[c]	the symbol table.
+//[c]
+method createFunction (	f	: *Function, 
+	section	: *ObjectSection,
+	debug	: Bool)
+
+	var ndx = self strtab add (f publicName)
+	var obj = self pool new (ELFFunction, ndx, f, self, section, debug)
+	self symtab add (obj symbol)
+	return obj : *ObjectFunction
+//[cf]
+//[of]:createFunctionSymbol
+//[c]Creates a new function symbol
+//[c]
+//[c]ARGUMENTS
+//[c]	f -- the extern function
+//[c]
+//[c]RETURN VALUES
+//[c]	The symbol
+//[c]
+//[c]REMARKS
+//[c]	The symbol is added to the symbol table.
+//[c]
+method createFunctionSymbol (f: *ExternFunction)
+
+	var symbol = self pool allocateMemory (ELFSymbol)
+	var ndx = self strtab add (f publicName)
+	symbol initializeFunction (ndx)
+	self symtab add (symbol)
+	return symbol : *ObjectSymbol
+//[cf]
+//[cf]
+//[of]:dumping
+//[of]:dump
+method dump (filename: String)
+
+	self finalize
+	
+	var file = filename openWrite
+	if file isNil
+		return false
+	end
+	
+	var ok =	self dumpHeader (file) and
+		self dumpSectionHeader (file) and
+		self text	writePaddingTo (file) and self text	writeTo (file) and
+		self reltext	writePaddingTo (file) and self reltext	writeTo (file) and
+		self data	writePaddingTo (file) and self data	writeTo (file) and
+		self reldata	writePaddingTo (file) and self reldata	writeTo (file) and
+		self shstrtab	writePaddingTo (file) and self shstrtab	writeTo (file) and
+		self symtab	writePaddingTo (file) and self symtab	writeTo (file) and
+		self strtab	writePaddingTo (file) and self strtab	writeTo (file)
+	
+	ok &= file close
+	return ok
+//[cf]
+//[cf]
+//[of]:write primitives
+//[of]:beginObject
+method beginObject (	object	: *ObjectData,
+	section	: *ObjectSection,
+	align	: Size)
+
+	self section	= section : *ELFData
+	self object	= object  : *ELFObject
+	self firstByte	= self dataBuffer
+	self nextByte	= self dataBuffer
+
+	section beginObject (object, align)
+//[cf]
+//[of]:endObject
+method endObject (object: *ObjectData)
+
+	var size	= self nextByte - self firstByte
+	var buffer	= self pool allocateArray (Byte, size)
+	memoryCopy (buffer, self firstByte, size)
+
+	self section endObject (object : *ELFObject, buffer, size)
+	(object  : *ELFObject) updateSymbol
+//[cf]
+
+//[of]:allocateBuffer
+method allocateBuffer (T, size: Size)
+
+	var buffer = self nextByte : *[] T
+	self nextByte += T size * size
+	return buffer
+//[cf]
+//[of]:writeRelativeReference
+//[c]Writes a relative reference (for function calls)
+//[c]
+method writeRelativeReference (	base	: *ObjectSymbol,
+	offset	: Offset)
+
+	// Add relocation
+	var location = self object offset + (self nextByte - self firstByte)
+	self section addRelativeRelocation (location, base)
+
+	// Write empty offset
+	self writeDword (offset - 4)
+//[cf]
+//[of]:writeReference
+//[c]Writes a global reference
+//[c]
+method writeReference (	symbol	: *ObjectSymbol,
+	offset	: Offset)
+
+	// Add relocation
+	var location	= self object offset + (self nextByte - self firstByte)
+	self section addDirectRelocation (location, symbol : *ELFSymbol)
+
+	// Write empty offset
+	self writeDword (offset)
+//[cf]
+//[of]:writeBytes
+method writeBytes (buffer: Bytes, size: Size)
+
+	self nextByte memoryCopy (buffer, size)
+	self nextByte += size
+//[cf]
+//[of]:writeByte
+method writeByte (x : Byte)
+
+	return self write (x)
+//[cf]
+//[of]:writeWord
+method writeWord (x : Unsigned16)
+
+	return self write (x)
+//[cf]
+//[of]:writeDword
+method writeDword (x : Unsigned32)
+
+	return self write (x)
+//[cf]
+//[of]:writeQword
+method writeQword (x : Unsigned64)
+
+	return self write (x)
+//[cf]
+//[of]:write
+method write (x)
+	
+	// Get the current address
+	var p = self nextByte : *[] #x
+	
+	// Store value
+	p [] = x
+	
+	// Advance pointer
+	p ++
+	
+	// Save pointer
+	self nextByte = p : Bytes
+//[cf]
+//[cf]
+
+:private
+//[of]:attributes
+attr pool	: *MemoryPool	// The memory pool to store child elements
+attr constantStrings8	: String8Dictionary	// The table of global strings (8 bits)
+attr constantStrings16	: String16Dictionary	// The table of global strings (16 bits)
+		
+// Writer		
+attr section	: *ELFData	// Writing in this section
+attr object	: *ELFObject	// Writing in this object
+attr dataBuffer	: Bytes	// Temporary buffer to write structures and arrays
+
+// Sections
+attr null	: ELFNullSection	// The first null section
+attr text	: ELFData	// The .text section
+attr data	: ELFData	// The .data section
+attr bss	: ELFBss	// The .bss section
+attr reltext	: ELFRelocation	// The .rel.text section
+attr reldata	: ELFRelocation	// The .rel.data section
+attr shstrtab	: ELFStringTable	// The string table for section header
+attr strtab	: ELFStringTable	// The string table
+attr symtab	: ELFSymbolTable	// The symbol table
+//[cf]
+//[of]:creating
+//[of]:newStatic
+//[c]Creates a static object
+//[c]
+//[c]REMARKS
+//[c]	The object is not added to a section yet.
+//[c]
+method newStatic
+
+	var name = self symtab generateUniqueName ('S')
+	var ndx = self strtab add (name)
+
+	var obj = self pool new (ELFStatic, ndx)
+	self symtab add (obj symbol)
+ 	return obj
+//[cf]
+//[cf]
+//[of]:dumping
+//[of]:finalize
+method finalize
+
+	var offset = 0 s
+	offset += Elf32_Ehdr size
+	offset += self numSections * Elf32_Shdr size
+	
+	offset = self text	finalize (offset)
+	offset = self reltext	finalize (offset)
+	offset = self data	finalize (offset)
+	offset = self reldata	finalize (offset)
+	offset = self bss	finalize (offset)
+	offset = self shstrtab	finalize (offset)
+	offset = self symtab	finalize (offset)
+	offset = self strtab	finalize (offset)
+//[cf]
+//[of]:dumpHeader
+method dumpHeader (file)
+
+	var h	= {Elf32_Ehdr}
+	var ident	= [16] Byte [0x7F, 0x45, 0x4C, 0x46, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+	
+	h ident	memoryCopy (ident, EI_NIDENT)
+	h type	= ET_REL	// File type: an object file
+	h machine	= EM_386	// Machine: x86
+	h version	= EV_CURRENT	// Version: must be 'current'
+	h entry	= 0	// 
+	h phoff	= 0	// Position of the program header
+	h shoff	= Elf32_Ehdr size	// Position of the section header (immediately after the header)
+	h flags	= 0	// Flags
+	h ehsize	= Elf32_Ehdr size : Unsigned16	// Size of the header
+	h phentsize	= 0	// Size of an item in the program header
+	h phnum	= 0	// Number of program header
+	h shentsize	= Elf32_Shdr size : Unsigned16	// Size of an item in the section header
+	h shnum	= self numSections	// Number of sections in the section header
+	h shstrndx	= self sndx_shstrtab	// The string table for the section header is the first section (after null)
+	
+	return file write (h : Bytes, Elf32_Ehdr size) <> 0
+
+//[cf]
+//[of]:dumpSectionHeader
+method dumpSectionHeader (file: *File)
+
+	return	self null	writeHeaderTo (file) and
+		self text	writeHeaderTo (file) and
+		self reltext	writeHeaderTo (file) and
+		self data	writeHeaderTo (file) and
+		self reldata	writeHeaderTo (file) and
+		self bss	writeHeaderTo (file) and
+		self shstrtab	writeHeaderTo (file) and
+		self symtab	writeHeaderTo (file) and
+		self strtab	writeHeaderTo (file)
+//[cf]
+//[cf]
+//[of]:constants
+static sndx_null	= 0 : Offset
+static sndx_text	= 1 : Offset
+static sndx_rel_text	= 2 : Offset
+static sndx_data	= 3 : Offset
+static sndx_rel_data	= 4 : Offset
+static sndx_bss	= 5 : Offset
+static sndx_shstrtab	= 6 : Offset
+static sndx_symtab	= 7 : Offset
+static sndx_strtab	= 8 : Offset
+static numSections	= 9 : Size
+//[cf]
+//[cf]
+//[of]:ObjectSection
+//[of]:definition
+struct ObjectSection
+
+	method _impl
+		return self : *ELFData
+//[cf]
+//[of]:accessing
+//[of]:lineNumberOffset
+method lineNumberOffset
+
+	return self _impl lineNumberOffset
+//[cf]
+//[cf]
+//[of]:adding - removing
+//[of]:addObject
+//[c]Adds an object to the section
+//[c]
+//[c]ARGUMENTS
+//[c]	object	--	the object associated to this data (its address is saved)
+//[c]
+method addObject (object: *ObjectData, align: Size)
+
+	self _impl addObject (object _impl, align)
+//[cf]
+//[of]:beginObject
+//[c]Starts adding an object to the section: the object is assigned an offset
+//[c]
+//[c]ARGUMENTS
+//[c]	object	--	the object associated to this data (its address is saved)
+//[c]
+//[c]REMARKS
+//[c]	No other object can be added to the section until this one is completed.
+//[c]
+method beginObject (object: *ObjectData, align: Size)
+
+	self _impl beginObject (object _impl, align)
+//[cf]
+//[of]:endObject
+//[c]Completes the insertion of an object into the section
+//[c]
+//[c]	The size of the object should be set, so the size of the section
+//[c]	can be updated.
+//[c]
+//[c]ARGUMENTS
+//[c]	object	--	the object associated to this data (its address is saved)
+//[c]
+method endObject (object: *ObjectData, buffer: Bytes, size: Size)
+
+	self _impl endObject (object _impl, buffer, size)
+//[cf]
+
+//[of]:addDirectRelocation
+//[c]Adds a relocation
+//[c]
+method addDirectRelocation (base: *ObjectData, offset: Unsigned32, symbol: *ObjectSymbol)
+
+	self _impl addDirectRelocation (base _impl, offset, symbol _impl)
+
+method addDirectRelocation (offset: Unsigned32, symbol: *ObjectSymbol)
+
+	self _impl addDirectRelocation (offset, symbol _impl)
+//[cf]
+//[of]:addRelativeRelocation
+//[c]Adds a relocation
+//[c]
+//[c]	The offset is relative to the current object being added, so the
+//[c]	RVA is this offset + the offset of the o
+//[c]
+method addRelativeRelocation (offset: Unsigned32, symbol: *ObjectSymbol)
+
+	self _impl addRelativeRelocation (offset, symbol)
+//[cf]
+//[of]:beginLineNumber
+method beginLineNumber (object: *ObjectData)
+
+	self _impl beginLineNumber (object : *ELFObject)
+//[cf]
+//[of]:addLineNumber
+method addLineNumber (address: Unsigned32, line: Unsigned16)
+
+	self _impl addLineNumber (address, line)
+//[cf]
+//[cf]
+//[cf]
+//[of]:ObjectData
+//[of]:definition
+//[c]Base class of all objects having an address:
+//[c]	- function, 
+//[c]	- variable, 
+//[c]	- constant structure
+//[c]	- constant array
+//[c]	- constant strings
+//[c]
+//[c]An object is a piece of data inserted into a section with an optional 
+//[c]symbol to reference it.
+//[c]
+//[c]Any object that can be referenced must have a symbol. Only builtin
+//[c]functions shouldn't require a symbol.
+//[c]
+//[c]All these objects can be relocated
+//[c]
+struct ObjectData
+
+	method _impl
+		return self : *ELFObject
+//[cf]
+//[of]:accessing
+//[of]:buffer
+method buffer
+
+	return self _impl buffer
+//[cf]
+//[of]:symbol
+method symbol
+
+	return self _impl symbol : *ObjectSymbol
+//[cf]
+//[cf]
+//[of]:converting
+//[of]:relative
+method relative (	fromObject	: *ObjectData,
+	fromOffset	: Offset)
+
+	var from = fromOffset + fromObject _impl offset
+	return self _impl offset - (from + 4)
+//[cf]
+//[cf]
+//[cf]
+//[of]:ObjectStatic
+//[of]:definition
+struct ObjectStatic : ObjectData
+//[cf]
+//[cf]
+//[of]:ObjectFunction
+//[of]:definition
+struct ObjectFunction : ObjectData
+
+	method _impl
+		return self : *ELFFunction
+//[cf]
+//[of]:updating
+//[of]:finalize
+//[c]Finalizes
+//[c]
+//[c]	This method is invoked when the function is fully built.
+//[c]
+method finalize (	debug	: Bool, 
+	firstLineOffset	: Offset,
+	lineNumberCount	: Size,
+	firstLineNumber	: LineNumber,
+	lastLineNumber	: LineNumber)
+
+	self _impl finalize (debug, firstLineOffset, lineNumberCount, firstLineNumber, lastLineNumber)
+//[cf]
+//[cf]
+//[cf]
+//[of]:ObjectSymbol
+//[of]:definition
+struct ObjectSymbol
+
+	method _impl
+		return self : *ELFSymbol
+//[cf]
+//[of]:output
+//[of]:addToStringBuffer
+method addToStringBuffer (sb: *StringBuffer)
+
+	self _impl addToStringBuffer (sb)
+//[cf]
+//[cf]
+//[cf]
+
+.private
+//[of]:ELF
+//[of]:ELFSection
+//[of]:definition
+struct ELFSection
+
+	attr header	: Elf32_Shdr
+	attr index	: Offset
+	attr padding	: Size
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+method initialize (index: Offset)
+
+	self index	= index
+	self padding	= 0
+
+	var sh = self header
+	sh name	= 0
+	sh type	= SHT_NULL
+	sh flags	= 0
+	sh addr	= 0
+	sh offset	= 0
+	sh size	= 0
+	sh link	= SHN_UNDEF
+	sh info	= 0
+	sh addralign	= 0
+	sh entsize	= 0
+//[cf]
+//[cf]
+//[of]:accessing
+//[of]:setName
+method setName (strings: *ELFStringTable, name: String8)
+
+	self header name = strings add (name)
+//[cf]
+//[of]:setRange
+method setRange (o: Offset, size: Size)
+
+	// Align offset with addralign constraint
+	var offset = o
+	offset += self header addralign - 1
+	offset &= not (self header addralign - 1)
+	self padding = offset - o
+	
+	self header offset	= offset
+	self header size	= size
+	
+	return offset + size
+//[cf]
+//[cf]
+//[of]:writing
+//[of]:writeHeaderTo
+method writeHeaderTo (file: *File)
+
+	return file write (self header : Bytes, Elf32_Shdr size) <> 0
+//[cf]
+//[of]:writePaddingTo
+method writePaddingTo (file: *File)
+
+	if self padding == 0
+		return true
+	end
+	
+	return file write ([] Byte [0, 0, 0], self padding) <> 0
+//[cf]
+//[cf]
+//[cf]
+//[of]:ELFNullSection
+struct ELFNullSection : ELFSection
+
+	method initialize (index: Offset)
+	
+		self super initialize (index)
+//[cf]
+//[of]:ELFSymbolTable
+//[of]:definition
+struct ELFSymbolTable : ELFSection
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+method initialize (index: Offset, pool: *MemoryPool, strings: *ELFStringTable)
+
+	self super initialize (index)
+	self pool	= pool
+	self nameIndex	= 1
+	self symbols	initialize
+	self nameBuffer	initialize
+
+	var sh = self header
+	sh type	= SHT_SYMTAB
+	sh link	= strings index
+	sh info	= 4 // index of first GLOBAL in the table: null + 3 sections => 4
+	sh addralign	= 4
+	sh entsize	= Elf32_Sym size
+
+	var sym = self pool allocateMemory (ELFSymbol)
+	sym initializeNull
+	self add (sym)
+//[cf]
+//[of]:release
+method release
+
+	self nameBuffer release
+//[cf]
+//[of]:finalize
+method finalize (o: Offset)
+
+	var n	= self symbols size
+	var size	= n * Elf32_Sym size
+	
+	return self setRange (o, size)
+//[cf]
+//[cf]
+//[of]:adding - removing
+//[of]:add
+method add (symbol: *ELFSymbol)
+
+	symbol index = self symbols size
+	self symbols add (symbol)
+//[cf]
+//[cf]
+//[of]:writing
+//[of]:writeTo
+method writeTo (file: *File)
+
+	self symbols each do symbol
+		if file write (symbol elfSymbol : Bytes, Elf32_Sym size) == 0
+			return false
+		end
+	end
+	
+	return true
+//[cf]
+//[cf]
+//[of]:utils
+//[of]:generateUniqueName
+//[c]Generates a unique name for the symbol table based on the given string
+//[c]
+method generateUniqueName (s: String8)
+
+	var nameBuffer = self nameBuffer
+	nameBuffer removeAll
+	nameBuffer addChar8 ($@)
+	nameBuffer addMemoryBlock (s, s size)
+	nameBuffer addUnsignedToAnsi (self nameIndex)
+	nameBuffer addChar8 (0)
+
+	self nameIndex ++
+
+	return nameBuffer string8
+//[cf]
+//[cf]
+
+:private
+//[of]:attributes
+attr pool	: *MemoryPool
+attr symbols	: ELFSymbol Collection	// The symbol table
+attr nameBuffer	: MemoryBuffer	// Buffer to generate the name of symbols
+attr nameIndex	: Unsigned	// Suffix to generate a unique symbol
+//[cf]
+//[cf]
+//[of]:ELFStringTable
+//[of]:definition
+struct ELFStringTable : ELFSection
+
+	attr buffer	: MemoryBuffer
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+method initialize (index: Offset)
+
+	self super initialize (index)
+	self buffer initialize
+	self buffer addByte (0)
+
+	var sh = self header
+	sh type	= SHT_STRTAB
+	sh addralign	= 1
+//[cf]
+//[of]:release
+method release
+
+	self buffer release
+//[cf]
+//[of]:finalize
+method finalize (offset: Offset)
+
+	return self setRange (offset, self buffer size)
+//[cf]
+//[cf]
+//[of]:adding - removing
+//[of]:add
+method add (s: String8)
+
+	var offset = self buffer size
+	self buffer addMemoryBlock (s, s size + 1)
+	return offset
+//[cf]
+//[cf]
+//[of]:writing
+//[of]:writeTo
+method writeTo (file: *File)
+
+	return file write (self buffer base, self buffer size) <> 0
+//[cf]
+//[cf]
+//[cf]
+//[of]:ELFRelocation
+//[of]:definition
+const max_relocation_numbers	= 10000
+
+struct ELFRelocation : ELFSection
+
+	attr size	: Size
+	attr pointer	: *[] Elf32_Rel
+	attr buffer	: *[] Elf32_Rel
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+method initialize (index: Offset, symtab: Offset, section: Offset, pool: *MemoryPool)
+
+	self super initialize (index)
+
+	var sh = self header
+	sh type	= SHT_REL
+	sh link	= symtab
+	sh info	= section
+	sh addralign	= 4
+	sh entsize	= Elf32_Rel size
+
+	self buffer	= pool allocateArray (Elf32_Rel, max_relocation_numbers)
+	self pointer	= self buffer
+	self size	= 0
+//[cf]
+//[of]:finalize
+method finalize (o: Offset)
+
+	var n	= self size
+	var size	= n * Elf32_Rel size
+	
+	return self setRange (o, size)
+//[cf]
+//[cf]
+//[of]:adding - removing
+//[of]:add
+method add (offset: Offset, symbol: *ELFSymbol, type: Byte)
+
+	self pointer [0] set (offset, symbol index, type)
+	self pointer ++
+	self size ++
+//[cf]
+//[cf]
+//[of]:writing
+//[of]:writeTo
+method writeTo (file: *File)
+
+	if self size == 0
+		return true
+	end
+	
+	return file write (self buffer : Bytes, self size * Elf32_Rel size) <> 0
+//[cf]
+//[cf]
+
+:private
+//[of]:attributes
+attr pool	: *MemoryPool
+attr symbols	: ELFSymbol Collection	// The symbol table
+attr nameBuffer	: MemoryBuffer	// Buffer to generate the name of symbols
+attr nameIndex	: Unsigned	// Suffix to generate a unique symbol
+//[cf]
+//[cf]
+//[of]:ELFData
+//[of]:definition
+struct ELFData : ELFSection
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+//[c]Initializes a data section
+//[c]
+//[c]ARGUMENTS
+//[c]	index	-- the index of the section in the section header
+//[c]	flags	-- the flags of the section header
+//[c]	pad	-- byte to fill holes between blocks (when there is an align constraint)
+//[c]	relocations	-- the associated relocation section
+//[c]
+method initialize (	index	: Offset, 
+	flags	: Unsigned32, 
+	pad	: Byte,
+	relocations	: *ELFRelocation)
+
+	self super initialize (index)
+	self size	= 0
+	self pad	= pad
+	self relocations	= relocations
+	self objects	initialize
+
+	var sh = self header
+	sh type	= SHT_PROGBITS
+	sh flags	= flags
+	sh addralign	= 4
+//[cf]
+//[of]:finalize
+method finalize (o: Offset)
+
+	return self setRange (o, self size)
+//[cf]
+//[cf]
+//[of]:accessing
+//[of]:lineNumberOffset
+method lineNumberOffset
+
+	// ###
+	return 0 : Offset
+//[cf]
+//[cf]
+//[of]:adding - removing
+//[of]:addObject
+//[c]Adds an object to the section
+//[c]
+//[c]ARGUMENTS
+//[c]	object	--	the object associated to this data (its address is saved)
+//[c]
+method addObject (object: *ELFObject, align: Size)
+
+	self beginObject (object, align)
+	
+	// Update the size of the section	
+	self size = object offset + object size
+//[cf]
+//[of]:beginObject
+//[c]Starts adding an object to the section: the object is assigned an offset
+//[c]
+//[c]ARGUMENTS
+//[c]	object	--	the object associated to this data (its address is saved)
+//[c]
+//[c]REMARKS
+//[c]	No other object can be added to the section until this one is completed.
+//[c]
+method beginObject (object: *ELFObject, align: Size)
+
+	// Align the offset
+	var offset	= self size
+	var mask	= align - 1
+	offset += mask
+	offset &= not mask
+	
+	// Set the location of the object
+	object section	= self
+	object offset	= offset
+
+	self objects add (object)
+//[cf]
+//[of]:endObject
+//[c]Completes the insertion of an object into the section
+//[c]
+//[c]	The size of the object should be set, so the size of the section
+//[c]	can be updated.
+//[c]
+//[c]ARGUMENTS
+//[c]	object	--	the object associated to this data (its address is saved)
+//[c]
+method endObject (object: *ELFObject, buffer: Bytes, size: Size)
+
+	object buffer	= buffer
+	object size	= size
+	
+	// Update the size of the section	
+	self size = object offset + size
+//[cf]
+
+//[of]:addDirectRelocation
+//[c]Adds a relocation
+//[c]
+method addDirectRelocation (base: *ELFObject, offset: Unsigned32, symbol: *ELFSymbol)
+
+	self relocations add (base offset + offset, symbol, R_386_32)
+
+method addDirectRelocation (offset: Unsigned32, symbol: *ELFSymbol)
+
+	self relocations add (offset, symbol, R_386_32)
+//[cf]
+//[of]:addRelativeRelocation
+//[c]Adds a relocation
+//[c]
+//[c]	The offset is relative to the current object being added, so the
+//[c]	RVA is this offset + the offset of the o
+//[c]
+method addRelativeRelocation (offset: Unsigned32, symbol: *ObjectSymbol)
+
+	self relocations add (offset, symbol : *ELFSymbol, R_386_PC32)
+//[cf]
+//[of]:beginLineNumber
+method beginLineNumber (object: *ELFObject)
+
+//[c]	###
+//[c]	self addLineNumber (object symbol _number, 0)
+//[cf]
+//[of]:addLineNumber
+method addLineNumber (address: Unsigned32, line: Unsigned16)
+
+//[c]	###
+//[c]	if self _lineNumbers isNil
+//[c]		self _lineNumbers = self _pool new (COFFLineBuffer)
+//[c]	end
+//[c]
+//[c]	self _lineNumbers add (address, line)
+//[cf]
+//[cf]
+//[of]:writing
+//[of]:writeTo
+method writeTo (file: *File)
+
+	var buffer = Byte allocateArray (self size)
+
+	var p = buffer
+	self objects each do object
+		var next = buffer + object offset
+		var pad = self pad
+		while p <> next
+			p [] = pad
+			p ++
+		end
+		p memoryCopy (object buffer, object size)
+		p += object size
+	end
+
+	var ok = true
+	if self size <> 0
+		ok = file write (buffer, self size) <> 0
+	end
+	Byte freeArray (buffer, self size)
+	return ok
+//[cf]
+//[cf]
+
+:private
+//[of]:attributes
+attr size	: Size	// The size
+attr objects	: ELFObject Collection	// All objects of the section
+attr pad	: Byte	// Align with this value
+attr relocations	: *ELFRelocation	// The associated relocation section
+//[cf]
+//[cf]
+//[of]:ELFBss
+//[of]:definition
+struct ELFBss : ELFSection
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+//[c]Initializes a bss section
+//[c]
+//[c]ARGUMENTS
+//[c]	index	-- the index of the section in the section header
+//[c]
+method initialize (	index	: Offset)
+
+	self super initialize (index)
+
+	var sh = self header
+	sh type	= SHT_NOBITS
+	sh flags	= SHF_ALLOC | SHF_WRITE
+	sh addralign	= 4
+//[cf]
+//[of]:finalize
+method finalize (o: Offset)
+
+	return self setRange (o, 0)
+//[cf]
+//[cf]
+//[of]:writing
+//[of]:writeTo
+method writeTo (file: *File)
+
+	return true
+//[cf]
+//[cf]
+//[cf]
+
+//[of]:ELFSymbol
+//[of]:definition
+struct ELFSymbol : ELFSymbol CollectionElement
+
+	attr index	: Offset
+	attr elfSymbol	: Elf32_Sym
+//[cf]
+//[of]:initialize - release
+//[of]:initializeNull
+//[c]Initializes a null symbol
+//[c]
+//[c]There should be only one null symbol: the first symbol in the symbol table.
+//[c]
+method initializeNull
+
+	var s = self elfSymbol
+	s name	= 0
+	s value	= 0
+	s size	= 0
+	s info	= 0
+	s other	= 0
+	s shndx	= SHN_UNDEF
+//[cf]
+//[of]:initializeFunction
+method initializeFunction (name: Offset)
+
+	var s = self elfSymbol
+	s name	= name
+	s value	= 0
+	s size	= 0
+	s info	= ELF32_ST_INFO (STB_GLOBAL, STT_FUNC)
+	s other	= 0
+	s shndx	= SHN_UNDEF
+//[cf]
+//[of]:initializeStatic
+method initializeStatic (name: Offset)
+
+	var s = self elfSymbol
+	s name	= name
+	s value	= 0
+	s size	= 0
+	s info	= ELF32_ST_INFO (STB_GLOBAL, STT_OBJECT)
+	s other	= 0
+	s shndx	= SHN_UNDEF
+//[cf]
+//[of]:initializeSection
+method initializeSection (ndx: Offset)
+
+	var s = self elfSymbol
+	s name	= 0
+	s value	= 0
+	s size	= 0
+	s info	= ELF32_ST_INFO (STB_LOCAL, STT_SECTION)
+	s other	= 0
+	s shndx	= ndx : Unsigned16
+//[cf]
+//[of]:initializeFile
+method initializeFile (ndx: Offset)
+
+	var s = self elfSymbol
+	s name	= ndx
+	s value	= 0
+	s size	= 0
+	s info	= ELF32_ST_INFO (STB_LOCAL, STT_FILE)
+	s other	= 0
+	s shndx	= SHN_ABS
+//[cf]
+//[cf]
+//[of]:output
+//[of]:addToStringBuffer
+method addToStringBuffer (sb: *StringBuffer)
+
+	sb << self index
+//[cf]
+//[cf]
+//[cf]
+//[of]:ELFObject
+//[of]:definition
+//[c]Base class of all objects having an address:
+//[c]	- function, 
+//[c]	- variable, 
+//[c]	- constant structure
+//[c]	- constant array
+//[c]	- constant strings
+//[c]
+//[c]An object is a piece of data inserted into a section with an optional 
+//[c]symbol to reference it.
+//[c]
+//[c]Any object that can be referenced must have a symbol. Only builtin
+//[c]functions shouldn't require a symbol.
+//[c]
+//[c]All these objects can be relocated
+//[c]
+struct ELFObject : ELFObject CollectionElement
+
+	attr buffer	: Bytes	// The data
+	attr size	: Size	// The size of data
+	attr symbol	: ELFSymbol	// Any object that can be referenced must have a symbol
+			
+	attr section	: *ELFSection	// The section of this object
+	attr offset	: Offset	// The relative position of the object in the section
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+//[c]Initialize a new object
+//[c]
+method initialize
+
+	self buffer	= nil
+	self size	= 0
+	self section	= nil
+	self offset	= 0
+
+method initialize (code: Bytes, size: Size)
+
+	self buffer	= code
+	self size	= size
+	self section	= nil
+	self offset	= 0
+//[cf]
+//[cf]
+//[of]:converting
+//[of]:relative
+method relative (	fromObject	: *ELFObject,
+	fromOffset	: Offset)
+
+	var from = fromOffset + fromObject offset
+	return self offset - (from + 4)
+//[cf]
+//[cf]
+//[of]:updating
+//[of]:updateSymbol
+method updateSymbol
+
+	var s	= self symbol elfSymbol
+	s value	= self offset
+	s size	= self size
+	s shndx	= self section index : Unsigned16
+//[cf]
+//[cf]
+//[cf]
+//[of]:ELFStatic
+//[of]:definition
+struct ELFStatic : ELFObject
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+method initialize (name: Offset)
+
+	self super initialize
+	self symbol initializeStatic (name)
+//[cf]
+//[cf]
+//[cf]
+//[of]:ELFFunction
+//[of]:definition
+struct ELFFunction : ELFObject
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+method initialize (	name	: Offset,
+	f	: *Function, 
+	object	: *ObjectFile,
+	section	: *ObjectSection,
+	debug	: Bool)
+
+	self super initialize
+	self symbol initializeFunction (name)
+//[cf]
+//[cf]
+//[of]:updating
+//[of]:finalize
+//[c]Finalizes
+//[c]
+//[c]	This method is invoked when the function is fully built.
+//[c]
+method finalize (	debug	: Bool, 
+	firstLineOffset	: Offset,
+	lineNumberCount	: Size,
+	firstLineNumber	: LineNumber,
+	lastLineNumber	: LineNumber)
+
+//[cf]
+//[cf]
+//[cf]
+//[cf]
+//[of]:Utils
+//[of]:String8Dictionary
+const String8Dictionary = Dictionary (	String8, *ELFObject, nil,
+	ref hash (String8),
+	ref isEqual (String8, String8))
+//[cf]
+//[of]:String16Dictionary
+const String16Dictionary = Dictionary (	String16, *ELFObject, nil, 
+	ref hash (String16),
+	ref isEqual (String16, String16))
+//[cf]
+//[cf]
+//[of]:Imports
+import "elf/elf"
+import "syntax-tree"
+import "x86"
+import "commons"
+import "file"
+import "core"
+//[cf]

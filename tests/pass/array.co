@@ -1,0 +1,32 @@
+
+struct A
+	attr x	: Int32
+	attr y	: Int32
+
+function main
+
+	var a = nil ([5] Int32)
+	
+	var i = 2
+	var x1 = a []
+	var x2 = a [2]
+	var x3 = a [i]
+	var p = a
+	p = p + 10
+	p = p - 1
+	
+	a [1] = 3
+	
+	var b = nil ([2] A)
+	var c = nil ([2] * A)
+	var y1 = b [1]
+	// b [1] = nil -- error: not a lvalue
+	c [1] = nil
+	
+	
+	var d = nil (Int32)
+	d [] = 123
+	var e = nil (A)
+	//e [] = nil
+	
+	return y1

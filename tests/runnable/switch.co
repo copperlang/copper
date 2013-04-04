@@ -1,0 +1,95 @@
+
+function test_switch_1
+
+	var x = 2
+	switch x
+	case 0
+		return 1
+	case 1, 2
+		return 0
+	case 3
+		return 1
+	else
+		return 1
+	end
+
+function test_switch_2
+
+	var x = 2
+	switch x
+	end
+
+	return 0	
+
+function test_switch_3
+
+	var x = 2
+	switch x
+	else
+		return 0
+	end
+
+function test_switch_4
+
+	var x = 20
+	switch x
+	case 1
+	else
+		return 0
+	end
+
+	return 1
+
+function test_switch_5
+
+	var x = 20
+	switch x
+	case 20
+	else
+		return 1
+	end
+
+	return 0
+
+function test_switch_char
+
+	var x = $b
+	switch x
+	case $a
+		return 1
+	case $b
+		return 0
+	case $c
+		return 1
+	end
+
+	return 1
+
+enum Dummy
+	dummy1
+	dummy2
+	dummy3
+
+function test_switch_enum
+
+	var x = dummy2
+	switch x
+	case dummy1
+		return 1
+	case dummy2
+		return 0
+	else
+		return 1
+	end
+
+function .c .cdecl main
+
+	var res = 0
+	res += test_switch_1
+	res += test_switch_2
+	res += test_switch_3
+	res += test_switch_4
+	res += test_switch_5
+	res += test_switch_char
+	res += test_switch_enum
+	return res

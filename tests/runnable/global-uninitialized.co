@@ -1,0 +1,14 @@
+struct Point
+	attr x : Int32
+	attr y : Int32
+
+global xx	= {Int32}
+global pt	= {Point}
+const pt2	= {Point}
+
+function .c .cdecl main
+
+	xx = 33
+	pt x = 5
+	pt2 y = 4
+	return xx + pt x + pt2 y - 33 - 5 - 4

@@ -1,0 +1,6 @@
+struct A
+	attr x : Int32
+
+function .entry .c .cdecl test (a: *A)
+
+	return a x

@@ -1,0 +1,14 @@
+//[c]Regression test - ensures that the iterator has no access to the argument 
+//[c]of the caller function.
+//[c]
+function loop
+	var n = x	// should not see 'x'
+	yield n
+
+function test (x : Int32)
+	loop do z
+	end
+
+function main
+	test (5)
+	return 0

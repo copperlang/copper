@@ -1,0 +1,3282 @@
+//[of]:Function Generator
+//[of]:FunctionGenerator
+//[of]:definition
+//[c]The function generator builds a PFunction from a Function.
+//[c]
+//[c]Constants found in the functions are added to the object file.
+//[c]
+struct FunctionGenerator
+
+	attr pool	: *MemoryPool	// The memory pool to store mc-instructions
+	attr objectFile	: *ObjectFile	// The object file to store constants (strings, structs, ...)
+			
+	attr pfunction	: *PFunction	// The p-function to generate
+	attr line	: LineNumber	// The current line number
+	attr exitLabel	: *PLabel	// Return instructions jump to this label
+	attr inlineContext	: *InlineContext	// The current inline context
+	attr instructions	: *Collection (PInstruction)	// The current list of instruction to fill (if nil, we are starting a new list: a new one is created)
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+method initialize (	pool	: *MemoryPool, 
+	obj	: *ObjectFile)
+
+	self pool	= pool
+	self objectFile	= obj
+//[cf]
+//[cf]
+//[of]:generating
+//[of]:generate
+method generate (f: *Function, pf: *PFunction)
+
+	self pfunction	= pf
+	self instructions	= pf instructions
+
+	// Create a pargument for each argument of the function
+	f eachArgument do a
+		if not a type isMeta
+			var size = a type sizeCode
+			a generator = self newArgument (a name, size)
+		end
+	end
+	
+	// Create the exit label
+	self exitLabel	= self newLabel
+	
+	// Set the initial location
+	self line = f line
+	
+	// Reset the inline context
+	self inlineContext = nil
+	
+	// Scan the block for variables
+	self generateBlock (f body)
+	
+	// Add the exit label
+	self label (self exitLabel)
+//[cf]
+//[of]:generateVariable
+method generateVariable (variable: *GlobalVariable, initialValue: *ExpressionValue)
+
+	self readConstant (initialValue constant)
+
+	// Write data
+	var object = self objectFile createStatic
+	self objectFile beginObject (object, self objectFile dataSection, variable type align)
+	var type = variable type
+	self writeConstant (initialValue constant, type)
+	self objectFile endObject (object)
+	
+	// Creates the value
+	var address	= self newGlobal (object symbol)
+	var value	= self newMemory (type sizeCode, address)
+	variable generator = value
+//[cf]
+//[cf]
+
+:private
+//[of]:constants
+static trueValue	= PIntegerValue [vc_integer,	vs_byte,	1]
+static falseValue	= PIntegerValue [vc_integer,	vs_byte,	0]
+static nilValue	= PIntegerValue [vc_integer,	vs_dword,	0]
+	
+static oneValues	= [4] PIntegerValue [	vc_integer,	vs_byte,	1,
+		vc_integer,	vs_word,	1,
+		vc_integer,	vs_dword,	1,
+		vc_integer,	vs_qword,	1]
+//[cf]
+//[of]:generating
+//[of]:generateBlock
+method generateBlock (block: *Block)
+
+	block eachInstruction do i
+		self generateInstruction (i)
+	end
+//[cf]
+//[of]:generateInstruction
+method generateInstruction (instruction: *Instruction)
+
+	// Do not changes the line number if we are expanding
+	// a function or an iterator call
+	if self inlineContext isNil
+		self line = instruction line
+	end
+	
+	switch instruction code
+	case i_evaluate
+		self generateEvaluate (instruction asEvaluate)
+	case i_variable
+		self generateVariable (instruction asVariable)
+	case i_assign
+		self generateAssign (instruction asAssign)
+	case i_if
+		self generateIf (instruction asIf)
+	case i_while
+		self generateWhile (instruction asWhile)
+	case i_break
+		self generateBreak (instruction asBreak)
+	case i_return
+		self generateReturn (instruction asReturn)
+	case i_switch
+		self generateSwitch (instruction asSwitch)
+	case i_yield
+		self generateYield (instruction asYield)
+	else
+		assertFailure ("Generating unknown instruction")
+	end
+//[cf]
+//[of]:generateEvaluate
+method generateEvaluate (instruction: *EvaluateInstruction)
+
+	var values = {PValueArray} local
+	self generateExpressionList (instruction values, values)
+
+	values each do value
+		self evaluate (value)
+	end
+//[cf]
+//[of]:generateAssign
+method generateAssign (instruction: *AssignInstruction)
+
+	var rvalues = {PValueArray} local
+	self generateExpressionList (instruction rightValues, rvalues)
+
+	var lvalues = {PValueArray} local
+	self generateExpressionList (instruction leftValues, lvalues)
+
+	var tvalues = {[max_values] *PValue}
+	
+	// All variables but the last must be copied to temporary values
+	// because some lvalues may depends on previous assigned values.
+	//	a1, a2, ..., an = v1, v2, ..., vn
+	// becomes
+	//	v1 -> tmp1
+	//	v2 -> tmp2
+	//	...
+	//	vn -> an
+	//	tmp1 -> a1
+	//	tmp2 -> a2
+	//
+	var n = rvalues size - 1
+	var i = 0 s
+	while i < n
+		var tmp = self newVariable (nil, rvalues [i] size)
+		self assign (tmp, rvalues [i])
+		tvalues [i] = tmp
+		i ++
+	end
+	self assign (lvalues [i], rvalues [i])
+	n each do i
+		self assign (lvalues [i], tvalues [i])
+	end
+//[cf]
+//[of]:generateVariable
+method generateVariable (instruction: *VariableInstruction)
+
+	// Evaluate the expressions
+	var rvalues = {PValueArray} local
+	self generateExpressionList (instruction expressions, rvalues)
+
+	// Create the p-instructions
+	eachDual (instruction variables, rvalues) do variable, rvalue
+		// Create the p-variable
+		var lvalue = self newVariable (variable name, variable type sizeCode)
+		
+		// Attach to the variable
+		self bind (variable, lvalue)
+		
+		// Create the assign instruction
+		self assign (lvalue, rvalue)
+	end
+//[cf]
+//[of]:generateIf
+method generateIf (instruction: *IfInstruction)
+	
+	// Pass 1 - Create the labels
+	var lastLabel = PLabel nil
+	instruction eachRule do rule
+		lastLabel	= self newLabel
+		self bind (rule, lastLabel)
+	end
+	
+	// Pass 2 - Generate code
+	instruction eachRule do rule
+		var condition	= rule condition
+		var elseLabel	= rule generator : *PLabel
+		
+		if condition notNil
+			if self inlineContext isNil
+				self line = condition line
+			end
+			
+			self jumpnc (self conditionValue (condition), elseLabel)
+		end
+		
+		// Generate the block
+		self generateBlock (rule block)
+			
+		// Jump to the last block if the block is not terminated and
+		// it is not the last block.
+		if not rule block terminated and elseLabel <> lastLabel
+			self jump (lastLabel)
+		end
+
+		// The current position is the label else of the rule
+		self label (elseLabel)
+	end
+//[cf]
+//[of]:generateWhile
+method generateWhile (instruction: *WhileInstruction)
+
+	var loopLabel	= self newLabel
+	var exitLabel = self newLabel
+	self bind (instruction, exitLabel)
+	if instruction condition notNil
+		var firstLabel	= self newLabel
+		self jump (firstLabel)
+		self label (loopLabel)
+		self generateBlock (instruction block)
+		self label (firstLabel)
+		
+		// Do not use the line of the test as COFF does not accept line
+		// above the previous ones. Use the successor of the last line 
+		// instead (it could the end or a blank line).
+		//self line = instruction line
+		self line ++	
+		
+		self jumpc (self conditionValue (instruction condition), loopLabel)
+	else
+		var loopLabel	= self newLabel
+		self label (loopLabel)
+		self generateBlock (instruction block)
+		self jump (loopLabel)
+	end
+	self label (exitLabel)
+//[cf]
+//[of]:generateBreak
+method generateBreak (instruction: *BreakInstruction)
+
+	var loopInstruction	= instruction instruction
+	if loopInstruction notNil
+		// Branch to the end of the loop
+		var exitLabel = loopInstruction generator : *PLabel
+		self jump (exitLabel)
+	else
+		// Branch to the end of the iterator call
+		var info = instruction expression generator : *InlineContext
+		self jump (info exitLabel)
+	end
+//[cf]
+//[of]:generateReturn
+method generateReturn (instruction: *ReturnInstruction)
+
+	// Evaluate expressions (if any)
+	var values = {PValueArray} local
+	var expressions = instruction expressions
+	if expressions notNil
+		self generateExpressionList (expressions, values)
+	end
+
+	// Create the array of values
+	var array = self pfunction newValueArray (values size)
+	array setAll (values)
+
+	if self inlineContext notNil
+		
+		// Inline iterator
+		var info = self inlineContext
+		
+		// Copy result to return values
+		if info singleReturn
+			values size each do i
+				info out add (array [i])
+			end
+		else
+			values size each do i
+				self assign (info returnValues [i], array [i])
+			end
+		end
+		
+		// All done
+		self jump (info exitLabel)
+	
+	else
+		// Regular return
+		self ret (values size, values size, array)
+		self jump (self exitLabel)
+	end
+//[cf]
+//[of]:generateSwitch
+method generateSwitch (instruction: *SwitchInstruction)
+
+	// Evaluate the value
+	var v = {PValueArray} local
+	self generateExpression (instruction value, v)
+	
+	// Create the exit label if required
+	var exitLabel	= PLabel nil
+	var defaultLabel	= PLabel nil
+	if not instruction terminated
+		exitLabel	= self newLabel
+		defaultLabel	= exitLabel
+	end
+	
+	// Create a label for each case
+	var caseCount = 0 s
+	instruction eachChoice do choice
+		var label = self newLabel
+		self bind (choice, label)
+		caseCount += choice values size
+		if choice values size == 0
+			defaultLabel = label
+		end
+	end
+	
+	// Create the switch table
+	var table = self newSwitchTable32 (caseCount)
+	var i = 0 s
+	instruction eachChoice do choice
+		choice values eachValue do value
+			var constant = value constant asInteger value : Integer
+			var label = choice generator : *PLabel
+			table setCase (i, constant, label)
+			i ++
+		end
+	end
+
+//[c]
+//[c]	Create the switch instructions
+//[c]
+	// Compute density
+	var min =  0x7FFFFFFF
+	var max = - 0x7FFFFFFF
+	table each do value, label
+		min = min (min, value)
+		max = max (max, value)
+	end
+	var range = (max - min + 1) s
+	
+	if table size * 2 >= range
+	
+		// The values are compact: use a direct table
+		var object = self getDirectTable (table, min, max, defaultLabel)
+
+		// Extend to 32 bits
+		var value32 = self getResize (v [0], true, vs_dword)
+
+		// Assign to a temporary variable
+		var tmp = self newVariable (nil, vs_dword)
+		self assign (tmp, value32)
+
+		// Sub min		
+		if min <> 0
+			var constant = self newInteger (vs_dword, min unsigned)
+			self op (pc_sub, tmp, constant)
+		end
+		
+		// Compare to max - min
+		var cmp = self newBinary (	vc_integer_ugt,
+			vs_dword,
+			tmp,
+			self newInteger (vs_dword, (max - min) unsigned))
+			
+		// Jump to default if above
+		self jumpc (cmp, defaultLabel)
+		
+		// Jump to table
+		var glob	= self newGlobal (object symbol)
+		var index	= self newBinary (vc_integer_smul, vs_dword, tmp, self newInteger (vs_dword, 4))
+		var address	= self newBinary (vc_integer_add, vs_dword, glob, index)
+		var memory	= self newMemory (vs_dword, address)
+		self jumpi (memory)
+		
+	else
+		// The values are sparse: use a lookup table
+		var object = self getLookupTable (table, defaultLabel)
+
+		// Extend to 32 bits
+		var value32 = self getResize (v [0], true, vs_dword)
+
+		self lookup (value32, self newGlobal (object symbol))
+	end
+	
+//[c]	
+//[c]	Build the blocks
+//[c]	
+	instruction eachChoice do choice
+		var block = choice block
+		var label = choice generator : *PLabel
+		
+		self label (label)
+		self generateBlock (block)
+			
+		// Jump to the last block if the block is not terminated
+		if not block terminated
+			self jump (exitLabel)
+		end
+	end
+	
+	if not instruction terminated
+		self label (exitLabel)
+	end
+//[cf]
+//[of]:generateYield
+method generateYield (instruction: *YieldInstruction)
+
+	// Evaluate arguments
+	var v = self generateArguments (instruction, {PValueArray})
+	
+	var inlineBlock = self inlineContext inlineBlock
+	
+	// Assign values to arguments
+	eachDual (inlineBlock arguments, v) do a, v
+		self bindArgument (a, v)
+	end
+
+	// Save the current context
+	var inlineContext = self inlineContext
+	
+	// Return to the parent context (the one that called the iterator)
+	self inlineContext = inlineContext next
+	
+	// Generate the block
+	self generateBlock (inlineBlock instructions)
+	
+	// Restore context to the iterator
+	self inlineContext = inlineContext
+//[cf]
+
+//[of]:generateExpressionList
+method generateExpressionList (values: *ExpressionList, out: *PValueArray)
+
+	values each do v
+		self generateExpression (v, out)
+	end
+//[cf]
+//[of]:generateExpression
+method generateExpression (expression: *Expression, out: *PValueArray)
+
+	switch expression code
+//[of]:	constants
+	case	e_literal_integer,
+		e_literal_boolean,
+		e_literal_char_8,
+		e_literal_char_16,
+		e_literal_string_8,
+		e_literal_string_16,
+		e_function
+	
+		self generateConstant (expression, out)
+//[cf]
+//[of]:	definition
+	case e_definition
+		self generateDefinition (expression: *DefinitionExpression, out)
+//[cf]
+//[of]:	minimal and
+	case e_minimal_and
+	
+		var pair	= expression asPair
+		var first	= self conditionValue (pair first)
+		var old 	= self openSequence
+		var second	= self conditionValue (pair second)
+		second	= self closeSequence (old, second)
+		var tmp	= self newBinary (vc_minimal_and, vs_byte, first, second)
+		out add (tmp)
+//[cf]
+//[of]:	minimal or
+	case e_minimal_or
+	
+		var pair	= expression asPair
+		var first	= self conditionValue (pair first)
+		var old 	= self openSequence
+		var second	= self conditionValue (pair second)
+		second	= self closeSequence (old, second)
+		var tmp	= self newBinary (vc_minimal_or, vs_byte, first, second)
+		out add (tmp)
+//[cf]
+//[of]:	function type
+	case e_function_type
+		// ignore -- no code to generate (no-op) because the type is known at compile-time
+//[cf]
+//[of]:	offset
+	case e_offset
+	
+		var attribute	= expression asOffset attribute
+		var offset	= attribute offset
+		out add (self newInteger (vs_dword, offset))
+//[cf]
+//[of]:	cond
+	case e_cond
+	
+		var c	= expression asCond
+		var elseLabel	= self newLabel
+		var commonLabel	= self newLabel
+
+		// Create temporary values		
+		var tvalues = {[max_values] *PValue}
+		var i = 0 s
+		c first values each do v
+			var tmp = self newVariable (nil, v type sizeCode)
+			tvalues [i] = tmp
+			out add (tmp)
+			i ++
+		end
+		
+		self jumpnc (self conditionValue (c condition), elseLabel)
+
+		// Assign first values to temporaries
+		var v1 = {PValueArray} local
+		self generateExpressionList (c first, v1)
+		i = 0
+		v1 each do v
+			self assign (tvalues [i], v)
+			i ++
+		end
+
+		self jump (commonLabel)
+		self label (elseLabel)
+		
+		// Assign second values to temporaries
+		var v2 = {PValueArray} local
+		self generateExpressionList (c second, v2)
+		i = 0
+		v2 each do v
+			self assign (tvalues [i], v)
+			i ++
+		end
+
+		self label (commonLabel)
+//[cf]
+	else
+		assertFailure ("Unhandled expression")
+	end
+//[cf]
+//[of]:generateDefinition
+method generateDefinition (expression: *DefinitionExpression, out: *PValueArray)
+
+	var v	= {PValueArray}
+	var definition = expression definition
+	switch definition code
+//[of]:	alias
+	case d_alias
+		self generateConstant (expression, out)
+//[cf]
+//[of]:	function
+	case d_function
+		var f	= definition asFunction
+		var mc	= f mcFunction
+		
+		if f hasYield or (mc inline and not mc inlining)
+		
+			// The function is inlinable: let's inline it instead of calling it
+			mc inlining = true
+				
+			self generateInlineCall (f, expression, out)
+
+			mc inlining = false
+		else
+			mc = mc master
+			
+			// Get the address to call
+			var address	= self newFunction (f name, mc pfunction)
+			var callingConvention	= f callingConvention
+			
+			// Mark the function as called (the body must be generated)
+			mc called = true
+			
+			self generateCall (callingConvention, address, expression, out)
+		end
+//[cf]
+//[of]:	extern function
+	case d_extern_function
+		// Get the address to call
+		var f	= expression definition asExternFunction
+		var symbol	= f generator : *ObjectSymbol
+		var address	= self newGlobal (symbol)
+		var callingConvention	= f callingConvention
+		
+		self generateCall (callingConvention, address, expression, out)
+//[cf]
+//[of]:	argument
+	case d_argument
+		var argument = definition asArgument
+
+		// Do not evaluate if the argument is a meta
+		if argument type isMeta
+			return
+		end
+		
+		var value = argument generator : *PValue
+		// The argument can be a variable or a constant when inlined
+		if value code == vc_argument
+			value argument pargument incReferenceCount
+		end
+		out add (value)
+//[cf]
+//[of]:	variable
+	case d_variable
+		var variable	= definition asVariable
+		var value	= variable generator : *PValue
+		out add (value)
+//[cf]
+//[of]:	global variable
+	case d_global_variable
+		var variable	= definition asGlobalVariable
+		var value	= variable generator : *PValue
+		out add (value)
+//[cf]
+//[of]:	attribute
+	case d_attribute
+		var attribute	= definition asAttribute
+		var type	= attribute storageType
+		
+		// Compute the effective address
+		self generateArguments (expression, v)
+		var value = self getAddOffset (v [0], attribute offset) : *PValue
+
+		// Simple type: load the value at given address
+		// Complex type: just compute the address
+		if type isSimple
+			value = self newMemory (type sizeCode, value)
+		end
+
+		out add (value)
+//[cf]
+//[of]:	parameter
+	case d_parameter
+		self generateConstant (expression, out)
+//[cf]
+//[of]:	enumeration value
+	case d_enumeration_value
+		self generateConstant (expression, out)
+//[cf]
+//[of]:	type
+	case d_type
+		// ignore -- no code to generate (no-op) because the type is known at compile-time
+//[cf]
+//[of]:	true
+	case d_true
+		out add (self trueValue)
+//[cf]
+//[of]:	false
+	case d_false
+		out add (self falseValue)
+//[cf]
+//[of]:	nil
+	case d_nil
+		out add (self nilValue)
+//[cf]
+//[of]:	variable arguments
+	case d_variable_arguments
+
+	var variableArguments	= expression definition asVariableArguments
+	variableArguments eachArgument do a
+		var value = a generator : *PValue
+		out add (value)
+	end
+		
+//[cf]
+//[of]:	extra size
+	case d_extra_size
+		self generateConstant (expression, out)
+
+//[cf]
+//[of]:	typeof
+	case d_typeof
+		// ignore -- no code to generate (no-op) because the type is known at compile-time
+//[cf]
+//[of]:	each extra
+	case d_each_extra
+		var inlineBlock	= expression inlineBlock
+		inlineBlock eachExtraBlocks each do b
+			self generateBlock (b)
+		end
+//[cf]
+
+//[of]:	meta local
+	case d_meta_local
+		var type	= expression arguments firstValue type asMeta type
+
+		var value = {*PValue}
+		if type isSimple
+			// Simple: just an undefined value
+			value = self newUndefined (type sizeCode)
+		else
+			value = self newLocal (type size)
+		end
+
+		self bind (expression, value)
+		out add (value)
+//[cf]
+//[of]:	meta size
+	case d_meta_size
+		var value	= expression arguments firstValue
+		var type	= value constantType
+		out add (self newInteger (vs_dword, type size))
+//[cf]
+//[of]:	meta next
+	case d_meta_next
+		self generateConstant (expression, out)
+//[cf]
+//[of]:	meta cast
+	case d_meta_cast
+		self generateArguments (expression, v)
+		
+		var newType	= expression arguments firstValue constantType
+		var oldType	= expression arguments secondValue type
+	
+		var arg = v [0]
+		if arg isInteger
+			arg = self newInteger64 (newType sizeCode, arg integer qword)
+		elsif oldType isIntegerOrChar and newType isIntegerOrChar
+			arg = self getResize (arg, oldType isSigned, newType sizeCode)
+		end
+	
+		out add (arg)
+//[cf]
+//[of]:	meta nil
+	case d_meta_nil
+		out add (self nilValue)
+//[cf]
+//[of]:	meta pointer
+	case d_meta_pointer
+		// ignore -- no code to generate (no-op) because the type is known at compile-time
+//[cf]
+//[of]:	meta array 1
+	case d_meta_array_1
+		// ignore -- no code to generate (no-op) because the type is known at compile-time
+//[cf]
+//[of]:	meta array 2
+	case d_meta_array_2
+		// ignore -- no code to generate (no-op) because the type is known at compile-time
+//[cf]
+//[of]:	meta target
+	case d_meta_target
+		// ignore -- no code to generate (no-op) because the type is known at compile-time
+//[cf]
+//[of]:	meta initialize
+	case d_meta_initialize
+		self generateConstant (expression, out)
+//[cf]
+		
+//[of]:	integer add
+	case d_integer_add
+		self generateBinary (expression, vc_integer_add, out)
+//[cf]
+//[of]:	integer sub
+	case d_integer_sub
+		self generateBinary (expression, vc_integer_sub, out)
+//[cf]
+//[of]:	integer mul
+	case d_integer_mul
+		var code	= expression isSignedOperation cond vc_integer_smul else vc_integer_umul
+		self generateBinary (expression, code, out)
+//[cf]
+//[of]:	integer div
+	case d_integer_div
+		var code	= expression isSignedOperation cond vc_integer_sdiv else vc_integer_udiv
+		self generateBinary (expression, code, out)
+//[cf]
+//[of]:	integer mod
+	case d_integer_mod
+		var code	= expression isSignedOperation cond vc_integer_smod else vc_integer_umod
+		self generateBinary (expression, code, out)
+//[cf]
+//[of]:	integer shl
+	case d_integer_shl
+		self generateBinary (expression, vc_integer_shl, out)
+//[cf]
+//[of]:	integer shr
+	case d_integer_shr
+		var code	= expression isSignedOperation cond vc_integer_sshr else vc_integer_ushr
+		self generateBinary (expression, code, out)
+//[cf]
+//[of]:	integer not
+	case d_integer_not
+		self generateUnary (expression, vc_integer_not, out)
+//[cf]
+//[of]:	integer neg
+	case d_integer_neg
+		self generateUnary (expression, vc_integer_neg, out)
+//[cf]
+//[of]:	integer pos
+	case d_integer_pos
+		self generateArguments (expression, v)
+		out add (v [0])
+//[cf]
+//[of]:	integer and
+	case d_integer_and
+		self generateBinary (expression, vc_integer_and, out)
+//[cf]
+//[of]:	integer or
+	case d_integer_or
+		self generateBinary (expression, vc_integer_or, out)
+//[cf]
+//[of]:	integer xor
+	case d_integer_xor
+		self generateBinary (expression, vc_integer_xor, out)
+//[cf]
+//[of]:	integer assign add
+	case d_integer_assign_add
+		self generateArguments (expression, v)
+		self op (pc_add, v [0], v [1])
+//[cf]
+//[of]:	integer assign sub
+	case d_integer_assign_sub
+		self generateArguments (expression, v)
+		self op (pc_sub, v [0], v [1])
+//[cf]
+//[of]:	integer assign mul
+	case d_integer_assign_mul
+		self generateArguments (expression, v)
+		self op ((expression isSignedOperation cond pc_smul else pc_umul), v [0], v [1])
+//[cf]
+//[of]:	integer assign div
+	case d_integer_assign_div
+		self generateArguments (expression, v)
+		self op ((expression isSignedOperation cond pc_sdiv else pc_udiv), v [0], v [1])
+//[cf]
+//[of]:	integer assign mod
+	case d_integer_assign_mod
+		self generateArguments (expression, v)
+		self op ((expression isSignedOperation cond pc_smod else pc_umod), v [0], v [1])
+//[cf]
+//[of]:	integer assign shl
+	case d_integer_assign_shl
+		self generateArguments (expression, v)
+		self op (pc_shl, v [0], v [1])
+//[cf]
+//[of]:	integer assign shr
+	case d_integer_assign_shr
+		self generateArguments (expression, v)
+		self op ((expression isSignedOperation cond pc_sshr else pc_ushr), v [0], v [1])
+//[cf]
+//[of]:	integer assign and
+	case d_integer_assign_and
+		self generateArguments (expression, v)
+		self op (pc_and, v [0], v [1])
+//[cf]
+//[of]:	integer assign or
+	case d_integer_assign_or
+		self generateArguments (expression, v)
+		self op (pc_or, v [0], v [1])
+//[cf]
+//[of]:	integer assign xor
+	case d_integer_assign_xor
+		self generateArguments (expression, v)
+		self op (pc_xor, v [0], v [1])
+//[cf]
+//[of]:	integer assign inc
+	case d_integer_assign_inc
+		self generateArguments (expression, v)
+		self op (pc_add, v [0], self oneValues [v [0] size])
+//[cf]
+//[of]:	integer assign dec
+	case d_integer_assign_dec
+		self generateArguments (expression, v)
+		self op (pc_sub, v [0], self oneValues [v [0] size])
+//[cf]
+//[of]:	integer eq
+	case d_integer_eq
+		self generateBinaryBoolean (expression, vc_integer_eq, out)
+//[cf]
+//[of]:	integer ne
+	case d_integer_ne
+		self generateBinaryBoolean (expression, vc_integer_ne, out)
+//[cf]
+//[of]:	integer le
+	case d_integer_le
+		var code	= expression isSignedOperation cond vc_integer_sle else vc_integer_ule
+		self generateBinaryBoolean (expression, code, out)
+//[cf]
+//[of]:	integer ge
+	case d_integer_ge
+		var code	= expression isSignedOperation cond vc_integer_sge else vc_integer_uge
+		self generateBinaryBoolean (expression, code, out)
+//[cf]
+//[of]:	integer lt
+	case d_integer_lt
+		var code	= expression isSignedOperation cond vc_integer_slt else vc_integer_ult
+		self generateBinaryBoolean (expression, code, out)
+//[cf]
+//[of]:	integer gt
+	case d_integer_gt
+		var code	= expression isSignedOperation cond vc_integer_sgt else vc_integer_ugt
+		self generateBinaryBoolean (expression, code, out)
+//[cf]
+
+//[of]:	char add
+	case d_char_add
+		self generateBinary (expression, vc_integer_add, out)
+//[cf]
+//[of]:	char sub
+	case d_char_sub
+		self generateBinary (expression, vc_integer_sub, out)
+//[cf]
+//[of]:	char assign add
+	case d_char_assign_add
+		self generateArguments (expression, v)
+		self op (pc_add, v [0], v [1])
+//[cf]
+//[of]:	char assign sub
+	case d_char_assign_sub
+		self generateArguments (expression, v)
+		self op (pc_sub, v [0], v [1])
+//[cf]
+//[of]:	char assign inc
+	case d_char_assign_inc
+		self generateArguments (expression, v)
+		self op (pc_add, v [0], self oneValues [v [0] size])
+//[cf]
+//[of]:	char assign dec
+	case d_char_assign_dec
+		self generateArguments (expression, v)
+		self op (pc_sub, v [0], self oneValues [v [0] size])
+//[cf]
+//[of]:	char eq
+	case d_char_eq
+		self generateBinaryBoolean (expression, vc_integer_eq, out)
+//[cf]
+//[of]:	char ne
+	case d_char_ne
+		self generateBinaryBoolean (expression, vc_integer_ne, out)
+//[cf]
+//[of]:	char le
+	case d_char_le
+		self generateBinaryBoolean (expression, vc_integer_ule, out)
+//[cf]
+//[of]:	char ge
+	case d_char_ge
+		self generateBinaryBoolean (expression, vc_integer_uge, out)
+//[cf]
+//[of]:	char lt
+	case d_char_lt
+		self generateBinaryBoolean (expression, vc_integer_ult, out)
+//[cf]
+//[of]:	char gt
+	case d_char_gt
+		self generateBinaryBoolean (expression, vc_integer_ugt, out)
+//[cf]
+
+//[of]:	boolean and
+	case d_boolean_and
+		self generateBinaryBoolean (expression, vc_integer_and, out)
+//[cf]
+//[of]:	boolean or
+	case d_boolean_or
+		self generateBinaryBoolean (expression, vc_integer_or, out)
+//[cf]
+//[of]:	boolean assign and
+	case d_boolean_assign_and
+		self generateArguments (expression, v)
+		self op (pc_and, v [0], v [1])
+//[cf]
+//[of]:	boolean assign or
+	case d_boolean_assign_or
+		self generateArguments (expression, v)
+		self op (pc_or, v [0], v [1])
+//[cf]
+//[of]:	boolean eq
+	case d_boolean_eq
+		// Compare byte values
+		self generateBinaryBoolean (expression, vc_integer_eq, out)
+//[cf]
+//[of]:	boolean ne
+	case d_boolean_ne
+		// Compare byte values
+		self generateBinaryBoolean (expression, vc_integer_ne, out)
+//[cf]
+//[of]:	boolean not
+	case d_boolean_not
+		// Invert only the bit 0
+		self generateUnary (expression, vc_boolean_not, out)
+//[cf]
+
+//[of]:	pointer eq
+	case d_pointer_eq
+		self generateBinaryBoolean (expression, vc_integer_eq, out)
+//[cf]
+//[of]:	pointer ne
+	case d_pointer_ne
+		self generateBinaryBoolean (expression, vc_integer_ne, out)
+//[cf]
+//[of]:	pointer dereference
+	case d_pointer_dereference
+		// Compute the effective address
+		self generateArguments (expression, v)
+		var value = v [0]
+
+		// Simple type: load the value at given address
+		// Complex type: just compute the address
+		var type	= expression arguments firstValue type asPointer target
+		if type isSimple
+			value = self newMemory (type sizeCode, value)
+		end
+
+		out add (value)
+//[cf]
+//[of]:	pointer super
+	case d_pointer_super
+		self generateArguments (expression, v)
+		out add (v [0])
+//[cf]
+//[of]:	pointer call
+	case d_pointer_call
+
+		// Get the calling convention
+		var pointerType	= expression arguments firstValue type asPointer
+		var functionType	= pointerType target asFunction
+		var callingConvention	= functionType callingConvention
+
+		self generateArguments (expression, v)
+		var argumentCount = v size - 1
+		var arguments = self pool allocateArray (*PValue, argumentCount)
+		argumentCount each do i
+			arguments [i] = v [i + 1]
+		end
+		
+		self generateCall (callingConvention, v [0], argumentCount, arguments, expression, out)
+//[cf]
+
+//[of]:	array index
+	case d_array_index
+
+		var cellType	= self cellType (expression)
+		
+		// Compute the effective address
+		self generateArguments (expression, v)
+		
+		var offset	= self getScaled (expression, v [1])
+		var value	= self newBinary (vc_integer_add, vs_dword, v [0], offset) : *PValue
+
+		// Simple type: load the value at given address
+		// Complex type: just compute the address
+		if cellType isSimple
+			value = self newMemory (cellType sizeCode, value)
+		end
+
+		out add (value)
+//[cf]
+//[of]:	array index 0
+	case d_array_index_0
+		
+		var cellType	= self cellType (expression)
+		
+		// Compute the effective address
+		self generateArguments (expression, v)
+		var value = v [0]
+
+		// Simple type: load the value at given address
+		// Complex type: just compute the address
+		if cellType isSimple
+			value = self newMemory (cellType sizeCode, value)
+		end
+
+		out add (value)
+//[cf]
+//[of]:	array add
+	case d_array_add
+
+		// Compute the effective address
+		self generateArguments (expression, v)
+		var offset	= self getScaled (expression, v [1])
+		var value	= self newBinary (vc_integer_add, vs_dword, v [0], offset)
+
+		out add (value)
+//[cf]
+//[of]:	array sub
+	case d_array_sub
+		self generateArguments (expression, v)
+	
+		var indexType	= expression argumentValues [1] type
+		if indexType isInteger
+			
+			// array - integer
+			var offset	= self getScaled (expression, v [1])
+			var value	= self newBinary (vc_integer_sub, vs_dword, v [0], offset)
+			out add (value)
+			
+		else
+		
+			// array - array
+			var cellType	= self cellType (expression)
+			var diff	= self newBinary (vc_integer_sub, vs_dword, v [0], v [1])
+			var value	= self newBinary (vc_integer_sdiv, vs_dword, diff, self newInteger (vs_dword, cellType size))
+			out add (value)
+		
+		end
+
+			
+
+//[cf]
+		
+//[of]:	array assign add
+	case d_array_assign_add
+		self generateArguments (expression, v)
+		self op (pc_add, v [0], self getScaled (expression, v [1]))
+//[cf]
+//[of]:	array assign sub
+	case d_array_assign_sub
+		self generateArguments (expression, v)
+		self op (pc_sub, v [0], self getScaled (expression, v [1]))
+//[cf]
+//[of]:	array assign inc
+	case d_array_assign_inc
+		self generateArguments (expression, v)
+		var cellType	= self cellType (expression)
+		self op (pc_add, v [0], self newInteger (v [0] size, cellType size))
+//[cf]
+//[of]:	array assign dec
+	case d_array_assign_dec
+		self generateArguments (expression, v)
+		var cellType	= self cellType (expression)
+		self op (pc_sub, v [0], self newInteger (v [0] size, cellType size))
+//[cf]
+
+//[of]:	array le
+	case d_array_le
+		self generateBinaryBoolean (expression, vc_integer_ule, out)
+//[cf]
+//[of]:	array ge
+	case d_array_ge
+		self generateBinaryBoolean (expression, vc_integer_uge, out)
+//[cf]
+//[of]:	array lt
+	case d_array_lt
+		self generateBinaryBoolean (expression, vc_integer_ult, out)
+//[cf]
+//[of]:	array gt
+	case d_array_gt
+		self generateBinaryBoolean (expression, vc_integer_ugt, out)
+//[cf]
+	else
+		assertFailure ("Unhandled definition")
+	end
+//[cf]
+//[cf]
+//[of]:utils
+//[of]:generateInlineCall
+method generateInlineCall (f: *Function, expression: *DefinitionExpression, out: *PValueArray)
+
+	var info	= {InlineContext} local (self pool)
+	info next	= self inlineContext
+	self inlineContext	= info
+	
+	// Evaluate arguments
+	var v	= {PValueArray}
+	self generateArguments (expression, v)
+
+	// Assign values to arguments
+	var i = 0 s
+	f arguments each do a
+		if not a type isMeta
+			self bindArgument (a, v [i])
+			i ++
+		end
+	end
+
+	// Create the return values
+	var singleReturn	= f returnNumber < 2
+	var returnValues = {PValueArray} local
+	if not singleReturn
+		expression values each do value
+			var tmp = self newVariable (nil, value type sizeCode)
+			returnValues add (tmp)
+			out add (tmp)
+		end
+	end
+
+	// Create the exit label
+	var exitLabel = self newLabel
+	
+	// Create the information object attached to the expression 
+	// (for returns in the iterator)
+	info inlineBlock	= expression inlineBlock
+	info exitLabel	= exitLabel
+	info returnValues	= returnValues
+	info singleReturn	= singleReturn
+	info out	= out
+
+	// Attach the context to the expression because a break inside the inline
+	// block needs to find the exit label
+	self bind (expression, info)
+	
+	self generateBlock (f body)
+	self inlineContext = info next
+	info restore
+	
+	// Setup the exit label
+	self label (exitLabel)
+//[cf]
+//[of]:generateCall
+method generateCall (	callingConvention	: CallingConvention,
+	address	: *PValue,
+	expression	: *DefinitionExpression,
+	out	: *PValueArray)
+
+	// Create the list of arguments
+	var v = {PValueArray}
+	self generateArguments (expression, v)
+	var argumentCount = v size
+	var arguments = self pool allocateArray (*PValue, argumentCount)
+	arguments setAll (v)
+		
+	self generateCall (callingConvention, address, argumentCount, arguments, expression, out)
+
+//[c]
+method generateCall (	callingConvention	: CallingConvention,
+	address	: *PValue,
+	argumentCount	: Size,
+	arguments	: *[] *PValue,
+	expression	: *DefinitionExpression,
+	out	: *PValueArray)
+
+	if expression values size <> 1
+		// Create temporary variables
+		var valueCount = expression values size
+		var values = self pool allocateArray (*PValue, valueCount)
+		var i = 0 s
+		expression values each do value
+			values [i] = self newVariable (nil, value type sizeCode)
+			out add (values [i])
+			i ++
+		end
+		
+		// Create call value
+		self call (	callingConvention, 
+			address, 
+			argumentCount, 
+			arguments,
+			valueCount,
+			values)
+		
+	else
+		// Create call value
+		var value = self newCall (	expression firstValue type sizeCode, 
+			callingConvention, 
+			address, 
+			argumentCount, 
+			arguments)
+		out add (value)
+	end
+//[cf]
+//[of]:generateConstant
+method generateConstant (expression: *Expression, out: *PValueArray)
+
+	var value	= expression firstValue
+	
+	// If the value is a type: just ignore
+	if value isMeta
+		return
+	end
+	
+	var type	= value type
+	var constant	= value constant
+	out add (self constantValue (constant, type))
+//[cf]
+//[of]:generateBinaryBoolean
+method generateBinaryBoolean (	expression	: *DefinitionExpression,
+	code	: PValueCode,
+	out	: *PValueArray)
+
+	var v = {PValueArray} local
+	self generateExpressionList (expression arguments, v)
+	var value = self newBinary (code, vs_byte, v [0], v [1])
+	out add (value)
+//[cf]
+//[of]:generateBinary
+method generateBinary (	expression	: *DefinitionExpression,
+	code	: PValueCode,
+	out	: *PValueArray)
+
+	var v = {PValueArray} local
+	self generateExpressionList (expression arguments, v)
+	var value = self newBinary (code, v [0] size, v [0], v [1])
+	out add (value)
+//[cf]
+//[of]:generateUnary
+method generateUnary (	expression	: *DefinitionExpression,
+	code	: PValueCode,
+	out	: *PValueArray)
+
+	var v = {PValueArray} local
+	self generateExpressionList (expression arguments, v)
+	var value	= self newUnary (code, v [0] size, v [0])
+	out add (value)
+//[cf]
+//[of]:generateArguments
+method generateArguments (expression, values: *PValueArray)
+
+	values initialize
+	self generateExpressionList (expression arguments, values)
+	return values
+//[cf]
+
+//[of]:constantValue
+method constantValue (constant: *Constant, type: *Type)
+
+	switch constant code
+	case c_integer
+		return self newInteger64 (type sizeCode, constant asInteger value)
+	
+	case c_boolean
+		return constant asBoolean value cond self trueValue else self falseValue
+			
+	case c_string_8
+		return self getString8 (constant asString8)
+
+	case c_string_16
+		return self getString16 (constant asString16)
+
+	case c_structure
+		return self getStructure (constant asStructure)
+		
+	case c_array
+		return self getArray (constant asArray)
+		
+	case c_function
+		return self getFunction (constant asFunction)
+	
+	case c_uninitialized
+		return self getUninitialized (constant asUninitialized)
+	
+	case c_nil
+		return self newInteger (vs_dword, 0)
+	
+	else
+		assertFailure ("unhandled constant")
+		return nil
+	end
+//[cf]
+//[of]:conditionValue
+method conditionValue (condition: *Expression)
+
+	var v = {PValueArray} local
+	self generateExpression (condition, v)
+	return v [0]
+//[cf]
+//[of]:cellType
+method cellType (expression: *DefinitionExpression)
+
+	var arrayValue	= expression arguments firstValue
+	var arrayType	= arrayValue type asPointer target asArray
+	var cellType	= arrayType cellType
+	return cellType
+//[cf]
+
+//[of]:openSequence
+method openSequence
+
+	var old = self instructions
+	self instructions = nil
+	return old
+//[cf]
+//[of]:closeSequence
+method closeSequence (old: *Collection (PInstruction), value: *PValue)
+
+	if self instructions isNil
+		self instructions = old
+		return value
+	else
+		var sequence = self pool new (PSequenceValue, value size, self instructions, value)
+		self instructions = old
+		return sequence
+	end
+//[cf]
+//[of]:bind
+//[c]Changes the generator of an object after saving its current value
+//[c]
+method bind (object, value)
+
+	if self inlineContext notNil
+		self inlineContext add (object)
+	end
+	object generator = value
+//[cf]
+//[of]:bindArgument
+//[c]Bind an value to an argument
+//[c]
+//[c]This method is used when a function is inlined or a yield is expanded:
+//[c]the arguments will be evaluated with the passed values.
+//[c]
+//[c]Constants values are used as is while other are copied in temporary
+//[c]variables.
+//[c]
+//[c]The following values are supposed to be constants inside the expanded
+//[c]block:
+//[c]	* local variable
+//[c]	* arguments
+//[c]	* local objects
+//[c]	* global objects
+//[c]	* integer constants
+//[c]
+method bindArgument (a: *Argument, v: *PValue)
+
+	var value = v
+	if not value code in (vc_variable, vc_argument, vc_local, vc_global, vc_integer)
+		var tmp = self newVariable (nil, value size)
+		self assign (tmp, value)
+		value = tmp
+	end
+	self bind (a, value)
+//[cf]
+//[cf]
+//[of]:builder
+//[of]:getDirectTable
+method getDirectTable (	table	: *SwitchTable32, 
+	min	: Integer, 
+	max	: Integer, 
+	defaultLabel	: *PLabel)
+
+	var range = (max - min + 1) s
+
+	var object = self objectFile createStatic
+	self objectFile beginObject (object, self objectFile dataSection, align_dword)
+	var s = self objectFile allocateBuffer (Unsigned, range)
+	
+	// Initialize the buffer: mark to 0 all slots
+	var p = s
+	var limit = p + range
+	while p <> limit
+		p [] = 0
+		p ++
+	end
+	
+	// Write all values
+	table each do value, label
+		var index = value - min
+		// Mark the slot as used (the real value will be written later)
+		s [index] = 1
+		self newLabelReference (object, index s * 4, label)
+	end
+	
+	// Write holes
+	range each do i
+		if s [i] == 0
+			self newLabelReference (object, i * 4, defaultLabel)
+		end
+	end
+	
+	self objectFile endObject (object)
+	return object
+//[cf]
+//[of]:getLookupTable
+method getLookupTable (	table	: *SwitchTable32, 
+	defaultLabel	: *PLabel)
+
+	var object = self objectFile createStatic
+	self objectFile beginObject (object, self objectFile dataSection, align_dword)
+	var s = self objectFile allocateBuffer (Unsigned, (table size + 1) * 2)
+	
+	// Write all values
+	var p = s
+	table each do value, label
+		p [] = value unsigned
+		p ++
+		self newLabelReference (object, (p:Bytes - s:Bytes), label)
+		p ++
+	end
+	
+	self newLabelReference (object, (p:Bytes - s:Bytes), defaultLabel)
+	p ++
+	p [] = 0
+	
+	self objectFile endObject (object)
+	return object
+//[cf]
+//[of]:getFunction
+method getFunction (constant: *FunctionConstant)
+
+	var value = constant generator : *PGlobalValue
+	if value isNil
+		
+		var prototype	= constant value
+		var code	= prototype code
+		if code == d_function
+			var f	= prototype asFunction
+			var mc	= f mcFunction master
+			var e	= mc pfunction object
+			
+			// Mark the function as referenced
+			mc called = true
+			
+			value	= self newGlobal (e symbol)
+		else // d_extern
+			var f	= prototype asExternFunction
+			value	= self newGlobal (f generator : *ObjectSymbol)
+		end
+		
+		constant generator = value
+	end
+	return value
+//[cf]
+//[of]:getStructure
+method getStructure (constant: *StructureConstant)
+
+	var value = constant generator : *PGlobalValue
+	if value isNil
+		
+		var structure	= constant structure
+		var values	= constant values
+		
+		// Pass 1: scan recursively
+		self readStructure (structure, values, 1)
+		
+		// Pass 2: creates the object
+		var object = self objectFile createStatic
+		self objectFile beginObject (object, self objectFile dataSection, structure align)
+		self writeStructure (structure, values, 1)
+		self objectFile endObject (object)
+		
+		value = self newGlobal (object symbol)
+		constant generator = value
+	end
+	return value
+//[cf]
+//[of]:getArray
+method getArray (constant: *ArrayConstant)
+
+	var value = constant generator : *PGlobalValue
+	if value isNil
+		
+		var arrayType	= constant arrayType
+		var values	= constant values
+		
+		// Pass 1: scan recursively
+		self readArray (arrayType, values, 1)
+		
+		// Pass 2: creates the object
+		var object = self objectFile createStatic
+		self objectFile beginObject (object, self objectFile dataSection, arrayType align)
+		self writeArray (arrayType, values, 1)
+		self objectFile endObject (object)
+		
+		value = self newGlobal (object symbol)
+		constant generator = value
+	end
+	return value
+//[cf]
+//[of]:getString8
+method getString8 (constant: *String8Constant)
+
+	var value = constant generator : *PGlobalValue
+	if value isNil
+		var object = self objectFile getString8 (constant value)
+		value = self newGlobal (object symbol)
+		constant generator = value
+	end
+	return value
+//[cf]
+//[of]:getString16
+method getString16 (constant: *String16Constant)
+
+	var value = constant generator : *PGlobalValue
+	if value isNil
+		var object = self objectFile getString16 (constant value)
+		value = self newGlobal (object symbol)
+		constant generator = value
+	end
+	return value
+//[cf]
+//[of]:getUninitialized
+//[c]Get the reference to a global {T}
+//[c]
+method getUninitialized (constant: *UninitializedConstant)
+
+	var value = constant generator : *PValue
+	if value isNil
+		var type	= constant type
+		
+		if type isSimple
+			// Return a null value
+			// Do no use self newInteger as it creates an integer value in 
+			// the scope of the current function (uninitialized is global,
+			// i.e. there is no current function).
+			value = self pool new (PIntegerValue, type sizeCode, 0 : Unsigned64)
+		else
+			// creates the object
+			var object = self objectFile createStatic
+			self objectFile beginObject (object, self objectFile dataSection, type align)
+			
+			// Fill with zeros
+			// It should be uninitialized data
+			var writer	= self objectFile
+			var n = type size
+			while n > 0
+				writer writeByte (0)
+				n --
+			end
+			self objectFile endObject (object)
+			
+			value = self newGlobal (object symbol)
+		end
+
+		constant generator = value
+	end
+	return value
+//[cf]
+//[of]:getAddOffset
+method getAddOffset (	value	: *PValue,
+	offset	: Unsigned)
+
+	// Adding zero: just return the value
+	if offset == 0
+		return value
+	end
+
+	var base = value
+	var n = offset
+	if base code == vc_integer_add
+		var addition = value binary
+		var left = addition left
+		var right = addition right
+		if right isInteger
+			base = left
+			n = offset + right integer dword
+		elsif left isInteger
+			base = right
+			n = offset + left integer dword
+		end
+	elsif base code == vc_integer_sub
+		var sub = value binary
+		var left = sub left
+		var right = sub right
+		if right isInteger
+			base = left
+			n = offset - right integer dword
+		end
+	end
+	
+	var constant = self newInteger (vs_dword, n)
+	return self newBinary (vc_integer_add, vs_dword, base, constant)
+//[cf]
+//[of]:getScaled
+method getScaled (	expression	: *DefinitionExpression,
+	index	: *PValue)
+
+	var indexType	= expression arguments secondValue type
+	var value	= self getResize (index, indexType isSigned, vs_dword)
+	var factor	= self cellType (expression) size
+
+	if factor == 1
+		return value
+	end
+	
+	if value isInteger
+		return self newInteger (vs_dword, (value integer dword signed * factor signed) unsigned)
+	end
+	
+	// Default: perform multiplication
+	var cellSize	= self newInteger (vs_dword, factor)
+	return self newBinary (vc_integer_smul, vs_dword, value, cellSize)
+//[cf]
+//[of]:getResize
+method getResize (value: *PValue, signed: Bool, newSize: PValueSize)
+
+	var oldSize = value size
+	if newSize < oldSize
+		return self newUnary (vc_truncate, newSize, value)
+	elsif newSize > oldSize
+		return self newUnary ((signed cond vc_sext else vc_uext), newSize, value)
+	else
+		return value
+	end
+//[cf]
+
+//[of]:newArgument
+method newArgument (	name	: String8, 
+	size	: PValueSize)
+
+	return self pfunction newArgument (name, size)
+//[cf]
+//[of]:newVariable
+method newVariable (	name	: String8, 
+	size	: PValueSize)
+
+	return self pfunction newVariable (name, size)
+//[cf]
+//[of]:newLocal
+method newLocal (size: Size)
+
+	return self pfunction newLocal (size)
+//[cf]
+//[of]:newLabel
+method newLabel
+
+	return self pfunction newLabel
+//[cf]
+//[of]:newUndefined
+method newUndefined (size: PValueSize)
+
+	return self pfunction newUndefined (size)
+//[cf]
+//[of]:newInteger64
+method newInteger64 (	size	: PValueSize,
+	n	: Unsigned64)
+
+	return self pfunction newInteger (size, n)
+//[cf]
+//[of]:newInteger
+method newInteger (	size	: PValueSize,
+	n	: Unsigned)
+
+	return self pfunction newInteger (size, n : Unsigned64)
+//[cf]
+//[of]:newBinary
+method newBinary (	code	: PValueCode,
+	size	: PValueSize,
+	left	: *PValue,
+	right	: *PValue)
+
+	return self pool new (PBinaryValue, code, size, left, right)
+//[cf]
+//[of]:newUnary
+method newUnary (	code	: PValueCode,
+	size	: PValueSize,
+	value	: *PValue)
+
+	// Opimization: reduce not (not (x)) to x
+	if code == vc_boolean_not and value code == vc_boolean_not
+		return value unary value
+	end
+	
+	return self pool new (PUnaryValue, code, size, value)
+//[cf]
+//[of]:newGlobal
+method newGlobal (symbol: *ObjectSymbol)
+
+	return self pool new (PGlobalValue, symbol, 0 s)
+//[cf]
+//[of]:newFunction
+method newFunction (	name	: String8, 
+	pfunction	: *PFunction)
+
+	return self pool new (PFunctionValue, name, pfunction)
+//[cf]
+//[of]:newMemory
+method newMemory (	size	: PValueSize,
+	address	: *PValue)
+
+	return self pool new (PMemoryValue, size, address)
+//[cf]
+//[of]:newCall
+method newCall (	size	: PValueSize,
+	callingConvention	: CallingConvention,
+	address	: *PValue,
+	argumentCount	: Size,
+	arguments	: *[] *PValue)
+
+	return self pool new (PCallValue, size, callingConvention, address, argumentCount, arguments)
+//[cf]
+//[of]:newSwitchTable32
+method newSwitchTable32 (size: Size)
+
+	return self pfunction newSwitchTable32 (size)
+//[cf]
+//[of]:newLabelReference
+method newLabelReference (	object	: *ObjectData,
+	offset	: Offset,
+	label	: *PLabel)
+
+	return self pfunction newLabelReference (object, offset, label)
+//[cf]
+
+//[of]:call
+method call (	callingConvention	: CallingConvention,
+	address	: *PValue,
+	argumentCount	: Size,
+	arguments	: *[] *PValue,
+	valueCount	: Size,
+	values	: *[] *PValue)
+
+	argumentCount each do i
+		arguments [i] = self expand (arguments [i])
+	end
+	valueCount each do i
+		values [i] = self expand (values [i])
+	end
+	
+	self addInstruction (	PCallInstruction, 
+		self line, 
+		callingConvention,
+		address,
+		argumentCount,
+		arguments,
+		valueCount,
+		values)
+//[cf]
+//[of]:jump
+method jump (label: *PLabel)
+
+	self addInstruction (PJumpInstruction, self line, pc_jump, label)
+//[cf]
+//[of]:jumpi
+method jumpi (value: *PValue)
+
+	self addInstruction (PJumpiInstruction, self line, self expand (value))
+//[cf]
+//[of]:jumpc
+method jumpc (condition: *PValue, label: *PLabel)
+
+	// Optimization: translate a "jumpc not value" into "jumpnc value"
+	if condition code == vc_boolean_not
+		self jumpnc (condition unary value, label)
+
+	elsif condition code == vc_minimal_and
+		
+		var elseLabel = self newLabel
+		self jumpnc (condition binary left, elseLabel)
+		self jumpc (condition binary right, label)
+		self label (elseLabel)
+		
+	elsif condition code == vc_minimal_or
+		
+		self jumpc (condition binary left, label)
+		self jumpc (condition binary right, label)
+
+	elsif condition code == vc_sequence
+	
+		var sequence = condition sequence
+		self addInstructions (sequence instructions)
+		self jumpc (sequence value, label)
+		
+	else
+		self addInstruction (PConditionInstruction, self line, pc_jumpc, self expand (condition), label)
+	end
+//[cf]
+//[of]:jumpnc
+method jumpnc (condition: *PValue, label: *PLabel)
+
+	// Optimization: translate a "jumpnc not value" into "jumpc value"
+	if condition code == vc_boolean_not
+		self jumpc (condition unary value, label)
+
+	elsif condition code == vc_minimal_and
+		
+		self jumpnc (condition binary left, label)
+		self jumpnc (condition binary right, label)
+		
+	elsif condition code == vc_minimal_or
+		
+		var thenLabel = self newLabel
+		self jumpc (condition binary left, thenLabel)
+		self jumpnc (condition binary right, label)
+		self label (thenLabel)
+	
+	elsif condition code == vc_sequence
+	
+		var sequence = condition sequence
+		self addInstructions (sequence instructions)
+		self jumpnc (sequence value, label)
+		
+	else
+		self addInstruction (PConditionInstruction, self line, pc_jumpnc, self expand (condition), label)
+	end
+//[cf]
+//[of]:lookup
+method lookup (value: *PValue, table: *PValue)
+
+	self addInstruction (PLookupInstruction, self line, self expand (value), self expand (table))
+//[cf]
+//[of]:label
+method label (label: *PLabel)
+	
+	self addInstruction (PLabelInstruction, self line, label)
+//[cf]
+//[of]:evaluate
+method evaluate (value: *PValue)
+
+	self addInstruction (PEvaluateInstruction, self line, self expand (value))
+//[cf]
+//[of]:assign
+method assign (lvalue: *PValue, rvalue: *PValue)
+
+	var v = rvalue
+	while v code == vc_sequence
+		var sequence = v sequence
+		self addInstructions (sequence instructions)
+		v = sequence value
+	end
+
+	if v code == vc_minimal_and and lvalue code == vc_variable
+		self expandMinimalAnd (lvalue, v binary)
+	elsif v code == vc_minimal_or and lvalue code == vc_variable
+		self expandMinimalOr (lvalue, v binary)
+	else
+		self addInstruction (POperationInstruction, self line, pc_assign, self expand (lvalue), self expand (v))
+	end
+//[cf]
+//[of]:op
+method op (code: PInstructionCode, lvalue: *PValue, rvalue: *PValue)
+
+	self addInstruction (POperationInstruction, self line, code, self expand (lvalue), self expand (rvalue))
+//[cf]
+//[of]:ret
+method ret (size: Size, valueCount: Size, values: *[] *PValue)
+
+	valueCount each do i
+		values [i] = self expand (values [i])
+	end
+	
+	self addInstruction (PReturnInstruction, self line, size, values)
+//[cf]
+
+//[of]:expand
+//[c]Expands a value
+//[c]* Dumps sequences
+//[c]* Expands minimal and
+//[c]* Expands minimal or
+//[c]* Eliminates double nots
+//[c]
+method expand (value: *PValue)
+
+	switch value code
+	case vc_sequence
+		var sequence = value sequence
+		self addInstructions (sequence instructions)
+		return self expand (sequence value)
+		
+	case vc_minimal_and
+		var tmp	= self newVariable (nil, vs_byte)
+		self expandMinimalAnd (tmp, value binary)
+		return tmp
+		
+	case vc_minimal_or
+		var tmp	= self newVariable (nil, vs_byte)
+		self expandMinimalOr (tmp, value binary)
+		return tmp
+		
+	case vc_memory
+		var memory = value memory
+		memory address = self expand (memory address)
+
+	case vc_call
+		var call = value call
+		call address = self expand (call address)
+		call argumentCount each do i
+			call arguments [i] = self expand (call arguments [i])
+		end
+
+	case	vc_integer_add,
+		vc_integer_sub,
+		vc_integer_smul,
+		vc_integer_umul,
+		vc_integer_sdiv,
+		vc_integer_udiv,
+		vc_integer_smod,
+		vc_integer_umod,
+		vc_integer_shl,
+		vc_integer_sshr,
+		vc_integer_ushr,
+		vc_integer_and,
+		vc_integer_or,
+		vc_integer_xor,
+		vc_integer_eq,
+		vc_integer_ne,
+		vc_integer_sle,
+		vc_integer_slt,
+		vc_integer_sge,
+		vc_integer_sgt,
+		vc_integer_ule,
+		vc_integer_ult,
+		vc_integer_uge,
+		vc_integer_ugt
+		
+		var binary	= value binary
+		binary left	= self expand (binary left)
+		binary right	= self expand (binary right)
+
+	case	vc_integer_not,
+		vc_integer_neg,
+		vc_truncate,
+		vc_boolean_not,
+		vc_sext,
+		vc_uext
+		
+		var unary = value unary
+		unary value = self expand (unary value)
+	end
+
+	return value
+
+method expandMinimalAnd (v: *PValue, binary: *PBinaryValue)
+
+	var label	= self newLabel
+	self assign (v, binary left)
+	self jumpnc (v, label)
+	self assign (v, binary right)
+	self label (label)
+
+method expandMinimalOr (v: *PValue, binary: *PBinaryValue)
+
+	var label	= self newLabel
+	self assign (v, binary left)
+	self jumpc (v, label)
+	self assign (v, binary right)
+	self label (label)
+//[cf]
+//[of]:addInstruction
+method addInstruction (T, line	: LineNumber, ...)
+
+	var pinstruction = self pool new (T, ...)
+	pinstruction line = line
+	if self instructions isNil
+		self instructions = self pool new (Collection (PInstruction))
+	end
+	self instructions add (pinstruction)
+//[cf]
+//[of]:addInstructions
+method addInstructions (instructions: *Collection (PInstruction))
+
+	if self instructions isNil
+		self instructions = self pool new (Collection (PInstruction))
+	end
+	self instructions addAll (instructions)
+//[cf]
+//[cf]
+//[of]:data
+//[of]:readStructure
+method readStructure (structure: *StructureType, values: *ValueList, index: Size)
+
+	var pos = index
+	if structure parentStructure notNil
+		pos = self readStructure (structure parentStructure, values, pos)
+	end
+	
+	structure eachAttribute do a
+		pos = self readValue (a storageType, values, pos)
+	end
+	
+	return pos
+//[cf]
+//[of]:readArray
+method readArray (	arrayType	: *ArrayType, 
+	values	: *ValueList, 
+	index	: Size)
+
+	var cellType	= arrayType cellType
+	var arraySize	= arrayType arraySize
+	var i	= 0 s
+	var pos	= index
+	repeat
+		if arraySize == 0
+			if pos == values size
+				break
+			end
+		elsif i == arraySize
+			break
+		end
+		
+		pos = self readValue (cellType, values, pos)
+		i ++
+	end	
+	
+	return pos
+//[cf]
+//[of]:readValue
+method readValue (	type	: *Type, 
+	values	: *ValueList, 
+	index	: Size)
+
+	if type isStructure
+		return self readStructure (type asStructure, values, index)
+	elsif type isArray
+		return self readArray (type asArray, values, index)
+	end
+	
+	self readConstant (values [index] constant)
+	return index + 1
+//[cf]
+//[of]:readConstant
+//[c]This function is similar to 'constantValue' but is just to force the creation 
+//[c]of dependent objects (strings, sub-arrays and sub-structures).
+//[c]
+method readConstant (constant: *Constant)
+
+	switch constant code
+	case c_string_8
+		self getString8 (constant asString8)
+	case c_string_16
+		self getString16 (constant asString16)
+	case c_structure
+		self getStructure (constant asStructure)
+	case c_array
+		self getArray (constant asArray)
+	case c_function
+		self getFunction (constant asFunction)
+	case c_uninitialized
+		self getUninitialized (constant asUninitialized)
+	end
+//[cf]
+
+//[of]:writeStructure
+method writeStructure (structure: *StructureType, values: *ValueList, index: Size)
+
+	var writer	= self objectFile
+	var origin = writer nextByte
+	
+	var pos = index
+	if structure parentStructure notNil
+		pos = self writeStructure (structure parentStructure, values, pos)
+	end
+	
+	structure eachAttribute do a
+	
+		// Align next attribute
+		var n = a offset - (writer nextByte - origin)
+		while n > 0
+			writer writeByte (0)
+			n --
+		end
+		
+		pos = self writeValue (a storageType, values, pos)
+	end
+	
+	// Align the structure
+	var o = self objectFile nextByte - origin
+	var n = o
+	n += structure align - 1
+	n &= not (structure align - 1)
+	n -= o
+	while n > 0
+		writer writeByte (0)
+		n --
+	end
+	
+	return pos
+//[cf]
+//[of]:writeArray
+method writeArray (	arrayType	: *ArrayType, 
+	values	: *ValueList, 
+	index	: Size)
+
+	var cellType	= arrayType cellType
+	var arraySize	= arrayType arraySize
+	var i	= 0 s
+	var pos	= index
+	repeat
+		if arraySize == 0
+			if pos == values size
+				break
+			end
+		elsif i == arraySize
+			break
+		end
+		
+		pos = self writeValue (cellType, values, pos)
+		i ++
+	end	
+	
+	return pos
+//[cf]
+//[of]:writeValue
+method writeValue (	type	: *Type, 
+	values	: *ValueList, 
+	index	: Size)
+
+	if type isStructure
+		return self writeStructure (type asStructure, values, index)
+	elsif type isArray
+		return self writeArray (type asArray, values, index)
+	end
+	
+	self writeConstant (values [index] constant, type)
+	return index + 1
+//[cf]
+//[of]:writeConstant
+method writeConstant (constant: *Constant, type: *Type)
+
+	var obj = self objectFile
+	
+	switch constant code
+	case c_integer
+		var integer	= constant asInteger value
+		switch type size
+		case 1
+			obj writeByte (integer : Unsigned8)
+		case 2
+			obj writeWord (integer : Unsigned16)
+		case 4
+			obj writeDword (integer : Unsigned32)
+		else
+			obj writeQword (integer)
+		end
+	case c_boolean
+		if constant asBoolean value
+			obj writeByte (1)
+		else
+			obj writeByte (0)
+		end
+	case c_string_8
+		obj writeReference ((constant asString8 generator: *PGlobalValue) symbol, 0)
+	case c_string_16
+		obj writeReference ((constant asString16 generator: *PGlobalValue) symbol, 0)
+	case c_structure
+		obj writeReference ((constant asStructure generator: *PGlobalValue) symbol, 0)
+	case c_array
+		obj writeReference ((constant asArray generator: *PGlobalValue) symbol, 0)
+	case c_function
+		obj writeReference ((constant asFunction generator: *PGlobalValue) symbol, 0)
+	case c_uninitialized
+		var glob = constant asUninitialized
+		var type = glob type
+		if type isSimple
+			switch type size
+			case 1
+				obj writeByte (0)
+			case 2
+				obj writeWord (0)
+			case 4
+				obj writeDword (0)
+			else
+				obj writeQword (0)
+			end
+		else
+			obj writeReference ((glob generator: *PGlobalValue) symbol, 0)
+		end
+	case c_nil
+		obj writeDword (0)
+	else
+		assertFailure ("unknown constant type")
+	end
+//[cf]
+//[cf]
+//[cf]
+//[cf]
+//[of]:Utils
+//[of]:RegisterId
+extend RegisterId
+	
+	method mask
+
+		return register_masks [self]
+
+	method clearMask
+
+		return register_clear_masks [self]
+
+	method registerValue
+		return rid_to_register_table [self]
+
+const register_masks = [] RegisterMask [
+	mask_bl,
+	mask_bh,
+	mask_bx,
+	mask_si,
+	mask_di,
+	mask_bp,
+	mask_ebx,
+	mask_esi,
+	mask_edi,
+	mask_ebp,
+	mask_edi_esi,
+	mask_ebp_ebx]
+
+const register_clear_masks = [] RegisterMask [
+	not mask_bl,
+	not mask_bh,
+	not mask_bx,
+	not mask_si,
+	not mask_di,
+	not mask_bp,
+	not mask_ebx,
+	not mask_esi,
+	not mask_edi,
+	not mask_ebp,
+	not mask_edi_esi,
+	not mask_ebp_ebx]
+
+const rid_to_register_table = [] *PRegisterValue [
+	bl_register_value,
+	bh_register_value,
+	bx_register_value,
+	si_register_value,
+	di_register_value,
+	bp_register_value,
+	ebx_register_value,
+	esi_register_value,
+	edi_register_value,
+	ebp_register_value,
+	rsi_register_value,
+	rbx_register_value]
+
+const rid_convert_table = [] RegisterId [
+	rid_bl,	// rid_bl	byte
+	rid_none,	// rid_bl	word
+	rid_none,	// rid_bl	dword
+	rid_none,	// rid_bl	qword
+			
+	rid_bh,	// rid_bh	byte
+	rid_none,	// rid_bh	word
+	rid_none,	// rid_bh	dword
+	rid_none,	// rid_bh	qword
+			
+	rid_bl,	// rid_bx	byte
+	rid_bx,	// rid_bx	word
+	rid_ebx,	// rid_bx	dword
+	rid_none,	// rid_bx	qword
+			
+	rid_none,	// rid_si	byte
+	rid_si,	// rid_si	word
+	rid_esi,	// rid_si	dword
+	rid_none,	// rid_si	qword
+			
+	rid_none,	// rid_di	byte
+	rid_di,	// rid_di	word
+	rid_edi,	// rid_di	dword
+	rid_none,	// rid_di	qword
+			
+	rid_none,	// rid_bp	byte
+	rid_bp,	// rid_bp	word
+	rid_ebp,	// rid_bp	dword
+	rid_none,	// rid_bp	qword
+			
+	rid_bl,	// rid_ebx	byte
+	rid_bx,	// rid_ebx	word
+	rid_ebx,	// rid_ebx	dword
+	rid_none,	// rid_ebx	qword
+			
+	rid_none,	// rid_esi	byte
+	rid_si,	// rid_esi	word
+	rid_esi,	// rid_esi	dword
+	rid_none,	// rid_esi	qword
+			
+	rid_none,	// rid_edi	byte
+	rid_di,	// rid_edi	word
+	rid_edi,	// rid_edi	dword
+	rid_none,	// rid_edi	qword
+			
+	rid_none,	// rid_ebp	byte
+	rid_bp,	// rid_ebp	word
+	rid_ebp,	// rid_ebp	dword
+	rid_none,	// rid_ebp	qword
+			
+	rid_none,	// rid_edi_esi	byte
+	rid_si,	// rid_edi_esi	word
+	rid_esi,	// rid_edi_esi	dword
+	rid_edi_esi,	// rid_edi_esi	qword
+			
+	rid_bl,	// rid_ebp_ebx	byte
+	rid_bx,	// rid_ebp_ebx	word
+	rid_ebx,	// rid_ebp_ebx	dword
+	rid_ebp_ebx]	// rid_ebp_ebx	qword
+//[cf]
+//[of]:RegisterMask
+enum RegisterMask : Unsigned32
+
+	mask_bl	= 0x0001
+	mask_bh	= 0x0002
+	mask_bx	= 0x0003
+	mask_si	= 0x0004
+	mask_di	= 0x0008
+	mask_bp	= 0x0010
+	mask_ebx	= 0x0003
+	mask_esi	= 0x0004
+	mask_edi	= 0x0008
+	mask_ebp	= 0x0010
+	mask_edi_esi	= 0x000C
+	mask_ebp_ebx	= 0x0013
+//[cf]
+//[of]:MemoryInfo
+//[of]:definition
+//[c]Stores parameters to encode an effective address.
+//[c]
+struct MemoryInfo
+
+	attr flags	: Byte
+	attr modrm	: Byte
+	attr sib	: Byte
+	attr offset	: Unsigned32
+	attr symbol	: *ObjectSymbol
+//[cf]
+//[of]:accessing
+//[of]:offset8
+method offset8
+
+	return self offset : Byte
+//[cf]
+//[of]:offset32
+method offset32
+
+	return self offset
+//[cf]
+
+//[of]:setSib
+method setSib (sib: Byte)
+
+	self sib = sib
+	self flags |= has_sib
+//[cf]
+//[of]:setOffset8
+method setOffset8 (offset: Byte)
+
+	self offset = offset : Unsigned32
+	self flags |= has_offset8
+//[cf]
+//[of]:setOffset32
+method setOffset32 (offset: Unsigned32)
+
+	self offset = offset
+	self flags |= has_offset32
+//[cf]
+
+//[of]:setReference
+method setReference (	symbol	: *ObjectSymbol,
+	offset	: Offset)
+
+	self modrm	= modrm (0, 0, 5)
+	self offset	= offset
+	self symbol	= symbol
+	self flags |= has_reference
+//[cf]
+//[of]:setAddress
+method setAddress (address	: Unsigned32)
+
+	self modrm = modrm (0, 0, 5)
+	self setOffset32 (address)
+//[cf]
+//[of]:setIndex
+method setIndex (	register	: Byte,
+	offset	: Unsigned)
+
+	// Remark: [ebp] must be coded as [ebp + 0]
+	if offset == 0 and register <> register_ebp
+		self modrm = modrm (0, 0, register)
+	elsif offset isShortDisplacement
+		self modrm = modrm (0, 1, register)
+		self setOffset8 (offset : Byte)
+	else
+		self modrm = modrm (0, 2, register)
+		self setOffset32 (offset)
+	end
+//[cf]
+//[of]:setIndexAndScale
+method setIndexAndScale (	offset	: Unsigned,
+	baseRegister	: Byte,
+	indexRegister	: Byte,
+	ss	: Byte)
+
+	if offset == 0
+		self modrm = modrm (0, 0, 4)
+		self setSib (baseRegister + (indexRegister << 3) + (ss << 6))
+	elsif offset isShortDisplacement
+		self modrm = modrm (0, 1, 4)
+		self setSib (baseRegister + (indexRegister << 3) + (ss << 6))
+		self setOffset8 (offset : Byte)
+	else
+		self modrm = modrm (0, 2, 4)
+		self setSib (baseRegister + (indexRegister << 3) + (ss << 6))
+		self setOffset32 (offset)
+	end
+//[cf]
+//[of]:setEsp
+method setEsp (offset : StackOffset)
+
+	if offset == 0
+
+		// modr/m: /r, mode=0, r/m=4
+		self modrm = modrm (0, 0, 4)
+		
+		// sib: base=esp, scale=*1, index = none
+		self setSib (register_esp + (4 << 3))
+		
+	elsif offset isShortDisplacement
+
+		// modr/m: /r, mode=1, r/m=4
+		self modrm = modrm (0, 1, 4)
+		
+		// sib: base=esp, scale=*1, index = none
+		self setSib (register_esp + (4 << 3))
+		
+		// disp8
+		self setOffset8 (offset : Byte)
+	
+	else
+	
+		// modr/m: /r, mode=2, r/m=4
+		self modrm = modrm (0, 2,  4)
+		
+		// sib: base=esp, scale=*1, index = none
+		self setSib (register_esp + (4 << 3))
+		
+		// disp32
+		self setOffset32 (offset)
+	
+	end
+//[cf]
+//[cf]
+//[of]:testing
+//[of]:hasSib
+method hasSib
+
+	return (self flags & has_sib) <> 0
+//[cf]
+//[of]:hasOffset8
+method hasOffset8
+
+	return (self flags & has_offset8) <> 0
+//[cf]
+//[of]:hasOffset32
+method hasOffset32
+
+	return (self flags & has_offset32) <> 0
+//[cf]
+//[of]:hasReference
+method hasReference
+
+	return (self flags & has_reference) <> 0
+//[cf]
+//[cf]
+
+//[of]:private constants
+const has_sib	= 1
+const has_offset8	= 2
+const has_offset32	= 4
+const has_reference	= 8
+//[cf]
+//[cf]
+//[of]:PValueSize
+extend PValueSize
+
+	method toStackSize
+		
+		return value_size_to_stack_size_table [self]
+
+	method accumulator
+	
+		return value_size_to_accumulator_table [self]
+
+const value_size_to_stack_size_table = [] Size [
+	4,	// vs_byte
+	4,	// vs_word
+	4,	// vs_dword
+	8]	// vs_qword
+
+const value_size_to_accumulator_table = [] *PRegisterValue [
+	al_register_value,
+	ax_register_value,
+	eax_register_value,
+	rax_register_value]
+//[cf]
+
+//[of]:MCBuiltin
+//[of]:definition
+struct MCBuiltin
+
+	attr object	: *ObjectData
+	attr used	: Bool
+	attr stackOffset	: StackOffset	// Offset to add to the stack pointer after calling this builtin
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+method initialize (	object	: *ObjectFile,
+	code	: Bytes, 
+	size	: Size,
+	offset	: StackOffset)
+
+	self object	= object createData (code, size)
+	self used	= false
+	self stackOffset	= offset
+//[cf]
+//[cf]
+//[cf]
+//[of]:MCFunction
+//[of]:definition
+struct MCFunction
+
+	attr inlining	: Bool	// The function is being inlined
+	attr inline	: Bool	// The function should be inlined
+	attr called	: Bool	// The function is called, referenced or exported (we must generate the non-inline version of the function)
+	attr ignore	: Bool	// The function must note be generated in pass 2 as it is never called
+	attr returnStackSize	: Size	// The size to be allocated on stack for return values (excluding the first return value)
+	attr equivalent	: *Function	// The function is a duplicate of this one (or nil)
+	attr pfunction	: PFunction	// The p-code of the function
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+method initialize (f: *Function, debug: Bool)
+
+	self inlining	= false
+	self called	= false
+	self ignore	= f hasYield	// Never attempt to generate the code of an iterator alone
+	self inline	= canInline (f)
+	self equivalent	= nil
+
+	// Compute the number of bytes to allocate on stack for return values
+	var size = 0 s
+	var first = true
+	f returnValues each do value
+		if not first
+			var type = value type
+			size += type size stackAligned
+		end
+		first = false
+	end
+	self returnStackSize = size
+//[cf]
+//[of]:reset
+method reset (	f	: *Function, 
+	pool	: *MemoryPool,
+	object	: *ObjectFile,
+	section	: *ObjectSection,
+	debug	: Bool)
+
+	self pfunction	initialize (pool)
+	self pfunction object	= self ignore cond nil else object createFunction (f, section, debug)
+//[cf]
+//[cf]
+//[of]:accessing
+//[of]:master
+//[c]Returns the master
+//[c]
+//[c]If two functions are equivalents, return the first one
+//[c]otherwise returns self
+//[c]
+method master
+
+	return self equivalent notNil cond self equivalent mcFunction else self
+//[cf]
+//[cf]
+//[cf]
+//[of]:MCUnsolvedLabel
+//[of]:definition
+struct MCUnsolvedLabel
+
+	attr label	: *PLabel	// The label
+	attr offset	: Offset	// Position relative to the beginning of the function where to write the value
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+method initialize (label: *PLabel, offset: Offset)
+
+	self label	= label
+	self offset	= offset
+//[cf]
+//[cf]
+//[cf]
+//[of]:MCUnsolvedReference
+//[of]:definition
+struct MCUnsolvedReference
+
+	attr fromObject	: *ObjectData	// The object containing the reference
+	attr fromOffset	: Offset	// Position relative to the beginning of the object where to write the value
+	attr to	: *ObjectData	// The address
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+method initialize (	fromObject	: *ObjectData,
+	fromOffset	: Offset,
+	to	: *ObjectData)
+
+	self fromObject	= fromObject
+	self fromOffset	= fromOffset
+	self to	= to
+//[cf]
+//[cf]
+//[cf]
+//[of]:InlineContext
+//[of]:definition
+struct InlineContext
+
+	attr next	: *InlineContext
+	attr exitLabel	: *PLabel
+	attr returnValues	: *PValueArray
+	attr out	: *PValueArray
+	attr singleReturn	: Bool
+	attr inlineBlock	: *InlineBlock
+		
+	attr pool	: *MemoryPool
+	attr generators	: *GeneratorValue
+//[cf]
+//[of]:initialize
+method initialize (pool: *MemoryPool)
+
+	self pool	= pool
+	self generators	= nil
+//[cf]
+//[of]:restore
+method restore
+
+	var g = self generators
+	while g notNil
+		g slot [] = g generator
+		g = g next
+	end
+//[cf]
+//[of]:add
+//[c]Save the generator property of an object to be restored later with the 
+//[c]restore method.
+//[c]
+//[c]REMARKS
+//[c]	This is a generic method working with any object having a 'generator' 
+//[c]	attribute: The address of the generator attribute is saved along with 
+//[c]	its value.
+//[c]
+method add (x)
+
+	var g = self pool allocateMemory (GeneratorValue)
+	g slot	= ((x : Bytes) + (#x) target @ generator) : *Pointer
+	g generator	= x generator
+	g next	= self generators
+	self generators	= g
+//[cf]
+//[cf]
+//[of]:GeneratorValue
+struct GeneratorValue
+
+	attr next	: *GeneratorValue
+	attr slot	: *Pointer
+	attr generator	: Pointer
+//[cf]
+
+//[of]:Utility Functions
+//[of]:relativeOffset
+function relativeOffset (label: *PLabel, position: Offset)
+
+	return label offset - (position + 4)
+//[cf]
+//[of]:isShortDisplacement
+function isShortDisplacement (x)
+
+	var d = x toInteger
+	return d >= -128 and d < 128
+//[cf]
+//[of]:sizeCode
+//[c]Converts a size in bytes into an enum PValueSize
+//[c]
+//[c]	The size is assumed to be the size of a variable, it shouldn't be
+//[c]	over 8 bytes
+function sizeCode (type: *Type)
+
+	return size_codes [type size]
+
+const size_codes = [] PValueSize [
+	vs_byte,	// 0
+	vs_byte,	// 1
+	vs_word,	// 2
+	vs_byte,	// 3
+	vs_dword,	// 4
+	vs_byte,	// 5
+	vs_byte,	// 6
+	vs_byte,	// 7
+	vs_qword ]	// 8
+//[cf]
+//[of]:mcFunction
+function mcFunction (f: *Function)
+
+	return f generator : *MCFunction
+//[cf]
+//[of]:peerRegister
+//[c]Return the 32 bit register associated to another register to form a 64 bit register
+//[c]
+//[c]The generator uses the following pairs:
+//[c]	edx:eax	--	the accumulator
+//[c]	ebp:ebx	--	register 1
+//[c]	edi:esi	--	register 2
+//[c]
+//[c]So the function will returns the following values
+//[c]	peer (eax)	-> edx
+//[c]	peer (ebx)	-> ebp
+//[c]	peer (esi)	-> edi
+//[c]
+//[c]The behavior is undefined for the other registers.
+//[c]
+function peerRegister (register: Byte)
+
+	return peer_register_table [register]
+
+const peer_register_table = [] Byte [
+	register_edx,	// register_eax
+	register_edx,	// register_ecx
+	register_edx,	// register_edx
+	register_ebp,	// register_ebx
+	register_edx,	// register_esp
+	register_edx,	// register_ebp
+	register_edi,	// register_esi
+	register_edx ]	// register_edi
+//[cf]
+//[of]:conditionCode
+function conditionCode (value: *PValue)
+
+	return table_condition_code [value code]
+
+const table_condition_code = [] Byte [
+
+	0,	// vc_register
+	0,	// vc_stack
+	0,	// vc_memory
+	0,	// vc_integer
+		
+	0,	// vc_undefined
+	0,	// vc_local
+	0,	// vc_global
+	0,	// vc_object
+	0,	// vc_call
+		
+	0,	// vc_integer_add
+	0,	// vc_integer_sub
+	0,	// vc_integer_smul
+	0,	// vc_integer_umul
+	0,	// vc_integer_sdiv
+	0,	// vc_integer_udiv
+	0,	// vc_integer_smod
+	0,	// vc_integer_umod
+	0,	// vc_integer_shl
+	0,	// vc_integer_sshr
+	0,	// vc_integer_ushr
+	0,	// vc_integer_not
+	0,	// vc_integer_neg
+	0,	// vc_integer_and
+	0,	// vc_integer_or
+	0,	// vc_integer_xor
+	condition_z,	// vc_integer_eq
+	condition_nz,	// vc_integer_ne
+	condition_le,	// vc_integer_sle
+	condition_l,	// vc_integer_slt
+	condition_ge,	// vc_integer_sge
+	condition_g,	// vc_integer_sgt
+	condition_be,	// vc_integer_ule
+	condition_c,	// vc_integer_ult
+	condition_nc,	// vc_integer_uge
+	condition_a,	// vc_integer_ugt
+		
+	0,	// vc_boolean_not
+		
+	0,	// vc_truncate
+	0,	// vc_sext
+	0,	// vc_uext
+	0,	// vc_minimal_and
+	0,	// vc_minimal_or
+	0,	// vc_sequence
+	0,	// vc_variable
+	0]	// vc_argument
+//[cf]
+//[of]:invertedConditionCode
+function invertedConditionCode (value)
+
+	return table_inverted_condition_code [value code]
+
+const table_inverted_condition_code = [] Byte [
+
+	0,	// vc_register
+	0,	// vc_stack
+	0,	// vc_memory
+	0,	// vc_integer
+		
+	0,	// vc_undefined
+	0,	// vc_local
+	0,	// vc_global
+	0,	// vc_object
+	0,	// vc_call
+		
+	0,	// vc_integer_add
+	0,	// vc_integer_sub
+	0,	// vc_integer_smul
+	0,	// vc_integer_umul
+	0,	// vc_integer_sdiv
+	0,	// vc_integer_udiv
+	0,	// vc_integer_smod
+	0,	// vc_integer_umod
+	0,	// vc_integer_shl
+	0,	// vc_integer_sshr
+	0,	// vc_integer_ushr
+	0,	// vc_integer_not
+	0,	// vc_integer_neg
+	0,	// vc_integer_and
+	0,	// vc_integer_or
+	0,	// vc_integer_xor
+	condition_nz,	// vc_integer_eq
+	condition_z,	// vc_integer_ne
+	condition_g,	// vc_integer_sle
+	condition_ge,	// vc_integer_slt
+	condition_l,	// vc_integer_sge
+	condition_le,	// vc_integer_sgt
+	condition_a,	// vc_integer_ule
+	condition_nc,	// vc_integer_ult
+	condition_c,	// vc_integer_uge
+	condition_be,	// vc_integer_ugt
+		
+	0,	// vc_boolean_not
+		
+	0,	// vc_truncate
+	0,	// vc_sext
+	0,	// vc_uext
+	0,	// vc_minimal_and
+	0,	// vc_minimal_or
+	0,	// vc_sequence
+	0,	// vc_variable
+	0]	// vc_argument
+//[cf]
+//[of]:isAccumulator
+function isAccumulator (value)
+
+	return value number == register_eax	// al, ax, eax, rax are the same
+//[cf]
+//[of]:canInline
+function canInline (f)
+
+	var instructions = f body instructions
+	// Do not inline if more than one instruction
+	if instructions size > 1
+		return false
+	end
+
+	instructions each do i
+		// Do not inline if instruction with inner block
+		if i code in (i_while, i_switch, i_if)
+			return false
+		end
+		
+		if i code == i_evaluate
+			var expressions = i asEvaluate values
+			if expressions size <> 1
+				return false
+			end
+			var e = expressions first
+			if e code == e_definition and e asDefinition inlineBlock notNil
+				return false
+			end
+		end
+	end
+	
+	return true
+//[cf]
+//[cf]
+//[cf]
+//[of]:Builtins
+enum BuiltinId
+	__lookup
+	__cmp64
+	__add64
+	__sub64
+	__and64
+	__or64
+	__xor64
+	__umul64
+	__sdiv64
+	__udiv64
+	__smod64
+	__umod64
+	__shl64
+	__shr64
+	__sar64
+
+struct BuiltinItem
+
+	attr code	: Bytes
+	attr size	: Size
+	attr stackOffset	: StackOffset
+
+const builtin_table = [] BuiltinItem [
+	lookup_function,	lookup_size,	0,
+	cmp64_function,	cmp64_size,	16,
+	add64_function,	add64_size,	16,
+	sub64_function,	sub64_size,	16,
+	and64_function,	and64_size,	16,
+	or64_function,	or64_size,	16,
+	xor64_function,	xor64_size,	16,
+	umul64_function,	umul64_size,	16,
+	sdiv64_function,	sdiv64_size,	16,
+	udiv64_function,	udiv64_size,	16,
+	smod64_function,	smod64_size,	16,
+	umod64_function,	umod64_size,	16,
+	shl64_function,	shl64_size,	12,
+	shr64_function,	shr64_size,	12,
+	sar64_function,	sar64_size,	12,
+	nil,	0,	0 ]
+
+const cmp64_size = 36
+const cmp64_function = [cmp64_size] Byte [ 
+	0x8B, 0x44, 0x24, 0x10,
+	0x3B, 0x44, 0x24, 0x08,
+	0x75, 0x17,
+	0x8B, 0x44, 0x24, 0x0C,
+	0x3B, 0x44, 0x24, 0x04,
+	0x74, 0x0D,
+	0x66, 0xB8, 0x01, 0x02,
+	0x77, 0x05,
+	0x38, 0xE0,
+	0xC2, 0x10, 0x00,
+	0x38, 0xC4,
+	0xC2, 0x10, 0x00]
+
+const add64_size = 19
+const add64_function = [add64_size] Byte [ 
+	0x8B, 0x44, 0x24, 0x0C,
+	0x8B, 0x54, 0x24, 0x10,
+	0x03, 0x44, 0x24, 0x04,
+	0x13, 0x54, 0x24, 0x08,
+	0xC2, 0x10, 0x00]
+
+const sub64_size = 19
+const sub64_function = [sub64_size] Byte [ 
+	0x8B, 0x44, 0x24, 0x0C,
+	0x8B, 0x54, 0x24, 0x10,
+	0x2B, 0x44, 0x24, 0x04,
+	0x1B, 0x54, 0x24, 0x08,
+	0xC2, 0x10, 0x00]
+
+const and64_size = 19
+const and64_function = [and64_size] Byte [ 
+	0x8B, 0x44, 0x24, 0x0C,
+	0x8B, 0x54, 0x24, 0x10,
+	0x23, 0x44, 0x24, 0x04,
+	0x23, 0x54, 0x24, 0x08,
+	0xC2, 0x10, 0x00]
+
+const or64_size = 19
+const or64_function = [or64_size] Byte [ 
+	0x8B, 0x44, 0x24, 0x0C,
+	0x8B, 0x54, 0x24, 0x10,
+	0x0B, 0x44, 0x24, 0x04,
+	0x0B, 0x54, 0x24, 0x08,
+	0xC2, 0x10, 0x00]
+
+const xor64_size = 19
+const xor64_function = [xor64_size] Byte [ 
+	0x8B, 0x44, 0x24, 0x0C,
+	0x8B, 0x54, 0x24, 0x10,
+	0x33, 0x44, 0x24, 0x04,
+	0x33, 0x54, 0x24, 0x08,
+	0xC2, 0x10, 0x00]
+
+const umul64_size = 41
+const umul64_function = [umul64_size] Byte [ 
+	0x53,
+	0x8B, 0x44, 0x24, 0x08,
+	0xF7, 0x64, 0x24, 0x10,
+	0x89, 0xC3,
+	0x89, 0xD1,
+	0x8B, 0x44, 0x24, 0x08,
+	0xF7, 0x64, 0x24, 0x14,
+	0x01, 0xC1,
+	0x8B, 0x44, 0x24, 0x0C,
+	0xF7, 0x64, 0x24, 0x10,
+	0x01, 0xC1,
+	0x89, 0xD8,
+	0x89, 0xCA,
+	0x5B,
+	0xC2, 0x10, 0x00]
+
+const udiv64_size = 3
+const udiv64_function = [udiv64_size] Byte [ 
+	0xC2, 0x10, 0x00]
+
+const sdiv64_size = 3
+const sdiv64_function = [sdiv64_size] Byte [ 
+	0xC2, 0x10, 0x00]
+
+const umod64_size = 3
+const umod64_function = [umod64_size] Byte [ 
+	0xC2, 0x10, 0x00]
+
+const smod64_size = 3
+const smod64_function = [smod64_size] Byte [ 
+	0xC2, 0x10, 0x00]
+
+const shl64_size = 49
+const shl64_function = [shl64_size] Byte [ 
+	0x8B, 0x44, 0x24, 0x08,
+	0x8B, 0x54, 0x24, 0x0C,
+	0x8B, 0x4C, 0x24, 0x04,
+	0x80, 0xF9, 0x40,
+	0x73, 0x19,
+	0x80, 0xF9, 0x20,
+	0x73, 0x08,
+	0x0F, 0xA5, 0xC2,
+	0xD3, 0xE0,
+	0xC2, 0x0C, 0x00,
+	0x89, 0xC2,
+	0x31, 0xC0,
+	0x80, 0xE9, 0x20,
+	0xD3, 0xE2,
+	0xC2, 0x0C, 0x00,
+	0x31, 0xD2,
+	0x31, 0xC0,
+	0xC2, 0x0C, 0x00]
+
+const shr64_size = 49
+const shr64_function = [shr64_size] Byte [ 
+	0x8B, 0x44, 0x24, 0x08,
+	0x8B, 0x54, 0x24, 0x0C,
+	0x8B, 0x4C, 0x24, 0x04,
+	0x80, 0xF9, 0x40,
+	0x73, 0x19,
+	0x80, 0xF9, 0x20,
+	0x73, 0x08,
+	0x0F, 0xAD, 0xD0,
+	0xD3, 0xEA,
+	0xC2, 0x0C, 0x00,
+	0x80, 0xE9, 0x20,
+	0x89, 0xD0,
+	0xD3, 0xE8,
+	0x31, 0xD2,
+	0xC2, 0x0C, 0x00,
+	0x31, 0xD2,
+	0x31, 0xC0,
+	0xC2, 0x0C, 0x00]
+
+const sar64_size = 51
+const sar64_function = [sar64_size] Byte [ 
+	0x8B, 0x44, 0x24, 0x08,
+	0x8B, 0x54, 0x24, 0x0C,
+	0x8B, 0x4C, 0x24, 0x04,
+	0x80, 0xF9, 0x40,
+	0x73, 0x1A,
+	0x80, 0xF9, 0x20,
+	0x73, 0x08,
+	0x0F, 0xAD, 0xD0,
+	0xD3, 0xFA,
+	0xC2, 0x0C, 0x00,
+	0x80, 0xE9, 0x20,
+	0x89, 0xD0,
+	0xD3, 0xF8,
+	0xC1, 0xFA, 0x1F,
+	0xC2, 0x0C, 0x00,
+	0xC1, 0xFA, 0x1F,
+	0x89, 0xD0,
+	0xC2, 0x0C, 0x00]
+
+const lookup_size = 21
+const lookup_function = [lookup_size] Byte [ 
+	0x83, 0xE9, 0x08,
+	0x83, 0xC1, 0x08,
+	0x83, 0x79, 0x04, 0x00,
+	0x74, 0x07,
+	0x39, 0x01,
+	0x75, 0xF3,
+	0xFF, 0x61, 0x04,
+	0xFF, 0x21]
+//[cf]
+//[of]:Registers
+const eax_register_value	= PRegisterValue [vc_register, vs_dword, register_eax, save_eax]
+const ecx_register_value	= PRegisterValue [vc_register, vs_dword, register_ecx, save_none]
+const edx_register_value	= PRegisterValue [vc_register, vs_dword, register_edx, save_edx]
+const ebx_register_value	= PRegisterValue [vc_register, vs_dword, register_ebx, save_none]
+const esp_register_value	= PRegisterValue [vc_register, vs_dword, register_esp, save_none]
+const ebp_register_value	= PRegisterValue [vc_register, vs_dword, register_ebp, save_none]
+const esi_register_value	= PRegisterValue [vc_register, vs_dword, register_esi, save_none]
+const edi_register_value	= PRegisterValue [vc_register, vs_dword, register_edi, save_none]
+	
+const ax_register_value	= PRegisterValue [vc_register, vs_word, register_ax, save_eax]
+const cx_register_value	= PRegisterValue [vc_register, vs_word, register_cx, save_none]
+const dx_register_value	= PRegisterValue [vc_register, vs_word, register_dx, save_edx]
+const bx_register_value	= PRegisterValue [vc_register, vs_word, register_bx, save_none]
+const sp_register_value	= PRegisterValue [vc_register, vs_word, register_sp, save_none]
+const bp_register_value	= PRegisterValue [vc_register, vs_word, register_bp, save_none]
+const si_register_value	= PRegisterValue [vc_register, vs_word, register_si, save_none]
+const di_register_value	= PRegisterValue [vc_register, vs_word, register_di, save_none]
+	
+const al_register_value	= PRegisterValue [vc_register, vs_byte, register_al, save_eax]
+const cl_register_value	= PRegisterValue [vc_register, vs_byte, register_cl, save_none]
+const dl_register_value	= PRegisterValue [vc_register, vs_byte, register_dl, save_edx]
+const bl_register_value	= PRegisterValue [vc_register, vs_byte, register_bl, save_none]
+const ah_register_value	= PRegisterValue [vc_register, vs_byte, register_ah, save_eax]
+const ch_register_value	= PRegisterValue [vc_register, vs_byte, register_ch, save_none]
+const dh_register_value	= PRegisterValue [vc_register, vs_byte, register_dh, save_edx]
+const bh_register_value	= PRegisterValue [vc_register, vs_byte, register_bh, save_none]
+	
+const rax_register_value	= PRegisterValue [vc_register, vs_qword, register_eax, save_eax|save_edx]
+const rbx_register_value	= PRegisterValue [vc_register, vs_qword, register_ebx, save_none]
+const rsi_register_value	= PRegisterValue [vc_register, vs_qword, register_esi, save_none]
+//[cf]
+//[of]:X86
+//[of]:Utility Functions
+//[of]:stackAligned
+//[c]Returns the given size aligned on a multiple of 32 bits
+//[c]
+function stackAligned (size: Size)
+
+	var alignedSize	= size
+	
+	alignedSize	+= stack_align - 1
+	alignedSize	&= not (stack_align - 1)
+	return alignedSize
+//[cf]
+//[of]:modrm
+function modrm (r: Byte, mod: Byte, rm: Byte)
+
+	return (r << 3) + (mod << 6) + rm
+//[cf]
+//[cf]
+//[of]:Constants
+//[c]
+//[c]Registers
+//[c]
+const register_eax	= 0
+const register_ecx	= 1
+const register_edx	= 2
+const register_ebx	= 3
+const register_esp	= 4
+const register_ebp	= 5
+const register_esi	= 6
+const register_edi	= 7
+
+const register_ax	= 0
+const register_cx	= 1
+const register_dx	= 2
+const register_bx	= 3
+const register_sp	= 4
+const register_bp	= 5
+const register_si	= 6
+const register_di	= 7
+
+const register_al	= 0
+const register_cl	= 1
+const register_dl	= 2
+const register_bl	= 3
+const register_ah	= 4
+const register_ch	= 5
+const register_dh	= 6
+const register_bh	= 7
+
+//[c]
+//[c]Conditions
+//[c]
+const condition_o	= 0
+const condition_c	= 2	// jc, jb (CF=1)
+const condition_nc	= 3
+const condition_z	= 4
+const condition_nz	= 5
+const condition_be	= 6
+const condition_a	= 7
+const condition_l	= 12
+const condition_ge	= 13
+const condition_le	= 14
+const condition_g	= 15
+
+const table_swap_condition = [] Byte [
+	0,	// 0 - o
+	0,	// 1 - no
+	condition_a,	// 2 - c / b
+	condition_be,	// 3 - nc / ae
+	condition_z,	// 4 - z / e
+	condition_nz,	// 5 - nz / ne
+	condition_nc,	// 6 - be
+	condition_c,	// 7 - a
+	0,	// 8
+	0,	// 9
+	0,	// A
+	0,	// B
+	condition_g,	// C - l
+	condition_le,	// D - ge
+	condition_ge,	// E - le
+	condition_l]	// F - g
+
+//[c]
+//[c]Other Constants
+//[c]
+const stack_align	= 4 : Unsigned
+//[cf]
+//[cf]
+
+.private
+//[of]:Imports
+import "object-file-\(backend)"
+import "p-code"
+import "x86"
+import "syntax-tree"
+import "commons"
+import "file"
+import "core"
+//[cf]

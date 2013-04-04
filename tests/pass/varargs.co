@@ -1,0 +1,15 @@
+
+import function .cdecl puts (*[] Char8)-> (* Int8)
+
+function more (...)
+	put_all ('more', ...)
+
+function put_all (...)
+	each_extra do msg
+		puts (msg)
+	end
+
+function main
+
+	more ('abc', 'xyz', 'def')
+	more

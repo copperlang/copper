@@ -1,0 +1,15 @@
+struct A
+	attr x : Int32
+
+struct B : A
+	attr y : Int32
+
+function main
+
+	var a = nil (A)
+	var b = nil (B)
+	
+	// The code generator will downcast a into an *B to perform the comparison
+	var c = b <> a
+	
+	return

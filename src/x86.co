@@ -1,0 +1,36 @@
+//[of]:RegisterId
+enum RegisterId
+
+	rid_bl	// 0
+	rid_bh	// 1
+	rid_bx	// 2
+	rid_si	// 3
+	rid_di	// 4
+	rid_bp	// 5
+	rid_ebx	// 6
+	rid_esi	// 7
+	rid_edi	// 8
+	rid_ebp	// 9
+	rid_edi_esi	// 10
+	rid_ebp_ebx	// 11
+	
+	rid_none = -1
+//[cf]
+//[of]:SaveRegister
+enum SaveRegister
+
+	save_none	= 0
+	save_eax	= 1
+	save_edx	= 2
+//[cf]
+//[of]:Address
+const Address = Unsigned32
+
+const undefined_address	= -1 : Unsigned32
+//[cf]
+//[of]:Align
+const align_byte	= 1
+const align_word	= 2
+const align_dword	= 4
+const align_qword	= 8
+//[cf]

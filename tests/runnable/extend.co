@@ -1,0 +1,13 @@
+
+extend *[] Char8
+
+	method size
+		var p = self
+		while p [] <> \0
+			p ++
+		end
+		return p - self
+		
+function .c .cdecl main
+	var s = size ('abcde')
+	return s - 5

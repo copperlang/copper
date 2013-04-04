@@ -1,0 +1,8 @@
+//[c]Ensures that a meta argument is ignored when generating code
+//[c]
+function dummy (T, a, b)
+	return a + b
+
+function .c .cdecl main
+
+	return dummy (Char8, 1, 2) - 3

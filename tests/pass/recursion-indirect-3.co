@@ -1,0 +1,16 @@
+function a
+
+	if false
+		b
+	end
+
+function b
+	c
+
+function c
+	a
+
+function main
+
+	a
+	return

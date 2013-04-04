@@ -1,0 +1,18 @@
+//[c]Ensure that the compiler does not try to define an attribute if it is a pointer
+//[c]
+struct A
+	attr b : * B
+
+struct B
+	attr a : A
+	attr x : Int32
+
+function .c .cdecl main
+
+	var a = {A}
+	var b = {B}
+	 b (a) = b
+	 b (a (b)) = nil
+	 x (b) = 32
+	 
+	 return x (b (a)) - 32

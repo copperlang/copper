@@ -1,0 +1,57 @@
+function f (x)
+	return x
+
+function f (x, y)
+	return x + y
+
+function f (x, y, z)
+	return x + y + z
+
+function g (...)
+	return f (..., 3) - 6
+
+function loop (n: Int32, ...)
+	var i = 0
+	while i < n
+		yield i
+		i ++
+	end
+	return ...
+
+function count_extra (x, ...)
+	var sum = 0
+	each_extra do s
+		sum += s
+	end
+	return extra_size, sum
+
+// varargs in context
+struct Dummy
+	attr init : Int32
+	
+	method f (x, ...)
+		// 1 + 2 + 1
+		var sum = init (self) + x + extra_size : Int32
+		each_extra do y
+			sum += y // + 3
+		end
+		return sum
+
+function .c .cdecl main
+
+	var res = 0
+	res += g (1, 2)
+	
+	var a, b = loop (3, 4, 5) do x
+		// do nothing
+	end
+	res += a + b - 4 - 5
+	
+	var size, sum = count_extra (1, 14, 15, 16)
+	res += size : Int32 + sum - 3 - 14 - 15 - 16
+
+	var obj = {Dummy}
+	init (obj) = 1
+	res += f (obj, 2, 3) - 7
+
+	return res

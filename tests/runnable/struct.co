@@ -1,0 +1,33 @@
+
+struct Object
+	attr type: Int32
+
+struct Point : Object
+	attr x	: Int32
+	attr y	: Int32
+	attr more	: More
+	attr less	: *More
+
+struct More
+	attr z	: Int32
+	attr w	: Int32
+
+function f (p, m)
+
+	p type = 1
+	p x = 2
+	p y = 3
+	p more z = 4
+	p more w = 5
+	p less = m
+	return p
+
+function .c .cdecl main
+
+	var less = {More}
+	less z = 10
+	less w = 11
+	
+	var p = {Point} f (less)
+	var res = p type + p x + p y + p more z + p more w + p less z + p less w
+	return res - 36

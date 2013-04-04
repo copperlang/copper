@@ -1,0 +1,8 @@
+//[c]This test ensures that arguments of a generic function in a generic structures access to parameters
+//[c]
+struct A (T)
+	method f (x: T, y)
+		return x - y
+
+function .c .cdecl main
+	return {Int32 A} f (2, 2)

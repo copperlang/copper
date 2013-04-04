@@ -1,0 +1,135 @@
+
+function ret0_byte
+	return 0 : Int8
+
+function ret0_word
+	return 0 : Int16
+
+function ret0_dword
+	return 0 : Int32
+
+function ret0_qword
+	return 0 : Int64
+
+function ret1_byte
+	return 1 : Int8
+
+function ret1_word
+	return 1 : Int16
+
+function ret1_dword
+	return 1 : Int32
+
+function ret1_qword
+	return 1 : Int64
+
+function copy_byte
+	var a = 12: Int8
+	var b = a
+	return b - 12
+
+function copy_word
+	var a = 1234: Int16
+	var b = a
+	return b - 1234
+
+function copy_dword
+	var a = 123456: Int32
+	var b = a
+	return b - 123456
+
+function copy_qword
+	var a = 12: Int64
+	var b = a
+	return b - 12
+
+function add_short_byte
+	var a = 103: Int8
+	var b = a + 20
+	return b - 123
+
+function add_short_word
+	var a = 1234: Int16
+	var b = a + 20
+	return b - 1254
+
+function add_short_dword
+	var a = 1234: Int32
+	var b = a + 20
+	return b - 1254
+
+function add_short_qword
+	var a = 1234: Int64
+	var b = a + 20
+	return b - 1254
+
+function add_long_word
+	var a = 1234: Int16
+	var b = a + 200
+	return b - 1434
+
+function add_long_dword
+	var a = 1234: Int32
+	var b = a + 200
+	return b - 1434
+
+function add_long_qword
+	var a = 1234: Int64
+	var b = a + 200
+	return b - 1434
+
+function add_byte_complex
+	var a = 10: Int8
+	var b = (a+1) + (a+2)
+	return b - 23
+
+function add_word_complex
+	var a = 10: Int16
+	var b = (a+1) + (a+2)
+	return b - 23
+
+function add_dword_complex
+	var a = 10: Int32
+	var b = (a+1) + (a+2)
+	return b - 23
+
+function add_qword_complex
+	var a = 10: Int64
+	var b = (a+1) + (a+2)
+	return b - 23
+
+function .c .cdecl main
+
+	var res = 0 : Int64
+	res += ret0_byte : Int64
+	res += ret0_word : Int64
+	res += ret0_dword : Int64
+	res += ret0_qword : Int64
+	res += ret1_byte : Int64
+	res += ret1_word : Int64
+	res += ret1_dword : Int64
+	res += ret1_qword : Int64
+	res -= 4
+	
+	res += copy_byte : Int64
+	res += copy_word : Int64
+	res += copy_dword : Int64
+	res += copy_qword : Int64
+
+	res += add_short_byte : Int64
+	res += add_short_word : Int64
+	res += add_short_dword : Int64
+	res += add_short_qword : Int64
+	res += add_long_word : Int64
+	res += add_long_dword : Int64
+	res += add_long_qword : Int64
+
+	res += add_byte_complex : Int64
+	res += add_word_complex : Int64
+	res += add_dword_complex : Int64
+	res += add_qword_complex : Int64
+
+	if res <> 0
+		return 1
+	end
+	return 0

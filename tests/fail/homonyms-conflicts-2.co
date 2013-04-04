@@ -1,0 +1,11 @@
+
+
+function f (x, y)
+	return 9
+
+function f (x, ...)
+	return 7
+
+function main
+	f (1, 2)
+	f (1, 2, 3, 4)

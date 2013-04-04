@@ -1,0 +1,157 @@
+// ELF Header
+
+const EI_NIDENT = 16
+
+struct Elf32_Ehdr
+	attr ident	: [EI_NIDENT] Byte
+	attr type	: Half
+	attr machine	: Half
+	attr version	: Word
+	attr entry	: Address
+	attr phoff	: Off
+	attr shoff	: Off
+	attr flags	: Word
+	attr ehsize	: Half
+	attr phentsize	: Half
+	attr phnum	: Half
+	attr shentsize	: Half
+	attr shnum	: Half
+	attr shstrndx	: Half
+
+struct Elf32_Shdr
+	attr name	: Word
+	attr type	: Word
+	attr flags	: Word
+	attr addr	: Address
+	attr offset	: Off
+	attr size	: Word
+	attr link	: Word
+	attr info	: Word
+	attr addralign	: Word
+	attr entsize	: Word
+
+struct Elf32_Sym
+	attr name	: Word
+	attr value	: Address
+	attr size	: Word
+	attr info	: Byte
+	attr other	: Byte
+	attr shndx	: Half
+
+struct Elf32_Rel
+	attr offset	: Address
+	attr info	: Word
+	
+	method set (offset: Address, symbol: Word, type: Byte)
+		self offset	= offset
+		self info	= (symbol << 8) + (type : Word)
+
+
+struct Elf32_Rela
+	attr offset	: Address
+	attr info	: Word
+	attr addend	: Sword
+
+const ET_NONE	= 0	// No file type
+const ET_REL	= 1	// Relocatable file
+const ET_EXEC	= 2	// Executable file
+const ET_DYN	= 3	// Shared object file
+const ET_CORE	= 4	// Core file
+const ET_LOPROC	= 0xFF00	// Processor-specific
+const ET_HIPROC	= 0xFFFF	// Processor-specific
+		
+const EM_NONE	= 0	// No machine
+const EM_M32	= 1	// AT&T WE 32100
+const EM_SPARC	= 2	// SPARC
+const EM_386	= 3	// Intel 80386
+const EM_68K	= 4	// Motorola 68000
+const EM_88K	= 5	// Motorola 88000
+const EM_860	= 7	// Intel 80860
+const EM_MIPS	= 8	// MIPS RS3000
+		
+const EV_NONE	= 0	// Invalid version
+const EV_CURRENT	= 1	// Current version
+		
+const SHN_UNDEF	= 0
+const SHN_LORESERVE	= 0xFF00
+const SHN_LOPROC	= 0xFF00
+const SHN_HIPROC	= 0xFF1F
+const SHN_ABS	= 0xFFF1
+const SHN_COMMON	= 0xFFF2
+const SHN_HIRESERVE	= 0xFFFF
+	
+const SHT_NULL	= 0
+const SHT_PROGBITS	= 1
+const SHT_SYMTAB	= 2
+const SHT_STRTAB	= 3
+const SHT_RELA	= 4
+const SHT_HASH	= 5
+const SHT_DYNAMIC	= 6
+const SHT_NOTE	= 7
+const SHT_NOBITS	= 8
+const SHT_REL	= 9
+const SHT_SHLIB	= 10
+const SHT_DYNSYM	= 11
+const SHT_LOPROC	= 0x70000000
+const SHT_HIPROC	= 0x7FFFFFFF
+const SHT_LOUSER	= 0x80000000
+const SHT_HIUSER	= 0xFFFFFFFF
+	
+const SHF_WRITE	= 0x1
+const SHF_ALLOC	= 0x2
+const SHF_EXECINSTR	= 0x4
+const SHF_MASKPROC	= 0xF0000000
+	
+const STN_UNDEF	= 0
+	
+const STB_LOCAL	= 0
+const STB_GLOBAL	= 1
+const STB_WEAK	= 2
+const STB_LOPROC	= 13
+const STB_HIPROC	= 15
+	
+const STT_NOTYPE	= 0
+const STT_OBJECT	= 1
+const STT_FUNC	= 2
+const STT_SECTION	= 3
+const STT_FILE	= 4
+const STT_LOPROC	= 13
+const STT_HIPROC	= 15
+	
+const R_386_NONE	= 0	// none	none
+const R_386_32	= 1	// word32	S + A
+const R_386_PC32	= 2	// word32	S + A - P
+const R_386_GOT32	= 3	// word32	G + A - P
+const R_386_PLT32	= 4	// word32	L + A - P
+const R_386_COPY	= 5	// none	none
+const R_386_GLOB_DAT	= 6	// word32	S
+const R_386_JMP_SLOT	= 7	// word32	S
+const R_386_RELATIVE	= 8	// word32	B + A
+const R_386_GOTOFF	= 9	// word32	S + A - GOT
+const R_386_GOTPC	= 10	// word32	GOT + A - P
+
+function ELF32_ST_BIND (i)
+	return i >> 4
+
+function ELF32_ST_TYPE (i)
+	return i & 0xF
+
+function ELF32_ST_INFO (b,t)
+	return ((b << 4) + (t & 0xF)) : Byte
+
+function ELF32_R_SYM (i)
+	return i >> 8
+
+function ELF32_R_TYPE (i)
+	return i & 255
+	
+function ELF32_R_INFO (s: Word, t: Word)
+	return (s << 8) + t
+
+.private
+const Address	= Unsigned32
+const Half	= Unsigned16
+const Off	= Unsigned32
+const Sword	= Int32
+const Word	= Unsigned32
+const Byte	= Unsigned8

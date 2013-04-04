@@ -1,0 +1,16 @@
+
+// This test should instanciate only one function first () :
+//	first ([] Char16 +) -> (Char16)
+//
+
+function first (x)
+	return x [0]
+
+function .c .cdecl main
+
+	var s = {[256] Char16}
+	s [0] = $a
+	var x = first ("hello")
+	var y = first (s)
+	
+	return x : Int32 - 104

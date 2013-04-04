@@ -1,0 +1,102 @@
+//[of]:IncludePath
+struct IncludePath
+
+	attr next	: *IncludePath
+	attr path	: String16
+
+	method initialize (next, path)
+		self next = next
+		self path = path
+//[cf]
+//[of]:LineNumber
+const LineNumber	= Unsigned
+
+const no_line_number	= -1 : LineNumber
+//[cf]
+//[of]:FileLocation
+const FileLocation = String16
+//[cf]
+//[of]:CallingConvention
+enum CallingConvention : Byte
+
+	cc_default
+	cc_stdcall
+	cc_cdecl
+//[cf]
+//[of]:String16
+const String16	= *[] Char16
+//[cf]
+
+//[of]:toOSname
+function toOSname (filename: String)
+
+	convertFullName (filename)
+//[cf]
+//[of]:filePath
+function filePath (pool: *MemoryPool, filename: String16)
+
+	var p = filename lastCharOccurrence (path_separator)
+	if p isNil
+		return empty_string
+	end
+	
+	return newStringRange (pool, filename, p - filename)
+//[cf]
+//[of]:newString
+function newString (pool: *MemoryPool, s: String)
+
+	var len = s size + 1
+	var buf = pool allocateArray (Char, len)
+	memoryCopy (buf, s, len * Char size)
+	return buf
+//[cf]
+//[of]:newStringRange
+function newStringRange (pool: *MemoryPool, s: String, size: Size)
+
+	var buf = pool allocateArray (Char, size + 1)
+	buf memoryCopy (s, size * Char size)
+	buf [size] = \0
+	return buf
+//[cf]
+
+//[of]:asciiString
+function asciiString (s: String)
+
+	var size = s size + 1
+	var buf = Char8 allocateArray (size)
+	var src = s
+	var dst = buf
+	var limit = buf + size
+	while dst <> limit
+		dst [] = src [] : Char8
+		src ++
+		dst ++
+	end
+	
+	return buf
+//[cf]
+
+//[of]:debug utils
+
+// Debug utils
+function show (prefix: String, x)
+
+	var sb = {TempStringBuffer} local
+	sb << prefix
+	sb << " = "
+	sb << x : Unsigned
+	puts (sb string)
+	sb release
+
+function showSize (prefix: String, x : Size)
+
+	var sb = {TempStringBuffer} local
+	sb << prefix
+	sb << x
+	puts (sb string)
+	sb release
+//[cf]
+
+.private
+import "file"
+import "core"

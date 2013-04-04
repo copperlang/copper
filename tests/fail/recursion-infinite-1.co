@@ -1,0 +1,8 @@
+//[c]This is a simple infinite recursion
+//[c]
+function f (x)
+	f(1)
+	return 1
+
+function main
+	f (1)

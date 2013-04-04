@@ -1,0 +1,217 @@
+//[of]:Main
+//[of]:main
+function .c .cdecl main (argc: Int32, aargv: *[] *[] Char8)
+
+	// convert arguments to unicode
+	var sb	= {TempStringBuffer} local
+	var argv	= {[128] String16}
+	var i	= 0
+	while i < argc
+		sb removeAll
+		sb << aargv [i]
+		argv [i] = sb base copyRange (sb size)
+		i ++
+	end
+	sb release
+	
+	var result = start (argc, argv)
+
+	i = 0
+	while i < argc
+		argv [i] delete
+		i ++
+	end
+	
+	return result
+//[cf]
+//[of]:start
+function start (argc: Int32, argv: *[] String)
+
+	var pool	= {MemoryPool} local
+
+	// Parse the command line
+	//	
+	var filename	= nil : String16
+	var outFilename	= defaultOutputName
+	var verbose	= false
+	var debug	= false
+	var dump	= false
+	var version	= false
+	var includePath	= IncludePath nil
+	var defines	= {StringDictionary (String16)} local
+	var invalidDefine	= false
+	var i = 1
+	while i < argc
+		var arg = argv [i]
+		if arg isEqual ("-verbose")
+			verbose = true
+		elsif arg isEqual ("-v")
+			version = true
+		elsif arg isEqual ("-debug")
+			debug = true
+		elsif arg isEqual ("-dump")
+			dump = true
+		elsif arg isEqual ("-o") and i < argc - 1
+			i ++
+			outFilename = pool newString (argv [i])
+			outFilename toOSname
+		elsif arg isEqual ("-I") and i < argc - 1
+			i ++
+			includePath = pool new (IncludePath, includePath, argv [i])
+		elsif arg isEqual ("-D") and i < argc - 1
+		
+			i ++
+			var arg = argv [i]
+			var equal = arg firstCharOccurrence ($=)
+			if equal isNil
+				invalidDefine = true
+			else
+				var name = pool newStringRange (arg, equal - arg)
+				var value = pool newString (equal + 1)
+				defines add (name, value)
+			end
+		else
+			filename = pool newString (arg)
+		end
+		i ++
+	end
+
+	var ok = true
+	if version
+		puts16 ("Copper 1.6")
+	elsif invalidDefine
+		puts16 ("Invalid define (-D): missing '=' sign")
+	elsif filename isNil
+		puts16 ("Filename missing\n")
+		ok = false
+	else
+		// normalize / and \ to be compliant with current operating system
+		filename toOSname
+
+		var cc	= {Compiler} local (pool)
+		ok	= cc compile (includePath, defines, filename, outFilename, verbose, debug, dump)
+	
+	end
+
+	if verbose
+		var stats = {TempStringBuffer} local
+		stats << "================================\n"
+		stats << "Allocated in pool...: " << pool size << \n
+		puts16 (stats string)
+		stats release
+	end
+	defines release
+	pool release
+	
+	if ok
+		//puts ("Finished.")
+		return 0
+	else
+		//puts ("Failed.")
+		return 1
+	end
+//[cf]
+//[of]:Compiler
+//[of]:Compiler
+//[of]:definition
+//[c]Compiler class
+//[c]
+//[c]Compiler must not be instanciated
+//[c]in a memory bundle since it will be destroyed before the object
+//[c]it produces.
+//[c]
+struct Compiler
+
+	attr pool	: *MemoryPool
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+//[c]DESCRIPTION
+//[c]	Initialize the compilation
+//[c]
+//[c]ARGUMENTS
+//[c]	pool	--	The memory pool to store the syntax tree and all attached
+//[c]			objects.
+//[c]
+method initialize (pool : *MemoryPool)
+
+	self pool = pool
+//[cf]
+//[cf]
+//[of]:compiling
+//[of]:compile
+//[c]Starts the compilation
+//[c]
+//[c]RETURN VALUE
+//[c]	Return true if the module has been compiled without errors.
+//[c]
+method compile (	includePath	: *IncludePath,
+	defines	: *StringDictionary (String16),
+	filename	: String16, 
+	outFilename	: String16,
+	verbose	: Bool,
+	debug	: Bool,
+	dump	: Bool)
+
+	// Build the module
+	var ok	= false
+	var program	= {Program} local (self pool)
+	var builder	= {Builder} local (includePath, defines, verbose, program, ref reportError (*Compiler, FileLocation, LineNumber, String16), self)
+	var module	= builder compile (filename)
+
+	// Generate code
+	if module notNil
+		var generator	= {CodeGenerator} local (program)
+		ok = generator generate (outFilename, debug, dump)
+		if not ok
+			puts16 ("Error while saving object file")
+		end
+		generator release
+	end
+	
+	builder release
+	program release
+	return ok
+//[cf]
+
+//[cf]
+
+:private
+//[of]:error
+//[of]:reportError
+//[c]Writes an error
+//[c]
+method reportError (	file	: FileLocation,
+	line	: LineNumber, 
+	message	: String16)
+
+	var s = {TempStringBuffer} local
+	if file notNil
+		s << file << ":" << line << ": " << message
+	else
+		s << message
+	end
+	puts16 (s string)
+	s release
+//[cf]
+//[cf]
+//[cf]
+//[cf]
+//[of]:Imports
+import "generator-\(backend)"
+import "builder"
+import "parser"
+import "syntax-tree"
+import "lexer"
+import "commons"
+import "file"
+import "core"
+//[cf]
+//[cf]
+//[l]:COFF Generator:coff-generator.co
+//[l]:LLVM Generator:llvm-generator.co
+//[l]:Builder:builder.co
+//[l]:Parser:parser.co
+//[l]:Syntax Tree:syntax-tree.co
+//[l]:Lexer:lexer.co
+//[l]:Core:core.co

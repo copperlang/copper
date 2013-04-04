@@ -1,0 +1,24 @@
+// This test evaluate var x = ... twice because of recursion
+// The first pass mutate
+//	0 : Unsigned16
+// into a literal integer of type Unsigned16
+// 
+// The second pass must not re-evaluate the expression,
+// otherwise it becomes an int32
+
+struct A
+
+	method a
+		if false
+			b (self)
+		end
+	
+	method b
+		var x = 0 : Unsigned16
+		a (self)
+		var y = 0 : Unsigned16
+		x = y
+
+function .c .cdecl main
+	{A} a
+	return 0

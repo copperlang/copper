@@ -1,0 +1,14 @@
+//[c]A pointer to an unused enum in an unused structure can 
+//[c]raise a crash as the enumeration is not defined (storageType not set)
+//[c]
+enum E
+	e1
+	e2
+	
+struct A
+	attr a : *E
+	
+function .c .cdecl main
+
+	return 0
+

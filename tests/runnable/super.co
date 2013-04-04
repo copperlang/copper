@@ -1,0 +1,12 @@
+
+struct A
+	method initialize
+		return 0
+
+struct B : A
+	method initialize
+		return 1
+
+function .c .cdecl main
+	var x = nil (B)
+	return initialize (super (x))

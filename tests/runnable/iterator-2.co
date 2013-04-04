@@ -1,0 +1,28 @@
+//[c]This test ensures that variables and arguments inside a yield are evaluated in the proper scope
+//[c]
+struct Module
+	attr value : Int32
+
+	method each
+		var list = {Collection}
+		list each (3) do y
+			
+			// If self is incorrect, the compiler won't find 'value (self)'
+			var value = value (self)
+			yield value + y
+		end
+
+struct Collection
+	method each (x)
+		yield x
+
+function .c .cdecl main
+
+	var module = {Module}
+	module value = 5
+	var res = 0
+	module each do z
+		res += z
+	end
+
+	return res - 8

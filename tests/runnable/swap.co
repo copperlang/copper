@@ -1,0 +1,13 @@
+
+function .c .cdecl main
+
+	var x = 1
+	var y = 2
+	
+	x, y = y, x
+	
+	if x <> 2 |  y <> 1
+		return 1
+	end
+	
+	return 0

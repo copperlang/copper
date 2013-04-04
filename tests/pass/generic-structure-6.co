@@ -1,0 +1,28 @@
+// Advanced constant in generic structure's parameters
+
+function test (x)
+	return x + 1
+
+struct Point
+	attr x : Int32
+	attr y : Int32
+	
+struct A (C)
+	method f (x)
+		var z = C
+		return x + 1
+
+function .c .cdecl main
+
+	var a	= { A (12) } f (1)
+	var b	= { A (13) } f (2)
+	var c	= { A (Int32 nil) } f (3)
+	var d	= { A (nil) } f (4)
+	var e	= { A (ref test (Int32)) } f (5)
+	var f	= { A (ref test (Int64)) } f (6)
+	var g	= { A ([] Int32 [1, 2, 3]) } f (7)
+	var h	= { A ([] Int32 [1, 2, 4]) } f (8)
+	var i	= { A (Point [12, 34]) } f (9)
+	var j	= { A (Point [12, 34]) } f (9)
+	
+	return 0

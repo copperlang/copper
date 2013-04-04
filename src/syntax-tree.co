@@ -1,0 +1,6045 @@
+//[of]:Program
+//[of]:Program
+//[of]:definition
+struct Program
+
+	attr pool	: *MemoryPool	// Memory pool to store the modules
+	attr modules	: ModuleList	// All loaded modules
+
+//[c]
+//[c]	Meta Types
+//[c]
+	attr anyMeta	: *MetaType
+	attr nilMeta	: *MetaType
+	attr char8Meta	: *MetaType
+	attr char16Meta	: *MetaType
+	attr booleanMeta	: *MetaType
+	attr int8Meta	: *MetaType
+	attr int16Meta	: *MetaType
+	attr int32Meta	: *MetaType
+	attr int64Meta	: *MetaType
+	attr uint8Meta	: *MetaType
+	attr uint16Meta	: *MetaType
+	attr uint32Meta	: *MetaType
+	attr uint64Meta	: *MetaType
+	attr enumerationMeta	: *MetaType
+//[c]
+//[c]	The Types
+//[c]
+	attr anyType	: *BuiltinType
+	attr nilType	: *BuiltinType
+	attr char8Type	: *BuiltinType
+	attr char16Type	: *BuiltinType
+	attr booleanType	: *BuiltinType
+	attr int8Type	: *BuiltinType
+	attr int16Type	: *BuiltinType
+	attr int32Type	: *BuiltinType
+	attr int64Type	: *BuiltinType
+	attr uint8Type	: *BuiltinType
+	attr uint16Type	: *BuiltinType
+	attr uint32Type	: *BuiltinType
+	attr uint64Type	: *BuiltinType
+	attr enumerationType	: *BuiltinType	// This type is the abstract parent of all enumerations
+	attr anyPointerType	: *PointerType
+	attr nilPointerType	: *PointerType
+	attr string8Type	: *PointerType
+	attr string16Type	: *PointerType
+//[c]
+//[c]	Values
+//[c]
+	attr anyPointerValues	: *ValueList
+	attr nilPointerValues	: *ValueList
+	attr string8Values	: *ValueList
+	attr string16Values	: *ValueList
+	attr trueValues	: *ValueList	// Single value, type = boolean, constant = true constant
+	attr falseValues	: *ValueList	// Single value, type = boolean, constant = false constant
+	attr char8Values	: *ValueList
+	attr char16Values	: *ValueList
+	attr booleanValues	: *ValueList
+	attr int8Values	: *ValueList
+	attr int16Values	: *ValueList
+	attr int32Values	: *ValueList
+	attr int64Values	: *ValueList
+	attr uint8Values	: *ValueList
+	attr uint16Values	: *ValueList
+	attr uint32Values	: *ValueList
+	attr uint64Values	: *ValueList
+
+//[c]
+//[c]	Constants
+//[c]
+	attr functionConstants	: *FunctionConstant
+	attr structureConstants	: *StructureConstant
+	attr arrayConstants	: *ArrayConstant
+	attr string8Constants	: *String8Constant
+	attr string16Constants	: *String16Constant
+	attr uninitializedConstants	: *UninitializedConstant
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+method initialize (pool : *MemoryPool)
+
+	self pool = pool
+	self functionConstants	= nil
+	self structureConstants	= nil
+	self arrayConstants	= nil
+	self string8Constants	= nil
+	self string16Constants	= nil
+	self uninitializedConstants	= nil
+	
+	self arrayTypeDictionary initialize
+	self functionTypeDictionary initialize
+	self modules initialize
+	self initializeTypes
+	self initializeValues
+	self initializeDefinitions
+//[cf]
+//[of]:release
+method release
+
+	self arrayTypeDictionary release
+	self functionTypeDictionary release
+//[cf]
+//[of]:resetGenerators
+method resetGenerators
+
+	var a = self string8Constants
+	while a notNil
+		a generator = nil
+		a = a next
+	end
+
+	var b = self string16Constants
+	while b notNil
+		b generator = nil
+		b = b next
+	end
+
+	var c = self functionConstants
+	while c notNil
+		c generator = nil
+		c = c next
+	end
+
+	var d = self structureConstants
+	while d notNil
+		d generator = nil
+		d = d next
+	end
+
+	var e = self arrayConstants
+	while e notNil
+		e generator = nil
+		e = e next
+	end
+
+	var f = self uninitializedConstants
+	while f notNil
+		f generator = nil
+		f = f next
+	end
+//[cf]
+//[cf]
+//[of]:adding - removing
+//[of]:addModule
+method addModule (module: *Module)
+
+	self modules add (self pool, module)
+//[cf]
+//[cf]
+//[of]:searching
+//[of]:findModule
+method findModule (filename: String16)
+
+	self modules each do module
+		if module filename isEqual (filename)
+			return module
+		end
+	end
+	
+	return nil
+//[cf]
+//[cf]
+//[of]:accessing
+//[of]:getPointerType
+method getPointerType (type: *Type)
+
+	if type pointerType isNil
+	
+		var parent = {*Type}
+		if type parent notNil
+			parent = self getPointerType (type parent)
+		else
+			parent = self anyType
+		end
+	
+		type pointerType = self pool new (	PointerType, 
+			type, 
+			parent)
+	end
+	
+	return type pointerType
+//[cf]
+//[of]:getEffectiveType
+//[c]Returns the effective type of a type
+//[c]
+//[c]	The effective type is the type of an expression evaluating an object of 
+//[c]	this type. the effective type of complex types is a pointer,
+//[c]	in other cases the effective type is the same as the type.
+//[c]
+method getEffectiveType (type: *Type)
+
+	if not type isSimple
+		return self getPointerType (type)
+	end
+	
+	return type
+//[cf]
+//[of]:getArrayType
+method getArrayType (cellType: *Type, arraySize: Size)
+
+	// Try to find the array in the dictionary
+	var key	= {ArrayType}
+	key cellType	= cellType
+	key arraySize	= arraySize
+	var arrayType	= self arrayTypeDictionary [key]
+	if arrayType notNil
+		return arrayType
+	end
+	
+	// Not found: we need to create it, but we first need to get the parent
+	var parent = Type nil
+	if arraySize <> 0
+		
+		// Non null size: the parent is the same array with null size
+		parent = self getArrayType (cellType, 0)
+	
+	elsif cellType <> self anyType
+	
+		// Not [0] Anything: the parent is [0] Anything
+		parent = self getArrayType (self anyType, 0)
+	
+	else
+		
+		// Otherwise, the parent of [0] Anything is Anything
+		parent = self anyType
+	
+	end
+
+	// Create the array	
+	arrayType = self pool new (	ArrayType, 
+		cellType, 
+		arraySize, 
+		parent, self)
+		
+	// Add it to the dictionary
+	self arrayTypeDictionary add (arrayType, arrayType)
+	
+	return arrayType
+//[cf]
+//[of]:getFunctionType
+method getFunctionType (	callingConvention	: CallingConvention,
+	types	: *TypeList,
+	returnTypes	: *TypeList )
+
+	// Try to find the array in the dictionary
+	var key	= {FunctionType}
+	key callingConvention	= callingConvention
+	key types	= types
+	key returnTypes	= returnTypes
+	var functionType = self functionTypeDictionary [key]
+	
+	// Not found: create it
+	if functionType isNil
+		functionType = self pool new (	FunctionType,
+			callingConvention,
+			types,
+			returnTypes,
+			self anyType )
+		self functionTypeDictionary add (functionType, functionType)
+	end
+	
+	return functionType
+//[cf]
+
+//[of]:sizeValues
+//[c]Returns value uint32 or uint64 depending on the target platform
+//[c]
+method sizeValues
+
+	if target_platform_64
+		return self uint64Values
+	else
+		return self uint32Values
+	end
+//[cf]
+//[cf]
+//[of]:enumerating
+//[of]:eachModule
+method eachModule
+
+	self modules each do m
+		yield m
+	end
+//[cf]
+//[of]:eachFunction
+method eachFunction
+
+	self eachModule do m
+		m eachFunction do f
+			if f used
+				yield f
+			end
+		end
+	end
+//[cf]
+//[of]:eachExternFunction
+method eachExternFunction
+
+	self eachModule do m
+		m eachGlobalExternFunction do f
+			if f used
+				yield f
+			end
+		end
+	end
+//[cf]
+//[of]:eachVariable
+method eachVariable
+
+	self eachModule do m
+		m eachGlobalVariables do mv
+			if mv used
+				var variables	= mv variables
+				var values	= mv expressions values
+				eachDual (variables, values) do variable, value
+					yield variable, value
+				end
+			end
+		end
+	end
+//[cf]
+//[of]:eachStructure
+method eachStructure
+
+	self eachModule do m
+		m eachStructure do s
+			yield s
+		end
+	end
+//[cf]
+//[cf]
+
+:private
+//[of]:attributes
+	attr arrayTypeDictionary	: ArrayTypeDictionary	// All array types
+	attr functionTypeDictionary	: FunctionTypeDictionary	// All function types
+//[cf]
+//[of]:utils
+//[of]:initializeTypes
+method initializeTypes
+
+	var pool = self pool
+
+	//		Parent	Code	Size	Name
+	self anyType	= pool new (BuiltinType,	nil, 	t_any,	undefined_size,	tn_any)
+	self nilType	= pool new (BuiltinType,	self anyType,	t_nil,	undefined_size,	tn_nil)
+	self char8Type	= pool new (BuiltinType,	self anyType,	t_char_8,	1:Size,	tn_char8)
+	self char16Type	= pool new (BuiltinType,	self anyType,	t_char_16,	2:Size,	tn_char16)
+	self booleanType	= pool new (BuiltinType,	self anyType,	t_boolean,	1:Size,	tn_boolean)
+	self int8Type	= pool new (BuiltinType,	self anyType,	t_integer_8,	1:Size,	tn_int8)
+	self int16Type	= pool new (BuiltinType,	self anyType,	t_integer_16,	2:Size,	tn_int16)
+	self int32Type	= pool new (BuiltinType,	self anyType,	t_integer_32,	4:Size,	tn_int32)
+	self int64Type	= pool new (BuiltinType,	self anyType,	t_integer_64,	8:Size,	tn_int64)
+	self uint8Type	= pool new (BuiltinType,	self anyType,	t_unsigned_8,	1:Size,	tn_uint8)
+	self uint16Type	= pool new (BuiltinType,	self anyType,	t_unsigned_16,	2:Size,	tn_uint16)
+	self uint32Type	= pool new (BuiltinType,	self anyType,	t_unsigned_32,	4:Size,	tn_uint32)
+	self uint64Type	= pool new (BuiltinType,	self anyType,	t_unsigned_64,	8:Size,	tn_uint64)
+	self enumerationType	= pool new (BuiltinType,	self anyType,	t_any,	undefined_size,	tn_enumeration)
+	
+	self anyMeta	= pool new (MetaType, self anyType)
+	self nilMeta	= pool new (MetaType, self nilType)
+	self char8Meta	= pool new (MetaType, self char8Type)
+	self char16Meta	= pool new (MetaType, self char16Type)
+	self booleanMeta	= pool new (MetaType, self booleanType)
+	self int8Meta	= pool new (MetaType, self int8Type)
+	self int16Meta	= pool new (MetaType, self int16Type)
+	self int32Meta	= pool new (MetaType, self int32Type)
+	self int64Meta	= pool new (MetaType, self int64Type)
+	self uint8Meta	= pool new (MetaType, self uint8Type)
+	self uint16Meta	= pool new (MetaType, self uint16Type)
+	self uint32Meta	= pool new (MetaType, self uint32Type)
+	self uint64Meta	= pool new (MetaType, self uint64Type)
+	self enumerationMeta	= pool new (MetaType, self enumerationType)
+
+	self anyPointerType	= self getPointerType (self anyType)
+	self nilPointerType	= self getPointerType (self nilType)
+	self string8Type	= self getPointerType (self getArrayType (self char8Type, 0))
+	self string16Type	= self getPointerType (self getArrayType (self char16Type, 0))
+//[cf]
+//[of]:initializeValues
+//[c]Initializes constant values
+//[c]
+method initializeValues
+
+	self anyPointerValues	= self newValue (self anyPointerType,	nil)
+	self nilPointerValues	= self newValue (self nilPointerType,	constant_nil)
+	self string8Values	= self newValue (self string8Type,	nil)
+	self string16Values	= self newValue (self string16Type,	nil)
+	self trueValues	= self newValue (self booleanType,	constant_true)
+	self falseValues	= self newValue (self booleanType,	constant_false)
+	self char8Values	= self newValue (self char8Type,	nil)
+	self char16Values	= self newValue (self char16Type,	nil)
+	self booleanValues	= self newValue (self booleanType,	nil)
+	self int8Values	= self newValue (self int8Type,	nil)
+	self int16Values	= self newValue (self int16Type,	nil)
+	self int32Values	= self newValue (self int32Type,	nil)
+	self int64Values	= self newValue (self int64Type,	nil)
+	self uint8Values	= self newValue (self uint8Type,	nil)
+	self uint16Values	= self newValue (self uint16Type,	nil)
+	self uint32Values	= self newValue (self uint32Type,	nil)
+	self uint64Values	= self newValue (self uint64Type,	nil)
+//[cf]
+//[of]:initializeDefinitions
+method initializeDefinitions
+
+	// Operations on meta
+	var anyMeta = self anyMeta
+	self addDefinition (anyMeta, meta_size)	// size (type)
+	self addDefinition (anyMeta, meta_next)	// next (type)
+	self addDefinition (anyMeta, meta_target)	// target (type)
+	self addDefinition (anyMeta, meta_nil_definition)	// nil (type)
+	self addDefinition (anyMeta, meta_pointer)	// *type
+	self addDefinition (anyMeta, meta_array_1)	// [] type
+	self addDefinition (anyMeta, meta_array_2)	// [n] type
+	self addDefinition (anyMeta, meta_local)	// {type}
+	self addDefinition (anyMeta, meta_cast)	// cast (type, e)
+	self addDefinition (anyMeta, meta_initialize)	// type [...]
+	
+	// Operations on integers
+	self addNumeric (self int8Type,	self int8Values)
+	self addNumeric (self uint8Type,	self uint8Values)
+	self addNumeric (self int16Type,	self int16Values)
+	self addNumeric (self uint16Type,	self uint16Values)
+	self addNumeric (self int32Type,	self int32Values)
+	self addNumeric (self uint32Type,	self uint32Values)
+	self addNumeric (self int64Type,	self int64Values)
+	self addNumeric (self uint64Type,	self uint64Values)
+	self addNumeric (self enumerationType,	nil)
+	
+	// Operations on chars
+	self addCharacter (self char8Type,	self char8Values)
+	self addCharacter (self char16Type,	self char16Values)
+
+	// Operations on booleans
+	var booleanType = self booleanType
+	self addBinary (booleanType, '_and',	d_boolean_and,	nil)
+	self addBinary (booleanType, '_or',	d_boolean_or,	nil)
+	self addBinary (booleanType, '_eq',	d_boolean_eq,	nil)
+	self addBinary (booleanType, '_ne',	d_boolean_ne,	nil)
+	self addUnary (booleanType, '_not',	d_boolean_not,	nil)
+	self addBinary (booleanType, '_assign_and',	d_boolean_assign_and,	nil)
+	self addBinary (booleanType, '_assign_or',	d_boolean_assign_or,	nil)
+	
+	// Operations on pointers
+	var anyPointerType = self anyPointerType
+	self addBinary	(anyPointerType, '_eq',	d_pointer_eq,	nil)
+	self addBinary	(anyPointerType, '_ne',	d_pointer_ne,	nil)
+	self addDefinition	(anyPointerType, pointer_dereference)
+	self addDefinition	(anyPointerType, pointer_super)
+	self addDefinition	(anyPointerType, pointer_call)	// defined on *Anything because functions have no common ancestors
+
+	// Operations on arrays
+	var arrayAny	= self getArrayType (self anyType, 0)
+	var pointerArray	= self getPointerType (arrayAny)
+	self addDefinition	(pointerArray, array_index_0)
+	self addDefinition	(pointerArray, array_index)
+	self addDefinition	(pointerArray, array_add)
+	self addDefinition	(pointerArray, array_sub)
+	self addDefinition	(pointerArray, array_assign_add)
+	self addDefinition	(pointerArray, array_assign_sub)
+	self addDefinition	(pointerArray, array_assign_inc)
+	self addDefinition	(pointerArray, array_assign_dec)
+	self addBinary	(pointerArray, '_le',	d_array_le,	nil)
+	self addBinary	(pointerArray, '_lt',	d_array_lt,	nil)
+	self addBinary	(pointerArray, '_ge',	d_array_ge,	nil)
+	self addBinary	(pointerArray, '_gt',	d_array_gt,	nil)
+//[cf]
+
+//[of]:addCharacter
+method addCharacter (	type	: *Type, 
+	values	: *ValueList)
+
+	self addBinary	(type, '_add',	d_char_add,	values)
+	self addBinary	(type, '_sub',	d_char_sub,	values)
+	self addBinary	(type, '_eq',	d_char_eq,	nil)
+	self addBinary	(type, '_ne',	d_char_ne,	nil)
+	self addBinary	(type, '_le',	d_char_le,	nil)
+	self addBinary	(type, '_lt',	d_char_lt,	nil)
+	self addBinary	(type, '_ge',	d_char_ge,	nil)
+	self addBinary	(type, '_gt',	d_char_gt,	nil)
+				
+	self addBinary	(type, '_assign_add',	d_char_assign_add,	nil)
+	self addBinary	(type, '_assign_sub',	d_char_assign_sub,	nil)
+	self addUnary	(type, '_assign_inc',	d_char_assign_inc,	nil)
+	self addUnary	(type, '_assign_dec',	d_char_assign_dec,	nil)
+//[cf]
+//[of]:addNumeric
+method addNumeric (	type	: *Type, 
+	values	: *ValueList)
+
+	self addBinary	(type, '_add',	d_integer_add,	values)
+	self addBinary	(type, '_sub',	d_integer_sub,	values)
+	self addBinary	(type, '_mul',	d_integer_mul,	values)
+	self addBinary	(type, '_div',	d_integer_div,	values)
+	self addBinary	(type, '_mod',	d_integer_mod,	values)
+	self addBinary	(type, '_shl',	d_integer_shl,	values)
+	self addBinary	(type, '_shr',	d_integer_shr,	values)
+	self addBinary	(type, '_and',	d_integer_and,	values)
+	self addBinary	(type, '_or',	d_integer_or,	values)
+	self addBinary	(type, '_xor',	d_integer_xor,	values)
+	self addUnary	(type, '_add',	d_integer_pos,	values)
+	self addUnary	(type, '_sub',	d_integer_neg,	values)
+	self addUnary	(type, '_not',	d_integer_not,	values)
+	self addBinary	(type, '_eq',	d_integer_eq,	nil)
+	self addBinary	(type, '_ne',	d_integer_ne,	nil)
+	self addBinary	(type, '_le',	d_integer_le,	nil)
+	self addBinary	(type, '_lt',	d_integer_lt,	nil)
+	self addBinary	(type, '_ge',	d_integer_ge,	nil)
+	self addBinary	(type, '_gt',	d_integer_gt,	nil)
+
+	self addBinary	(type, '_assign_add',	d_integer_assign_add,	nil)
+	self addBinary	(type, '_assign_sub',	d_integer_assign_sub,	nil)
+	self addBinary	(type, '_assign_mul',	d_integer_assign_mul,	nil)
+	self addBinary	(type, '_assign_div',	d_integer_assign_div,	nil)
+	self addBinary	(type, '_assign_mod',	d_integer_assign_mod,	nil)
+	self addBinary	(type, '_assign_shl',	d_integer_assign_shl,	nil)
+	self addBinary	(type, '_assign_shr',	d_integer_assign_shr,	nil)
+	self addBinary	(type, '_assign_and',	d_integer_assign_and,	nil)
+	self addBinary	(type, '_assign_or',	d_integer_assign_or,	nil)
+	self addBinary	(type, '_assign_xor',	d_integer_assign_xor,	nil)
+	self addUnary	(type, '_assign_inc',	d_integer_assign_inc,	nil)
+	self addUnary	(type, '_assign_dec',	d_integer_assign_dec,	nil)
+//[cf]
+//[of]:addBinary
+method addBinary (	type	: *Type, 
+	name	: String8, 
+	code	: DefinitionCode, 
+	values	: *ValueList)
+
+	self addDefinition (	type, 
+		self pool new (	OperationDefinition, 
+			name, 
+			2:Size, 
+			code, 
+			values))
+//[cf]
+//[of]:addUnary
+method addUnary (	type	: *Type, 
+	name	: String8, 
+	code	: DefinitionCode, 
+	values	: *ValueList)
+
+	self addDefinition (	type, 
+		self pool new (	OperationDefinition, 
+			name, 
+			1:Size, 
+			code, 
+			values))
+//[cf]
+//[of]:addDefinition
+method addDefinition (type: *Type, definition: *Definition)
+
+	type addDefinition (self pool, definition)
+//[cf]
+//[of]:newValue
+method newValue (	type	: *Type, 
+	constant	: *Constant )
+
+	var pool	= self pool
+	var value	= pool new (	ExpressionValue, 
+			type, 
+			false, 
+			constant)
+	
+	return pool newValueListWithValue (value)
+//[cf]
+//[cf]
+//[cf]
+//[of]:Module
+//[of]:definition
+struct Module
+
+	attr program	: *Program	// The program
+	attr pool	: *MemoryPool	// Child objects are created in this pool
+	attr filename	: String	// The filename of the source code
+	attr loading	: Bool	// The module is being loaded (detect recursive inclusions)
+			
+	attr globalAliases	: AliasList	// The list of aliases (const)
+	attr globalVariables	: ModuleVariableList	// The list of global variables
+	attr globalFunctions	: DefinitionList	// The list of functions (regulars, generics, iterators)
+	attr globalStructures	: DefinitionList	// The list of structures (regulars and generics)
+	attr globalEnumerations	: DefinitionList	// The list of enumerations
+	attr globalExtensions	: ExtensionList	// The list of extensions
+	attr globalExternFunctions	: DefinitionList	// The list of extern functions
+	attr globalImports	: ImportList	// The list of imports
+			
+	attr definitions	: DefinitionDictionary	// Non contextual definitions
+	attr functions	: FunctionList	// The list of non generic functions
+	attr structures	: StructureTypeList	// The list of non generic structures
+	attr exportedDefinitions	: DefinitionList	// The list of all public definitions
+	attr importedModules	: ModuleList	// The list of all imports
+	
+	// Code Generator
+	attr generator	: Pointer	// Additional information initialized and used by the code generator
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+method initialize (program, filename)
+
+	self program	= program
+	self pool	= program pool
+	self filename	= filename
+	self loading	= false
+	self generator	= nil
+	
+	self globalAliases	initialize
+	self globalVariables	initialize
+	self globalFunctions	initialize
+	self globalStructures	initialize
+	self globalEnumerations	initialize
+	self globalExtensions	initialize
+	self globalExternFunctions	initialize
+	self globalImports	initialize
+		
+	self definitions	initialize (program pool, 1024)
+	self functions	initialize
+	self structures	initialize
+	self exportedDefinitions	initialize
+	self importedModules	initialize
+	
+	self initializeBuiltins
+//[cf]
+//[cf]
+//[of]:adding - removing
+//[of]:addGlobalAlias
+method addGlobalAlias (alias: *Alias)
+
+	self globalAliases add (self pool, alias)
+//[cf]
+//[of]:addGlobalVariables
+method addGlobalVariables (variables: *ModuleVariables)
+
+	self globalVariables add (self pool, variables)
+//[cf]
+//[of]:addGlobalFunction
+//[c]Adds a global definition. It can be a function, iterator or generic function.
+//[c]
+method addGlobalFunction (definition: *Definition)
+
+	self globalFunctions add (self pool, definition)
+//[cf]
+//[of]:addGlobalStructure
+//[c]Adds a global definition. It can be a function, iterator or generic function.
+//[c]
+method addGlobalStructure (definition: *Definition)
+
+	self globalStructures add (self pool, definition)
+//[cf]
+//[of]:addGlobalEnumeration
+//[c]Adds a global enumeration
+//[c]
+method addGlobalEnumeration (definition: *Definition)
+
+	self globalEnumerations add (self pool, definition)
+//[cf]
+//[of]:addGlobalExtension
+//[c]Adds an extension
+//[c]
+method addGlobalExtension (extension: *Extension)
+
+	self globalExtensions add (self pool, extension)
+//[cf]
+//[of]:addGlobalExternFunction
+//[c]Adds an extern function
+//[c]
+method addGlobalExternFunction (externFunction: *ExternFunction)
+
+	self globalExternFunctions add (self pool, externFunction)
+//[cf]
+//[of]:addGlobalImport
+//[c]Adds an import
+//[c]
+method addGlobalImport (imp: *Import)
+
+	self globalImports add (self pool, imp)
+//[cf]
+
+//[of]:addFunction
+method addFunction (func: *Function)
+
+	self functions add (self pool, func)
+//[cf]
+//[of]:addStructure
+method addStructure (structure: *StructureType)
+
+	self structures add (self pool, structure)
+//[cf]
+//[of]:addDefinition
+method addDefinition (definition: *Definition, visibility: Visibility)
+
+	var conflictingDefinition = self definitions add (definition)
+	if conflictingDefinition notNil
+		return conflictingDefinition
+	end
+	
+	if visibility == vis_public
+		self exportedDefinitions add (self pool, definition)
+	end
+	
+	return nil
+//[cf]
+//[of]:addImport
+method addImport (m: *Module)
+
+	self importedModules add (self pool, m)
+//[cf]
+//[cf]
+//[of]:enumerating
+//[of]:eachFunction
+method eachFunction
+
+	self functions each do f
+		yield f
+	end
+//[cf]
+//[of]:eachStructure
+method eachStructure
+
+	self structures each do s
+		yield s
+	end
+//[cf]
+//[of]:eachImport
+method eachImport
+
+	self globalImports each do i
+		yield i
+	end
+//[cf]
+//[of]:eachPublicDefinition
+method eachPublicDefinition
+
+	self exportedDefinitions each do d
+		yield d
+	end
+//[cf]
+
+//[of]:eachGlobalAlias
+method eachGlobalAlias
+
+	self globalAliases each do a
+		yield a
+	end
+//[cf]
+//[of]:eachGlobalVariables
+method eachGlobalVariables
+
+	self globalVariables each do v
+		yield v
+	end
+//[cf]
+//[of]:eachGlobalStructure
+method eachGlobalStructure
+
+	self globalStructures each do s
+		yield s
+	end
+//[cf]
+//[of]:eachGlobalEnumeration
+method eachGlobalEnumeration
+
+	self globalEnumerations each do e
+		yield e
+	end
+//[cf]
+//[of]:eachGlobalFunction
+method eachGlobalFunction
+
+	self globalFunctions each do f
+		yield f
+	end
+//[cf]
+//[of]:eachGlobalExternFunction
+method eachGlobalExternFunction
+
+	self globalExternFunctions each do d
+		yield d asExternFunction
+	end
+//[cf]
+//[of]:eachGlobalExtension
+method eachGlobalExtension
+
+	self globalExtensions each do e
+		yield e
+	end
+//[cf]
+//[cf]
+//[of]:searching
+//[of]:findDefinition
+method findDefinition (name: String8, argumentNumber: Size)
+
+	return self definitions findDefinition (name, argumentNumber)
+//[cf]
+//[cf]
+
+:private
+//[of]:utils
+//[of]:initializeBuiltins
+method initializeBuiltins
+
+	var definitions	= self definitions
+	var program	= self program
+	var pool	= self pool
+
+	// Builtin types
+	definitions add (pool new (TypeDefinition, nil, no_line_number, private_directives, program booleanType))
+	definitions add (pool new (TypeDefinition, nil, no_line_number, private_directives, program anyType))
+	definitions add (pool new (TypeDefinition, nil, no_line_number, private_directives, program char8Type))
+	definitions add (pool new (TypeDefinition, nil, no_line_number, private_directives, program char16Type))
+	definitions add (pool new (TypeDefinition, nil, no_line_number, private_directives, program int8Type))
+	definitions add (pool new (TypeDefinition, nil, no_line_number, private_directives, program int16Type))
+	definitions add (pool new (TypeDefinition, nil, no_line_number, private_directives, program int32Type))
+	definitions add (pool new (TypeDefinition, nil, no_line_number, private_directives, program int64Type))
+	definitions add (pool new (TypeDefinition, nil, no_line_number, private_directives, program uint8Type))
+	definitions add (pool new (TypeDefinition, nil, no_line_number, private_directives, program uint16Type))
+
+	var uint32 = pool new (TypeDefinition, nil, no_line_number, private_directives, program uint32Type)
+	var uint64 = pool new (TypeDefinition, nil, no_line_number, private_directives, program uint64Type)
+	definitions add (uint32)
+	definitions add (uint64)
+	
+	// Constants
+	definitions add (definition_true)
+	definitions add (definition_false)
+	definitions add (definition_nil)
+
+	definitions add (definition_typeof)
+
+	// 'Addr' alias
+	var target	= (pointer_size == 4) cond uint32 else uint64
+	var expression	= pool new (DefinitionExpression, nil, no_line_number, target name, empty_expression_list, nil)
+	expression definition = target
+	definitions add (pool new (Alias, nil, no_line_number, private_directives, tn_address, 0 s, expression))
+//[cf]
+//[cf]
+//[cf]
+//[of]:Extension
+//[of]:definition
+struct Extension
+
+	// Syntax Tree
+	attr typeExpression	: *Expression
+	attr functions	: *DefinitionList
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+method initialize (	typeExpression	: *Expression,
+	functions	: *DefinitionList)
+
+	self typeExpression	= typeExpression
+	self functions	= functions
+//[cf]
+//[cf]
+//[cf]
+//[of]:Import
+//[of]:definition
+struct Import : Location
+
+	// Syntax Tree
+	attr visibility	: Visibility
+	attr name	: String16
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+method initialize (	module	: *Module,
+	line	: LineNumber,
+	visibility	: Visibility,
+	name	: String16)
+
+	self module	= module
+	self line	= line
+	self visibility	= visibility
+	self name	= name
+//[cf]
+//[cf]
+//[cf]
+//[of]:ModuleVariables
+//[of]:definition
+struct ModuleVariables : Location
+
+	// Syntax Tree
+	attr variables	: *GlobalVariableList	// the list of variables
+	attr expressions	: *ExpressionList	// the list of values
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+method initialize (	module	: *Module,
+	line	: LineNumber,
+	variables	: *GlobalVariableList,
+	expressions	: *ExpressionList)
+
+	self module	= module
+	self line	= line
+	self variables	= variables
+	self expressions	= expressions
+//[cf]
+//[cf]
+//[of]:testing
+//[of]:used
+//[c]Returns true if one of the variable of the set is used
+//[c]
+method used
+
+	self variables each do v
+		if v used
+			return true
+		end
+	end
+	return false
+//[cf]
+//[cf]
+//[cf]
+
+//[of]:ArrayTypeDictionary
+//[of]:definition
+function hashArrayType (t: *ArrayType)
+
+	return t cellType hash + t arraySize : Hash
+
+function equalsArrayType (t1: *ArrayType, t2: *ArrayType)
+	
+	return t1 cellType == t2 cellType and t1 arraySize == t2 arraySize
+
+const ArrayTypeDictionary = Dictionary (	*ArrayType, *ArrayType, nil,
+	ref hashArrayType (*ArrayType),
+	ref equalsArrayType (*ArrayType, *ArrayType))
+//[cf]
+//[cf]
+//[of]:TypeFunctionDictionary
+//[of]:definition
+const FunctionTypeDictionary = Dictionary (	*FunctionType, *FunctionType, nil, 
+	ref hash (*FunctionType),
+	ref isEqual (*FunctionType, *FunctionType))
+//[cf]
+//[cf]
+//[of]:DefinitionDictionary
+//[of]:definition
+struct DefinitionDictionary
+
+	attr pool	: *MemoryPool
+	attr size	: Size
+	attr names	: *[] *NameHead
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+//[c]Initializes a new definition dictionary
+//[c]
+//[c]	This dictionary never free memory. It uses a fixed size hash array of
+//[c]	linked items.
+//[c]	
+//[c]	It is important to choose carefully the size of the dictionary.
+//[c]	* Global dictionaries should have a huge size (e.g 10000)
+//[c]	* Local dictionaries should have a small size (e.g. 1000)
+//[c]
+method initialize (pool: *MemoryPool, size: Size)
+
+	var names	= pool allocateArray (*NameHead, size)
+	
+	size each do i
+		names [i] = nil
+	end
+	
+	self size	= size
+	self names	= names
+	self pool	= pool
+//[cf]
+//[cf]
+//[of]:adding - removing
+//[of]:add
+//[c]Add a definition to the dictionary
+//[c]
+//[c]RETURN VALUE
+//[c]	nil if the definition is not conflicting with an existing definition.
+//[c]	Otherwise the conflicting definition is returned.
+//[c]
+method add (definition: *Definition)
+
+	var slot = definition name hash % self size
+	
+	// Search for a matching name
+	var head = self names [slot]
+	while head notNil
+		if head name isEqual (definition name)
+			break
+		end
+		head = head next
+	end
+	
+	// Not found: create a new head
+	if head isNil
+		head = self pool new (NameHead, definition name)
+		head next = self names [slot]
+		self names [slot] = head
+	end
+	
+	// Find a matching definition item
+	var item	= head first
+	var previous	= DefinitionItem nil
+	while item notNil
+		var itemDefinition = item definition
+		
+		if itemDefinition argumentNumber == definition argumentNumber
+			
+			// The definition is conflicting with this item
+			return itemDefinition
+			
+		elsif itemDefinition argumentNumber > definition argumentNumber
+			
+			// The definition must be inserted before this one
+			
+			// The definition can not have variable argument number as it would
+			// conflict with all following definitions
+			if definition variable
+				return itemDefinition
+			end
+			
+			// Create the definition item
+			break
+		
+		elsif itemDefinition variable
+		
+			// We can't append an item after this one as it allows
+			// additional arguments
+			return itemDefinition
+			
+		end
+			
+		previous = item
+		item = item next
+	end
+	
+	// Insert a new item before item and after previous
+	var newItem = self pool new (DefinitionItem,  definition)
+	newItem next = item
+	if previous notNil
+		previous next = newItem
+	else
+		head first = newItem
+	end
+
+	return nil
+//[cf]
+//[cf]
+//[of]:searching
+//[of]:findDefinition
+//[c]Find a definition
+//[c]
+method findDefinition (name: String8, argumentNumber: Size)
+
+	var slot = name hash % self size
+	
+	// Search for a matching name
+	var head = self names [slot]
+	while head notNil
+		if head name isEqual (name)
+			break
+		end
+		head = head next
+	end
+	// Not found
+	if head isNil
+		return nil
+	end
+	
+	// Find a matching definition item
+	var item = head first
+	while item notNil
+		var definition = item definition
+		
+		if definition argumentNumber > argumentNumber
+			
+			// We can stop here: all following items will have more arguments
+			break
+			
+		elsif definition argumentNumber == argumentNumber
+			
+			// The definition is conflicting with this item
+			return definition
+			
+		elsif definition variable
+		
+			// The definition has less arguments but accepts additional arguments
+			return definition
+			
+		end
+			
+		item = item next
+	end
+	
+	// Not found
+	return nil
+//[cf]
+//[cf]
+//[cf]
+//[of]:NameHead
+//[of]:definition
+//[c]The head of the list of all definitions having the same name.
+//[c]
+struct NameHead
+	
+	attr next	: *NameHead	// Next name
+	attr name	: String8	// The name of all definitions of this list
+	attr first	: *DefinitionItem	// The first item of the list
+//[cf]
+//[of]:initialize
+//[of]:initialize
+method initialize (name: String8)
+
+	self name	= name
+	self first	= nil
+//[cf]
+//[cf]
+//[cf]
+//[of]:DefinitionItem
+//[of]:definition
+struct DefinitionItem
+	
+	attr next	: *DefinitionItem
+	attr definition	: *Definition
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+method initialize (definition: *Definition)
+
+	self definition = definition
+//[cf]
+//[cf]
+//[cf]
+
+//[of]:Constants
+//[c]
+//[c]	If true, the compiler will build for 64 bit platform
+//[c]
+const target_platform_64	= false
+
+//[c]
+//[c]	Type Names
+//[c]
+const tn_any	= 'Anything'
+const tn_nil	= 'Nil'
+const tn_char8	= 'Char8'
+const tn_char16	= 'Char16'
+const tn_boolean	= 'Bool'
+const tn_int8	= 'Int8'
+const tn_int16	= 'Int16'
+const tn_int32	= 'Int32'
+const tn_int64	= 'Int64'
+const tn_uint8	= 'Unsigned8'
+const tn_uint16	= 'Unsigned16'
+const tn_uint32	= 'Unsigned32'
+const tn_uint64	= 'Unsigned64'
+const tn_enumeration	= 'Enum'
+const tn_address	= 'Addr'
+
+//[c]
+//[c]	Constants
+//[c]
+const constant_true	= BooleanConstant [c_boolean, true]
+const constant_false	= BooleanConstant [c_boolean, false]
+const constant_nil	= NilConstant [c_nil]
+
+//[c]
+//[c]	Definitions
+//[c]
+const meta_size	= Definition [nil, no_line_number, d_meta_size,	'size',	1, false,	false, public_directives]
+const meta_next	= Definition [nil, no_line_number, d_meta_next,	'next',	1, false,	false, public_directives]
+const meta_target	= Definition [nil, no_line_number, d_meta_target,	'target',	1, false,	false, public_directives]
+const meta_nil_definition	= Definition [nil, no_line_number, d_meta_nil,	'nil',	1, false,	false, public_directives]
+const meta_pointer	= Definition [nil, no_line_number, d_meta_pointer,	'_mul',	1, false,	false, public_directives]
+const meta_array_1	= Definition [nil, no_line_number, d_meta_array_1,	'_array',	1, false,	false, public_directives]
+const meta_array_2	= Definition [nil, no_line_number, d_meta_array_2,	'_array',	2, false,	false, public_directives]
+const meta_local	= Definition [nil, no_line_number, d_meta_local,	'_local',	1, false,	false, public_directives]
+const meta_cast	= Definition [nil, no_line_number, d_meta_cast,	'_cast',	2, false,	false, public_directives]
+const meta_initialize	= Definition [nil, no_line_number, d_meta_initialize,	'_at',	1, true,	false, public_directives]
+				
+const pointer_dereference	= Definition [nil, no_line_number, d_pointer_dereference,	'_at',	1, false,	false, public_directives]
+const pointer_super	= Definition [nil, no_line_number, d_pointer_super,	'super',	1, false,	false, public_directives]
+const pointer_call	= Definition [nil, no_line_number, d_pointer_call,	'call',	1, true,	false, public_directives]
+				
+const array_index_0	= Definition [nil, no_line_number, d_array_index_0,	'_at',	1, false,	false, public_directives]
+const array_index	= Definition [nil, no_line_number, d_array_index,	'_at',	2, false,	false, public_directives]
+const array_add	= Definition [nil, no_line_number, d_array_add,	'_add',	2, false,	false, public_directives]
+const array_sub	= Definition [nil, no_line_number, d_array_sub,	'_sub',	2, false,	false, public_directives]
+const array_assign_add	= Definition [nil, no_line_number, d_array_assign_add,	'_assign_add',	2, false,	false, public_directives]
+const array_assign_sub	= Definition [nil, no_line_number, d_array_assign_sub,	'_assign_sub',	2, false,	false, public_directives]
+const array_assign_inc	= Definition [nil, no_line_number, d_array_assign_inc,	'_assign_inc',	1, false,	false, public_directives]
+const array_assign_dec	= Definition [nil, no_line_number, d_array_assign_dec,	'_assign_dec',	1, false,	false, public_directives]
+				
+const definition_true	= Definition [nil, no_line_number, d_true,	'true',	0, false,	false, public_directives]
+const definition_false	= Definition [nil, no_line_number, d_false,	'false',	0, false,	false, public_directives]
+const definition_nil	= Definition [nil, no_line_number, d_nil,	'nil',	0, false,	false, public_directives]
+const definition_typeof	= Definition [nil, no_line_number, d_typeof,	'_type',	1, false,	false, public_directives]
+//[cf]
+//[cf]
+//[of]:Block
+//[of]:InlineBlock
+//[of]:definition
+struct InlineBlock
+
+	// Syntax Tree
+	attr parameters	: *IdList	// The arguments
+	attr instructions	: *Block	// The inline block (source used by yield)
+
+	// Iterator		
+	attr arguments	: *ArgumentList	// The list of arguments of the block (after the do)
+			
+	// Each extra		
+	attr eachExtraBlocks	: *BlockList	// The list of blocks for each extra argument
+
+	// Code Generator
+	attr generator	: Pointer	// Additional information initialized and used by the code generator
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+method initialize (	parameters	: *IdList,
+	instructions	: *Block )
+
+	self parameters	= parameters
+	self instructions	= instructions
+		
+	self arguments	= nil
+	self generator	= nil
+			
+	self eachExtraBlocks	= nil
+//[cf]
+//[cf]
+//[of]:enumerating
+//[of]:eachExtraBlock
+method eachExtraBlock
+
+	if self eachExtraBlocks notNil
+		self eachExtraBlocks each do b
+			yield b
+		end
+	end
+//[cf]
+//[cf]
+//[of]:copying
+//[of]:copy
+method copy (pool: *MemoryPool, parent: *Block)
+
+	if self isNil
+		return nil
+	end
+	
+	var instructions	= self instructions copy (pool, parent)
+	return pool new (InlineBlock, self parameters, instructions)
+//[cf]
+//[cf]
+//[cf]
+//[of]:Block
+//[of]:definition
+struct Block
+
+	// Syntax Tree
+	attr parent	: *Block	// The parent block or nil
+	attr instructions	: InstructionList	// The list of instructions of the block
+	
+	// Builder
+	attr broken	: Bool	// Unconditional call to something we can't define yet
+	attr partial	: Bool	// The block is not completely defined (a block is partial if any child block is partial)
+	attr terminated	: Bool	// The block always perform a return
+	attr couldBeTerminated	: Bool	// If false, the block will never be terminated
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+method initialize (parent: *Block)
+
+	self parent	= parent
+	self instructions initialize
+	
+	self broken	= false
+	self partial	= false
+	self terminated	= false
+	self couldBeTerminated	= false
+//[cf]
+//[cf]
+//[of]:accessing
+//[of]:setBroken
+method setBroken
+
+	self broken = true
+	
+	var block = self
+	while block notNil
+		block partial = true
+		block = block parent
+	end
+//[cf]
+//[cf]
+//[of]:enumerating
+//[of]:eachInstruction
+method eachInstruction
+
+	self instructions each do i
+		yield i
+	end
+//[cf]
+//[cf]
+//[of]:copying
+//[of]:copy
+//[c]Creates a copy of the block
+//[c]
+//[c]ARGUMENTS
+//[c]	pool	--	The copy will be stored in that memory pool
+//[c]	parent	--	The parent of the new block
+//[c]
+//[c]RETURN VALUES
+//[c]	A copy of the block with all child blocks attached to the given parent.
+//[c]
+method copy (pool: *MemoryPool, parent: *Block)
+
+	// Create the new block
+	var copy	= pool new (Block, parent)
+	
+	// Copy instructions
+	self eachInstruction do i
+		copy instructions add (pool, i copy (pool, copy))
+	end
+	
+	return copy
+//[cf]
+//[cf]
+//[cf]
+//[cf]
+//[of]:Instructions
+//[of]:InstructionCode
+enum InstructionCode
+
+	i_evaluate
+	i_assign
+	i_variable
+	i_return
+	i_while
+	i_switch
+	i_if
+	i_break
+	i_yield
+//[cf]
+//[of]:Instruction
+//[of]:definition
+//[c]Instruction - encode all kind of instructions found in source code
+//[c]
+struct Instruction : Location
+
+	attr code	: InstructionCode
+
+	// Code Generator
+	attr generator	: Pointer	// Additional information initialized and used by the code generator
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+method initialize (	module	: *Module,
+	line	: LineNumber,
+	code	: InstructionCode )
+
+	self module	= module
+	self line	= line
+	self code	= code
+	self generator	= nil
+//[cf]
+//[cf]
+//[of]:copying
+//[of]:copy
+method copy (pool: *MemoryPool, parent: *Block)
+
+	switch self code
+	case i_evaluate
+		return copy (self : *EvaluateInstruction, pool, parent) : *Instruction
+	case i_assign
+		return copy (self : *AssignInstruction, pool, parent) : *Instruction
+	case i_variable
+		return copy (self : *VariableInstruction, pool, parent) : *Instruction
+	case i_return
+		return copy (self : *ReturnInstruction, pool, parent) : *Instruction
+	case i_while
+		return copy (self : *WhileInstruction, pool, parent) : *Instruction
+	case i_switch
+		return copy (self : *SwitchInstruction, pool, parent) : *Instruction
+	case i_if
+		return copy (self : *IfInstruction, pool, parent) : *Instruction
+	case i_break
+		return copy (self : *BreakInstruction, pool, parent) : *Instruction
+	else // i_yield
+		return copy (self : *YieldInstruction, pool, parent) : *Instruction
+	end
+//[cf]
+//[cf]
+//[of]:downcasting
+//[of]:asEvaluate
+method asEvaluate
+
+	return self : *EvaluateInstruction
+//[cf]
+//[of]:asAssign
+method asAssign
+
+	return self : *AssignInstruction
+//[cf]
+//[of]:asVariable
+method asVariable
+
+	return self : *VariableInstruction
+//[cf]
+//[of]:asIf
+method asIf
+
+	return self : *IfInstruction
+//[cf]
+//[of]:asWhile
+method asWhile
+
+	return self : *WhileInstruction
+//[cf]
+//[of]:asBreak
+method asBreak
+
+	return self : *BreakInstruction
+//[cf]
+//[of]:asReturn
+method asReturn
+
+	return self : *ReturnInstruction
+//[cf]
+//[of]:asSwitch
+method asSwitch
+
+	return self : *SwitchInstruction
+//[cf]
+//[of]:asYield
+method asYield
+
+	return self : *YieldInstruction
+//[cf]
+//[cf]
+//[cf]
+
+//[of]:EvaluateInstruction
+//[of]:definition
+struct EvaluateInstruction : Instruction
+
+	// Syntax Tree
+	attr values	: *ExpressionList	// The list of returned expressions
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+method initialize (	module	: *Module,
+	line	: LineNumber,
+	values	: *ExpressionList )
+
+	self super initialize (module, line, i_evaluate)
+	self values = values
+//[cf]
+//[cf]
+//[of]:copying
+//[of]:copy
+method copy (pool: *MemoryPool, parent: *Block)
+
+	var values = self values copy (pool, parent)
+	return pool new (EvaluateInstruction, self module, self line, values)
+//[cf]
+//[cf]
+//[cf]
+//[of]:AssignInstruction
+//[of]:definition
+struct AssignInstruction : Instruction
+
+	// Syntax Tree
+	attr leftValues	: *ExpressionList	// the list of left values
+	attr rightValues	: *ExpressionList	// the list of right values
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+method initialize (	module	: *Module,
+	line	: LineNumber,
+	leftValues	: *ExpressionList,
+	rightValues	: *ExpressionList )
+
+	self super initialize (module, line, i_assign)
+
+	self leftValues	= leftValues
+	self rightValues	= rightValues
+//[cf]
+//[cf]
+//[of]:copying
+//[of]:copy
+method copy (pool: *MemoryPool, parent: *Block)
+
+	var leftValues	= self leftValues copy (pool, parent)
+	var rightValues	= self rightValues copy (pool, parent)
+	return pool new (AssignInstruction, self module, self line, leftValues, rightValues)
+//[cf]
+//[cf]
+//[cf]
+//[of]:VariableInstruction
+//[of]:definition
+struct VariableInstruction : Instruction
+
+	// Syntax Tree
+	attr variables	: *VariableList	// the list of variables
+	attr expressions	: *ExpressionList	// the list of values
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+method initialize (	module	: *Module,
+	line	: LineNumber,
+	variables	: *VariableList,
+	expressions	: *ExpressionList )
+
+	self super initialize (module, line, i_variable)
+	
+	self variables	= variables
+	self expressions	= expressions
+//[cf]
+//[cf]
+//[of]:copying
+//[of]:copy
+method copy (pool: *MemoryPool, parent: *Block)
+
+	var variables	= self variables copy (pool, parent)
+	var expressions	= self expressions copy (pool, parent)
+	return pool new (VariableInstruction, self module, self line, variables, expressions)
+//[cf]
+//[cf]
+//[cf]
+//[of]:ReturnInstruction
+//[of]:definition
+struct ReturnInstruction : Instruction
+
+	// Syntax Tree
+	attr expressions	: *ExpressionList	// The list of returned expressions or nil if no expression
+	
+	// Builder
+	attr values	: *ValueList	// The list of returned values
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+method initialize (	module	: *Module,
+	line	: LineNumber,
+	expressions	: *ExpressionList )
+
+	self super initialize (module, line, i_return)
+	
+	self expressions	= expressions
+	self values	= nil
+//[cf]
+//[cf]
+//[of]:enumerating
+//[of]:eachExpression
+method eachExpression
+
+	if self expressions notNil
+		self expressions each do e
+			yield e
+		end
+	end
+//[cf]
+//[cf]
+//[of]:copying
+//[of]:copy
+method copy (pool: *MemoryPool, parent: *Block)
+
+	var expressions	= self expressions copy (pool, parent)
+	return pool new (ReturnInstruction, self module, self line, expressions)
+//[cf]
+//[cf]
+//[cf]
+//[of]:WhileInstruction
+//[of]:definition
+struct WhileInstruction : Instruction
+
+	// Syntax Tree
+	attr condition	: *Expression	// The repeat condition, nil for infinite loop
+	attr block	: *Block	// The block
+	
+	// Builder
+	attr hasBreak	: Bool	// True if at least one break inside the loop
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+method initialize (	module	: *Module,
+	line	: LineNumber,
+	condition	: *Expression,
+	block	: *Block )
+
+	self super initialize (module, line, i_while)
+	
+	self condition	= condition
+	self block	= block
+	self hasBreak	= false
+//[cf]
+//[cf]
+//[of]:copying
+//[of]:copy
+method copy (pool: *MemoryPool, parent: *Block)
+
+	var condition	= self condition copy (pool, parent)
+	var block	= self block copy (pool, parent)
+	return pool new (WhileInstruction, self module, self line, condition, block)
+//[cf]
+//[cf]
+//[cf]
+//[of]:SwitchInstruction
+//[of]:definition
+struct SwitchInstruction : Instruction
+
+	// Syntax Tree
+	attr value	: *Expression	// The value to check
+	attr choices	: *ChoiceList	// The list of cases
+	
+	// Builder
+	attr terminated	: Bool	// True if the switch is terminated in all possible paths
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+method initialize (	module	: *Module,
+	line	: LineNumber,
+	value	: *Expression,
+	choices	: *ChoiceList )
+
+	self super initialize (module, line, i_switch)
+
+	self value	= value
+	self choices	= choices
+	self terminated	= false
+//[cf]
+//[cf]
+//[of]:enumerating
+//[of]:eachChoice
+method eachChoice
+
+	self choices each do c
+		yield c
+	end
+//[cf]
+//[cf]
+//[of]:copying
+//[of]:copy
+method copy (pool: *MemoryPool, parent: *Block)
+
+	var value	= self value copy (pool, parent)
+	var choices	= self choices copy (pool, parent)
+	return pool new (SwitchInstruction, self module, self line, value, choices)
+//[cf]
+//[cf]
+//[cf]
+//[of]:IfInstruction
+//[of]:definition
+struct IfInstruction : Instruction
+
+	// Syntax Tree
+	attr rules	: *RuleList	// The list of conditions/actions
+	
+	// Builder
+	attr terminated	: Bool	// True if the instruction is terminated in all paths
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+method initialize (	module	: *Module,
+	line	: LineNumber,
+	rules	: *RuleList )
+
+	self super initialize (module, line, i_if)
+	
+	self rules	= rules
+	self terminated	= false
+//[cf]
+//[cf]
+//[of]:enumerating
+//[of]:eachRule
+method eachRule
+
+	self rules each do r
+		yield r
+	end
+//[cf]
+//[cf]
+//[of]:copying
+//[of]:copy
+method copy (pool: *MemoryPool, parent: *Block)
+
+	var rules	= self rules copy (pool, parent)
+	return pool new (IfInstruction, self module, self line, rules)
+//[cf]
+//[cf]
+//[cf]
+//[of]:BreakInstruction
+//[of]:definition
+struct BreakInstruction : Instruction
+
+	// Builder
+	attr instruction	: *WhileInstruction
+	attr expression	: *DefinitionExpression
+	
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+method initialize (	module	: *Module,
+	line	: LineNumber )
+
+	self super initialize (module, line, i_break)
+	
+	self instruction	= nil
+	self expression	= nil
+//[cf]
+//[cf]
+//[of]:copying
+//[of]:copy
+method copy (pool: *MemoryPool, parent: *Block)
+
+	return pool new (BreakInstruction, self module, self line)
+//[cf]
+//[cf]
+//[cf]
+//[of]:YieldInstruction
+//[of]:definition
+struct YieldInstruction : Instruction
+
+	// Syntax Tree
+	attr arguments	: *ExpressionList	// The arguments of the yield: yield arg1, arg2, ...
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+method initialize (	module	: *Module,
+	line	: LineNumber,
+	arguments	: *ExpressionList )
+
+	self super initialize (module, line, i_yield)
+
+	self arguments	= arguments
+//[cf]
+//[cf]
+//[of]:copying
+//[of]:copy
+method copy (pool: *MemoryPool, parent: *Block)
+
+	var arguments	= self arguments copy (pool, parent)
+	return pool new (YieldInstruction, self module, self line, arguments)
+//[cf]
+//[cf]
+//[cf]
+
+//[of]:Rule
+//[of]:definition
+struct Rule
+
+	// Syntax Tree
+	attr condition	: *Expression	// Nil for else block
+	attr block	: *Block	
+	
+	// Code Generator
+	attr generator	: Pointer	// Additional information initialized and used by the code generator
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+method initialize (	condition	: *Expression,
+	block	: *Block )
+
+	self condition	= condition
+	self block	= block
+	self generator	= nil
+//[cf]
+//[cf]
+//[of]:copying
+//[of]:copy
+method copy (pool: *MemoryPool, parent: *Block)
+
+	var condition	= self condition copy (pool, parent)
+	var block	= self block copy (pool, parent)
+	return pool new (Rule, condition, block)
+//[cf]
+//[cf]
+//[cf]
+//[of]:Choice
+//[of]:definition
+struct Choice
+
+	// Syntax Tree
+	attr values	: *ExpressionList	// The list of case values - empty for else block
+	attr block	: *Block	// The block to evaluate for this case
+	
+	// Code Generator
+	attr generator	: Pointer	// Additional information initialized and used by the code generator
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+method initialize (	values	: *ExpressionList,
+	block	: *Block )
+
+	self values	= values
+	self block	= block
+	self generator	= nil
+//[cf]
+//[cf]
+//[of]:copying
+//[of]:copy
+method copy (pool: *MemoryPool, parent: *Block)
+
+	var values	= self values copy (pool, parent)
+	var block	= self block copy (pool, parent)
+	return pool new (Choice, values, block)
+//[cf]
+//[cf]
+//[cf]
+//[cf]
+//[of]:Expressions
+//[of]:ExpressionCode
+enum ExpressionCode
+
+	e_literal_char_8
+	e_literal_char_16
+	e_literal_string_8
+	e_literal_string_16
+	e_literal_integer
+	e_literal_boolean
+	e_definition
+	e_minimal_and
+	e_minimal_or
+	e_function_type
+	e_function
+	e_offset
+	e_cond
+//[cf]
+//[of]:Expression
+//[of]:definition
+//[c]Expression - encode all kind of expressions found in source code
+//[c]arithmetic expression, definitions, ...
+//[c]
+struct Expression : Location
+
+	// Syntax Tree
+	attr code	: ExpressionCode	// The implementation code
+	
+	// Builder
+	attr values	: *ValueList	// The values of the expression
+	
+	// Code Generator
+	attr generator	: Pointer	// Additional information initialized and used by the code generator
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+method initialize (	module	: *Module,
+	line	: LineNumber,
+	code	: ExpressionCode )
+
+	self module	= module
+	self line	= line
+	self code	= code
+	self values	= nil
+	self generator	= nil
+//[cf]
+//[cf]
+//[of]:accessing
+//[of]:constantType
+method constantType
+
+	return type (self firstValue type : *MetaType)
+//[cf]
+//[of]:firstValue
+method firstValue
+
+	return self values [0]
+//[cf]
+//[of]:secondValue
+method secondValue
+
+	return self values [1]
+//[cf]
+//[cf]
+//[of]:testing
+//[of]:isBoolean
+//[c]Returns true if the expression evaluates to a single boolean value
+//[c]
+method isBoolean
+
+	var values = self values
+	
+	if values size <> 1
+		return false
+	end
+	
+	var firstValue = values [0]
+	return firstValue type isBoolean
+//[cf]
+//[cf]
+//[of]:copying
+//[of]:copy
+method copy (pool: *MemoryPool, parent: *Block)
+
+	// The copy of a nil expression is nil
+	if self isNil
+		return self
+	end
+
+	switch self code
+	case e_literal_char_8
+		return copy (self : *IntegerExpression, pool, parent) : *Expression
+	case e_literal_char_16
+		return copy (self : *IntegerExpression, pool, parent) : *Expression
+	case e_literal_string_8
+		return copy (self : *String8Expression, pool, parent) : *Expression
+	case e_literal_string_16
+		return copy (self : *String16Expression, pool, parent) : *Expression
+	case e_literal_integer
+		return copy (self : *IntegerExpression, pool, parent) : *Expression
+	case e_literal_boolean
+		return copy (self : *IntegerExpression, pool, parent) : *Expression
+	case e_definition
+		return copy (self : *DefinitionExpression, pool, parent) : *Expression
+	case e_minimal_and
+		return copy (self : *PairExpression, pool, parent) : *Expression
+	case e_minimal_or
+		return copy (self : *PairExpression, pool, parent) : *Expression
+	case e_function_type
+		return copy (self : *FunctionTypeExpression, pool, parent) : *Expression
+	case e_offset
+		return copy (self : *OffsetExpression, pool, parent) : *Expression
+	case e_cond
+		return copy (self : *CondExpression, pool, parent) : *Expression
+	else // e_function
+		return copy (self : *FunctionExpression, pool, parent) : *Expression
+	end
+//[cf]
+//[cf]
+//[of]:downcasting
+//[of]:asPair
+method asPair
+
+	return self : *PairExpression
+//[cf]
+//[of]:asDefinition
+method asDefinition
+
+	return self : *DefinitionExpression
+//[cf]
+//[of]:asFunction
+method asFunction
+
+	return self : *FunctionExpression
+//[cf]
+//[of]:asOffset
+method asOffset
+
+	return self : *OffsetExpression
+//[cf]
+//[of]:asCond
+method asCond
+
+	return self : *CondExpression
+//[cf]
+//[cf]
+//[cf]
+
+//[of]:DefinitionExpression
+//[of]:definition
+//[c]This object is used to store a call to a definition
+//[c]
+struct DefinitionExpression : Expression
+
+	// Syntax Tree
+	attr name	: String8
+	attr arguments	: *ExpressionList
+	attr inlineBlock	: *InlineBlock
+
+	// Builder		
+	attr definition	: *Definition
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+method initialize (	module	: *Module,
+	line	: LineNumber,
+	name	: String8,
+	arguments	: *ExpressionList,
+	inlineBlock	: *InlineBlock )
+
+	self super initialize (module, line, e_definition)
+	
+	self name	= name
+	self arguments	= arguments
+	self inlineBlock	= inlineBlock
+	self definition	= nil
+//[cf]
+//[cf]
+//[of]:accessing
+//[of]:argumentValues
+method argumentValues
+
+	return self arguments values
+//[cf]
+//[cf]
+//[of]:testing
+//[of]:isSignedOperation
+method isSignedOperation
+
+	// Get the type of the first argument
+	var value	= self arguments firstValue
+	var type	= value type
+	
+	// Check sign
+	return type isSigned
+//[cf]
+//[cf]
+//[of]:copying
+//[of]:copy
+method copy (pool: *MemoryPool, parent: *Block)
+
+	var arguments	= self arguments copy (pool, parent)
+	var inlineBlock	= self inlineBlock copy (pool, parent)
+	return pool new (DefinitionExpression, self module, self line, self name, arguments, inlineBlock)
+//[cf]
+//[cf]
+//[cf]
+//[of]:PairExpression
+//[of]:definition
+//[c]This object is used to store a call to a definition
+//[c]
+struct PairExpression : Expression
+
+	// Syntax Tree
+	attr first	: *Expression
+	attr second	: *Expression
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+method initialize (	module	: *Module,
+	line	: LineNumber,
+	code	: ExpressionCode,
+	first	: *Expression,
+	second	: *Expression )
+
+	self super initialize (module, line, code)
+
+	self first	= first
+	self second	= second
+//[cf]
+//[cf]
+//[of]:copying
+//[of]:copy
+method copy (pool: *MemoryPool, parent: *Block)
+
+	var first	= self first copy (pool, parent)
+	var second	= self second copy (pool, parent)
+	return pool new (PairExpression, self module, self line, self code, first, second)
+//[cf]
+//[cf]
+//[cf]
+//[of]:FunctionTypeExpression
+//[of]:definition
+//[c]This object is used to store a function type
+//[c]
+struct FunctionTypeExpression : Expression
+
+	// Syntax Tree
+	attr argumentExpressions	: *ExpressionList	// input values
+	attr returnTypeExpressions	: *ExpressionList	// output values
+	attr callingConvention	: CallingConvention	// default, cdecl or stdcall
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+method initialize (	module	: *Module,
+	line	: LineNumber,
+	callingConvention	: CallingConvention,
+	arguments	: *ExpressionList,
+	returnTypes	: *ExpressionList )
+
+	self super initialize (	module,
+		line,
+		e_function_type )
+	
+	self callingConvention	= callingConvention
+	self argumentExpressions	= arguments
+	self returnTypeExpressions	= returnTypes
+//[cf]
+//[cf]
+//[of]:copying
+//[of]:copy
+method copy (pool: *MemoryPool, parent: *Block)
+
+	var arguments	= self argumentExpressions copy (pool, parent)
+	var returnTypes	= self returnTypeExpressions copy (pool, parent)
+	return pool new (FunctionTypeExpression, self module, self line, self callingConvention, arguments, returnTypes)
+//[cf]
+//[cf]
+//[cf]
+//[of]:FunctionExpression
+//[of]:definition
+//[c]This object is used to store a reference to a function
+//[c]
+struct FunctionExpression : Expression
+
+	// Syntax Tree
+	attr name	: String8	// The name of the function
+	attr typeExpressions	: *ExpressionList	// The list of types
+	
+	// Builder
+	attr func	: *Definition	// Function or extern function
+	attr argumentValues	: *ValueList	// The signature (the values of arguments are metas, so it must be converted
+			// to find the function).
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+method initialize (	module	: *Module,
+	line	: LineNumber,
+	name	: String8,
+	types	: *ExpressionList )
+
+	self super initialize (	module,
+		line,
+		e_function )
+
+	self name	= name
+	self typeExpressions	= types
+	self func	= nil
+	self argumentValues	= nil
+//[cf]
+//[cf]
+//[of]:copying
+//[of]:copy
+method copy (pool: *MemoryPool, parent: *Block)
+
+	var types = self typeExpressions copy (pool, parent)
+	return pool new (FunctionExpression, self module, self line, self name, types)
+//[cf]
+//[cf]
+//[cf]
+//[of]:IntegerExpression
+//[of]:definition
+//[c]This object is used to store a literal integer
+//[c]
+struct IntegerExpression : Expression
+
+	// Syntax Tree
+	attr integer	: Unsigned64
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+method initialize (	module	: *Module,
+	line	: LineNumber,
+	code	: ExpressionCode,
+	integer	: Unsigned64 )
+
+	self super initialize (module, line, code)
+	self integer	= integer
+//[cf]
+//[cf]
+//[of]:copying
+//[of]:copy
+method copy (pool: *MemoryPool, parent: *Block)
+
+	return pool new (IntegerExpression, self module, self line, self code, self integer)
+//[cf]
+//[cf]
+//[cf]
+//[of]:String8Expression
+//[of]:definition
+//[c]This object is used to store a literal string
+//[c]
+struct String8Expression : Expression
+
+	// Syntax Tree
+	attr string	: String8
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+method initialize (	module	: *Module,
+	line	: LineNumber,
+	string	: String8)
+
+	self super initialize (module, line, e_literal_string_8)
+	self string	= string
+//[cf]
+//[cf]
+//[of]:copying
+//[of]:copy
+method copy (pool: *MemoryPool, parent: *Block)
+
+	return pool new (String8Expression, self module, self line, self string)
+//[cf]
+//[cf]
+//[cf]
+//[of]:String16Expression
+//[of]:definition
+//[c]This object is used to store a literal string
+//[c]
+struct String16Expression : Expression
+
+	// Syntax Tree
+	attr string	: String16
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+method initialize (	module	: *Module,
+	line	: LineNumber,
+	string	: String16)
+
+	self super initialize (module, line, e_literal_string_16)
+	self string	= string
+//[cf]
+//[cf]
+//[of]:copying
+//[of]:copy
+method copy (pool: *MemoryPool, parent: *Block)
+
+	return pool new (String16Expression, self module, self line, self string)
+//[cf]
+//[cf]
+//[cf]
+//[of]:OffsetExpression
+//[of]:definition
+//[c]This object is used to store a call to a definition
+//[c]
+struct OffsetExpression : Expression
+
+	// Syntax Tree
+	attr typeExpression	: *Expression
+	attr attributeName	: String8
+
+	// Builder
+	attr attribute	: *Attribute
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+method initialize (	module	: *Module,
+	line	: LineNumber,
+	typeExpression	: *Expression,
+	attributeName	: String8)
+
+	self super initialize (module, line, e_offset)
+	self typeExpression	= typeExpression
+	self attributeName	= attributeName
+//[cf]
+//[cf]
+//[of]:copying
+//[of]:copy
+method copy (pool: *MemoryPool, parent: *Block)
+
+	var typeExpression	= self typeExpression copy (pool, parent)
+	return pool new (OffsetExpression, self module, self line, typeExpression, self attributeName)
+//[cf]
+//[cf]
+//[cf]
+//[of]:CondExpression
+//[of]:definition
+struct CondExpression : Expression
+
+	// Syntax Tree
+	attr condition	: *Expression
+	attr first	: *ExpressionList
+	attr second	: *ExpressionList
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+method initialize (	module	: *Module,
+	line	: LineNumber,
+	condition	: *Expression,
+	first	: *ExpressionList,
+	second	: *ExpressionList )
+
+	self super initialize (module, line, e_cond)
+
+	self condition	= condition
+	self first	= first
+	self second	= second
+//[cf]
+//[cf]
+//[of]:copying
+//[of]:copy
+method copy (pool: *MemoryPool, parent: *Block)
+
+	var condition	= self condition copy (pool, parent)
+	var first	= self first copy (pool, parent)
+	var second	= self second copy (pool, parent)
+	return pool new (CondExpression, self module, self line, condition, first, second)
+//[cf]
+//[cf]
+//[cf]
+//[cf]
+//[of]:Values
+//[of]:ExpressionValue
+//[of]:definition
+struct ExpressionValue
+
+	attr type	: *Type	// The type of the value
+	attr lvalue	: Bool	// The value is a left-value
+	attr constant	: *Constant	// if the value can be evaluated at compile time, it is stored here
+			// depending on the type.
+			// * A type is always evaluated at compile time, the value is the type
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+method initialize (	type	: *Type,
+	lvalue	: Bool,
+	constant	: *Constant )
+
+	self type	= type
+	self lvalue	= lvalue
+	self constant	= constant
+//[cf]
+//[cf]
+//[of]:accessing
+//[of]:constantInteger
+method constantInteger
+
+	return self constant asInteger value
+//[cf]
+//[of]:constantType
+method constantType
+	
+	return self type asMeta type
+//[cf]
+//[of]:set
+method set (src: *ExpressionValue)
+
+	self type	= src type
+	self lvalue	= src lvalue
+	self constant	= src constant
+//[cf]
+//[cf]
+//[of]:testing
+//[of]:isMeta
+method isMeta
+
+	return self type isMeta
+//[cf]
+//[of]:isConstant
+//[c]Ensures that the expression is a constant
+//[c]
+method isConstant
+
+	// A constant expression has a value
+	return self constant notNil
+//[cf]
+//[of]:isLvalue
+method isLvalue
+
+	return self lvalue
+//[cf]
+//[of]:areConstants
+//[c]Returns true if all values are constants
+//[c]
+method areConstants (other: *ExpressionValue)
+
+	return self isConstant and other isConstant
+//[cf]
+//[cf]
+//[of]:comparing
+//[of]:constantEquals
+//[c]Compares the constant of two values
+//[c]
+//[c]	The values must be constants (it can be a type)
+//[c]
+method constantEquals (other: *ExpressionValue)
+
+	var t1 = self type
+	var t2 = other type
+	
+	if t1 code == t_meta
+		return t1 == t2
+	end
+	
+	return self constant isEqual (other constant)
+//[cf]
+//[cf]
+//[of]:copying
+//[of]:copy
+method copy (pool: *MemoryPool)
+
+	return pool new (	ExpressionValue, 
+		self type, 
+		self lvalue,
+		self constant)
+//[cf]
+//[cf]
+//[cf]
+//[of]:ValueList
+//[of]:constants
+const empty_values = ValueList [0]
+//[cf]
+//[of]:instance creation
+//[of]:newValueList
+function newValueList (	pool	: *MemoryPool,
+	size	: Size )
+
+	var bytes	= ValueList size + size *(*Expression) size
+	var self	= pool allocateArray (Byte, bytes) : *ValueList
+	
+	self initialize (size)
+	return self
+//[cf]
+//[of]:newValueListWithValue
+function newValueListWithValue (	pool	: *MemoryPool,
+	value	: *ExpressionValue )
+
+	var bytes	= ValueList size + (*ExpressionValue) size
+	var self	= pool allocateArray (Byte, bytes) : *ValueList
+	
+	self initializeWithValue (value)
+	return self
+//[cf]
+//[cf]
+//[of]:definition
+//[c]Signature - A signature is just a vector of types
+//[c]
+struct ValueList
+
+	attr size	: Size
+	attr array	: [] *ExpressionValue
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+method initialize (size: Size)
+
+	self size = size
+//[cf]
+//[of]:initializeWithValue
+method initializeWithValue (value: *ExpressionValue)
+
+	self size = 1
+	self set (0, value)
+//[cf]
+//[cf]
+//[of]:accessing
+//[of]:size
+//[c]See attributes
+//[c]
+
+//[cf]
+//[of]:setNew
+method setNew (	index	: Size, 
+	pool	: *MemoryPool,
+	type	: *Type,
+	lvalue	: Bool,
+	constant	: *Constant )
+
+	var value	= pool new (ExpressionValue, type, lvalue, constant)
+	self array [index] = value
+//[cf]
+//[of]:set
+method set (index: Size, value: *ExpressionValue)
+
+	self array [index] = value
+//[cf]
+//[of]:[]
+method _at (index: Size)
+
+	return self array [index]
+//[cf]
+//[cf]
+//[of]:testing
+//[of]:isEmpty
+method isEmpty
+
+	return self size == 0
+//[cf]
+//[of]:notEmpty
+method notEmpty
+
+	return self size <> 0
+//[cf]
+//[of]:areConstants
+//[c]Returns true if all values are constants
+//[c]
+method areConstants
+
+	self each do v
+		if not v isConstant
+			return false
+		end
+	end
+	return true
+//[cf]
+//[cf]
+//[of]:comparing
+//[of]:equals
+method equals (other: *ValueList)
+
+	var n = self size
+	if n <> other size
+		return false
+	end
+
+	n each do i
+		if self [i] type <> other [i] type
+			return false
+		end
+	end
+	
+	return true
+//[cf]
+//[of]:merge
+//[c]Merges the second list of values into the first one
+//[c]
+//[c]Returns false if types are not compatibles.
+//[c]
+method merge (other: *ValueList, program: *Program)
+
+	// PASS 1 - Test compatibility
+	//
+	// Do not alter the list of values if types are not compatibles
+	//
+	var n1 = self size
+	var n2 = other size
+	if n1 <> n2
+		return false
+	end
+
+	n1 each do i
+		if self [i] type common (other [i] type, program) isNil
+			return false
+		end
+	end
+	
+	// PASS 2 - Create signature
+	//
+	n1 each do i
+		var v1 = self [i]
+		var v2 = other [i]
+		v1 type	= v1 type common (v2 type, program)
+		v1 lvalue	= false
+		v1 constant	= nil
+	end
+	
+	return true
+//[cf]
+//[of]:match
+method match (arguments: *ArgumentList)
+
+	if self size <> arguments size
+		return false
+	end
+	
+	eachDual (self, arguments) do value, argument
+		var argumentType	= argument type
+		var valueType	= value type
+		if argument generalizable
+			if not valueType match (argumentType)
+				return false
+			end
+		else
+			if valueType <> argumentType
+				return false
+			end
+		end
+	end
+
+	return true
+//[cf]
+//[of]:matchInstance
+//[c]Tests if the list of values matches the argument list of an instanciated 
+//[c]function.
+//[c]
+//[c]REMARKS
+//[c]	This method differs from 'match' as generalizable arguments
+//[c]	are not checked:
+//[c]	* A generalizable argument is a argument where the type is specified in 
+//[c]	  the generic version
+//[c]	* The type may not match but could be mutated if it is a constant.
+//[c]	e.g.
+//[c]		f (x: Unsigned8, y)
+//[c]	would create a new instance for each
+//[c]		f (1, 2)
+//[c]	because the first argument is an Int32.
+//[c]
+method matchInstance (arguments: *ArgumentList)
+
+	if self size <> arguments size
+		return false
+	end
+	
+	eachDual (self, arguments) do value, argument
+		var argumentType	= argument type
+		var valueType	= value type
+		if argument generalizable
+			// Skip (see remarks above)
+		else
+			if valueType <> argumentType
+				return false
+			end
+		end
+	end
+
+	return true
+//[cf]
+//[of]:constantEquals
+//[c]Compare two list of values but skip the first value as it is the type
+//[c]
+//[c]This method is used to compare two constant structures or
+//[c]two constant arrays.
+//[c]
+method constantEquals (other: *ValueList)
+
+	var n = self size
+	if n <> other size
+		return false
+	end
+
+	var i = 1 s
+	while i < n
+		if not self [i] constant isEqual (other [i] constant)
+			return false
+		end
+		i ++
+	end
+	
+	return true
+//[cf]
+//[cf]
+//[of]:enumerating
+//[of]:each
+method each
+
+	self size each do i
+		yield self [i]
+	end
+//[cf]
+//[of]:eachType
+method eachType
+
+	self each do v
+		yield v type
+	end
+//[cf]
+//[cf]
+//[of]:output
+//[of]:addToStringBuffer
+method addToStringBuffer (s: *StringBuffer)
+
+	if self isEmpty
+		return
+	end
+	
+	s << $(
+	var comma = false
+	self eachType do type
+		if comma
+			s << ", "
+		end
+		comma = true
+		s << type
+	end
+	s << $)
+//[cf]
+//[of]:addConstantsToStringBuffer
+//[c]Add a list of constant values where the first value is the type 
+//[c]to the given string buffer.
+//[c]
+method addConstantsToStringBuffer (sb: *StringBuffer)
+
+	sb << $[
+	var comma = false
+	self each do v
+		if comma
+			sb << $,
+		end
+		if v constant notNil
+			sb << v constant
+			comma = true
+		end
+	end
+	sb << $]
+//[cf]
+//[cf]
+//[of]:copying
+//[of]:copy
+method copy (pool: *MemoryPool)
+
+	var copy = pool newValueList (self size)
+	var i = 0 s
+	self each do value
+		copy set (i, value copy (pool))
+		i ++
+	end
+	return copy
+//[cf]
+//[of]:duplicate
+//[c]Like copy but the values are no longer lvalues
+//[c]
+method duplicate (pool: *MemoryPool)
+
+	var n = self size
+	var returnValues	= pool newValueList (n)
+	n each do i
+		var value = self [i]
+		returnValues setNew (i, pool, value type, false, value constant)
+	end
+	return returnValues
+//[cf]
+//[cf]
+//[cf]
+//[of]:ValueList1
+//[of]:definition
+//[c]Signature - A signature is just a vector of types
+//[c]
+struct ValueList1 : ValueList
+
+	attr singleton	: [1] *ExpressionValue
+	attr value	: ExpressionValue
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+method initialize (	type	: *Type,
+	lvalue	: Bool,
+	constant	: *Constant )
+
+	var value = self value
+	self size	= 1
+	self array [0]	= value
+	value type	= type
+	value lvalue	= lvalue
+	value constant	= constant
+//[cf]
+//[cf]
+//[cf]
+//[cf]
+//[of]:Definitions
+//[of]:DefinitionCode
+enum DefinitionCode
+
+	d_generic_function	// generic function
+	d_generic_structure	// generic structure
+	d_alias	// constant
+	d_global_variable	// global variable
+	d_function	// function (not generic)
+	d_argument	// argument variable
+	d_variable_arguments	// represent the extra arguments
+	d_variable	// global / local variable
+	d_attribute	// structure attribute
+	d_parameter	// generic structure parameter
+	d_type	// named type
+	d_extern_function	// extern function
+	d_enumeration_value	// enumeration value
+	
+	// Builtins
+	d_true	// true
+	d_false	// false
+	d_nil	// nil
+	d_extra_size	// extra_size
+	d_each_extra	// each_extra
+	d_typeof	// #x
+	
+//[c]
+//[c]	Operations on types
+//[c]
+	d_meta_local	// {type}
+	d_meta_pointer	// *type
+	d_meta_size	// size (type)
+	d_meta_next	// next (type)
+	d_meta_target	// target (type)
+	d_meta_nil	// nil (type)
+	d_meta_cast	// value : type
+	d_meta_array_1	// [] type
+	d_meta_array_2	// [n] type
+	d_meta_initialize	// type [...]
+	
+//[c]
+//[c]	Operations on integers (signed, unsigned, 8, 16, 32 and 64 bits) and 
+//[c]	booleans
+//[c]
+	// Arithmetic operations
+	d_integer_add
+	d_integer_sub
+	d_integer_mul
+	d_integer_div
+	d_integer_mod
+	d_integer_neg
+	d_integer_pos
+	d_integer_shl
+	d_integer_shr
+	
+	// Logical operations
+	d_integer_and
+	d_integer_or
+	d_integer_xor
+	d_integer_not
+	
+	// Comparisons
+	d_integer_eq	// ==
+	d_integer_ne	// <>
+	d_integer_le	// <=
+	d_integer_lt	// <
+	d_integer_ge	// >=
+	d_integer_gt	// >
+
+	// Assign operations
+	d_integer_assign_add
+	d_integer_assign_sub
+	d_integer_assign_mul
+	d_integer_assign_div
+	d_integer_assign_mod
+	d_integer_assign_shl
+	d_integer_assign_shr
+	d_integer_assign_and
+	d_integer_assign_or
+	d_integer_assign_xor
+	d_integer_assign_inc
+	d_integer_assign_dec
+
+//[c]
+//[c]	Operations on chars
+//[c]
+	// Arithmetic operations
+	d_char_add
+	d_char_sub
+	
+	// Comparisons
+	d_char_eq	// ==
+	d_char_ne	// <>
+	d_char_le	// <=
+	d_char_lt	// <
+	d_char_ge	// >=
+	d_char_gt	// >
+	
+	// Assign operations
+	d_char_assign_add
+	d_char_assign_sub
+	d_char_assign_inc
+	d_char_assign_dec
+
+//[c]
+//[c]	Operations on booleans
+//[c]
+	d_boolean_and
+	d_boolean_or
+	d_boolean_eq
+	d_boolean_ne
+	d_boolean_not
+	
+	// Assign operations
+	d_boolean_assign_and
+	d_boolean_assign_or
+
+//[c]
+//[c]	Operations on pointers
+//[c]
+	d_pointer_eq	// p == q
+	d_pointer_ne	// p <> q
+	d_pointer_dereference	// p []
+	d_pointer_super	// super (p)
+	d_pointer_call	// call (p, ...) -- only function pointers
+	
+//[c]
+//[c]	Operations on pointers to arrays
+//[c]	
+	d_array_index
+	d_array_index_0
+	d_array_add
+	d_array_sub
+
+	// Comparisons
+	d_array_le	// <=
+	d_array_lt	// <
+	d_array_ge	// >=
+	d_array_gt	// >
+	
+	// Assign operations
+	d_array_assign_add
+	d_array_assign_sub
+	d_array_assign_inc
+	d_array_assign_dec
+//[c]
+//[c]	Operations on pointers to structures
+//[c]	
+	d_super	// access to parent structure
+//[cf]
+//[of]:Definition
+//[of]:definition
+//[c]The abstract base class for definitions
+//[c]
+//[c]	Each time there is an expression like this:
+//[c]		name (e1, e2, ..., en)
+//[c]		name
+//[c]	there must be in a scope a corresponding definition that describe how
+//[c]	to interpret this expression: it can be a builtin function, a variable, 
+//[c]	a function parameter, an attribute of a structure, a type, ...
+//[c]
+//[c]	Don't forget that:
+//[c]	* e1 name (e2, ..., en) is equivalent to name (e1, e2, ..., en)
+//[c]	* e1 _operator_ e2 is equivalent to _operator_ (e1, e2)
+//[c]	* _operator_ e1 is equivalent to _operator_ (e1)
+//[c]	So they also have a definition.
+//[c]		
+//[c]code
+//[c]	The code to identify the type of definition
+//[c]	(variable, function, builtin, ...)
+//[c]	
+//[c]Extra information for variables and functions are stored in a subclass
+//[c]of Definition. See Variable, Function, Attribute
+//[c]
+struct Definition : Location
+
+	attr code	: DefinitionCode	// The kind of definition (function, variable, argument, ...)
+	attr name	: String8	// The name of the definition
+	attr argumentNumber	: Size	// The number of arguments
+	attr variable	: Bool	// Extra arguments are permitted
+	attr used	: Bool	// the definition is used by something rooted. This flag is not used by all subclasses
+	attr directives	: *DirectiveSet	// The definition is public or private
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+method initialize (	name	: String8,
+	argumentNumber	: Size,
+	variable	: Bool,
+	code	: DefinitionCode,
+	directives	: *DirectiveSet,
+	module	: *Module,
+	line	: LineNumber )
+
+	self code	= code
+	self name	= name
+	self argumentNumber	= argumentNumber
+	self variable	= variable
+	self used	= false
+	self directives	= directives
+	self module	= module
+	self line	= line
+//[cf]
+//[of]:from
+method from (s: *Definition)
+
+	self code	= s code
+	self name	= s name
+	self argumentNumber	= s argumentNumber
+	self variable	= s variable
+	self file	= s file
+	self line	= s line
+//[cf]
+//[cf]
+//[of]:accessing
+//[of]:visibility
+method visibility
+
+	return self directives visibility
+//[cf]
+//[of]:namingConvention
+method namingConvention
+
+	return self directives namingConvention
+//[cf]
+//[of]:callingConvention
+method callingConvention
+
+	return self directives callingConvention
+//[cf]
+//[cf]
+//[of]:testing
+//[of]:isLvalue
+method isLvalue
+
+	return self code in (	d_variable,
+		d_attribute,
+		d_parameter)
+//[cf]
+//[of]:isFunction
+method isFunction
+
+	return self code == d_function
+//[cf]
+//[of]:isType
+method isType
+
+	return self code == d_type
+//[cf]
+//[of]:isPrivate
+method isPrivate
+
+	return self visibility == vis_private
+//[cf]
+//[cf]
+//[of]:using
+//[of]:use
+method use
+	
+	self used = true
+//[cf]
+//[cf]
+//[of]:downcasting
+//[of]:asPrototype
+method asPrototype
+
+	return self : *Prototype
+//[cf]
+//[of]:asFunction
+method asFunction
+
+	assert (self code == d_function, "Downcast failure: not a function")
+	return self : *Function
+//[cf]
+//[of]:asGenericFunction
+method asGenericFunction
+
+	assert (self code == d_generic_function, "Downcast failure: not a generic function")
+	return self : *GenericFunction
+//[cf]
+//[of]:asExternFunction
+method asExternFunction
+
+	assert (self code == d_extern_function, "Downcast failure: not an extern  function")
+	return self : *ExternFunction
+//[cf]
+
+//[of]:asAlias
+method asAlias
+
+	assert (self code == d_alias, "Downcast failure: not an alias")
+	return self : *Alias
+//[cf]
+//[of]:asGlobalVariable
+method asGlobalVariable
+
+	assert (self code == d_global_variable, "Downcast failure: not a global variable")
+	return self : *GlobalVariable
+//[cf]
+//[of]:asVariable
+method asVariable
+
+	assert (self code == d_variable, "Downcast failure: not a variable")
+	return self : *Variable
+//[cf]
+//[of]:asArgument
+method asArgument
+
+	assert (self code == d_argument, "Downcast failure: not an argument")
+	return self : *Argument
+//[cf]
+//[of]:asVariableArguments
+method asVariableArguments
+
+	assert (self code == d_variable_arguments, "Downcast failure: not variable arguments")
+	return self : *VariableArguments
+//[cf]
+//[of]:asAttribute
+method asAttribute
+
+	assert (self code == d_attribute, "Downcast failure: not an attribute")
+	return self : *Attribute
+//[cf]
+//[of]:asParameter
+method asParameter
+
+	assert (self code == d_parameter, "Downcast failure: not a parameter")
+	return self : *Parameter
+//[cf]
+//[of]:asEnumerationValue
+method asEnumerationValue
+
+	assert (self code == d_enumeration_value, "Downcast failure: not an enumeration value")
+	return self : *EnumerationValue
+//[cf]
+//[of]:asExtraDefinition
+method asExtraDefinition
+
+	return self : *ExtraDefinition
+//[cf]
+//[of]:asOperation
+method asOperation
+
+	return self : *OperationDefinition
+//[cf]
+
+//[of]:asTypeDefinition
+method asTypeDefinition
+
+	assert (self code == d_type, "Downcast failure: not a type definition")
+	return self : *TypeDefinition
+//[cf]
+//[of]:asGenericStructure
+method asGenericStructure
+
+	assert (self code == d_generic_structure, "Downcast failure: not a generic structure")
+	return self : *GenericStructureDefinition
+//[cf]
+//[cf]
+//[cf]
+
+//[of]:Prototype
+//[of]:definition
+//[c]Common part of intern functions and extern functions
+//[c]
+struct Prototype : Definition
+
+	// Builder
+	attr evaluating	: Bool	// the function is being defined
+	attr failed	: Bool	// the definition of the function has failed
+	attr returnValues	: *ValueList	// the signature of the function or nil if not known yet
+
+	// Code Generator
+	attr generator	: Pointer	// Additional information initialized and used by the code generator
+//[cf]
+//[cf]
+//[of]:Function
+//[of]:definition
+struct Function : Prototype
+
+	// Syntax Tree
+	attr arguments	: *ArgumentList	// The arguments
+	attr body	: *Block	// The body of the iterator
+	attr hasYield	: Bool	// The body contains one or more yield
+
+	// Builder
+	attr defined	: Bool	// The function is successfully defined
+	attr hasExit	: Bool	// The function has a return or call a function being evaluated (but not self)
+	attr structure	: *StructureType	// The structure for methods (nil for functions)
+	attr implicitType	: *Type	// There is an implicit argument
+	attr variableArguments	: *VariableArguments	// The definition for additionnal arguments or nil if no optional arguments
+	attr publicName	: String8	// The name for export - nil if not exported
+	attr returnNumber	: Size	// The number of explicit returns
+	attr blockValues	: *ValueList	// The signature of the block (computed from yields)
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+//[c]Creates a global function
+//[c]
+method initialize (	module	: *Module,
+	line	: LineNumber,
+	directives	: *DirectiveSet,
+	name	: String8,
+	arguments	: *ArgumentList,
+	body	: *Block,
+	hasYield	: Bool)
+
+	self super initialize (	name,	// name
+		arguments size,	// number of arguments
+		false,	// variable
+		d_function,	// code
+		directives,	// directives
+		module,	// module
+		line )	// line
+
+	self arguments	= arguments
+	self body	= body
+	self hasYield	= hasYield
+	self structure	= nil
+	self implicitType	= nil
+	self variableArguments	= nil
+	self defined	= false
+	self hasExit	= false
+	self publicName	= nil
+	self returnNumber	= 0
+	self blockValues	= nil
+		
+	self evaluating	= false
+	self failed	= false
+	self returnValues	= nil
+	self generator	= nil
+
+	// Register the function
+	module addFunction (self)
+//[cf]
+//[cf]
+//[of]:enumerating
+//[of]:eachArgument
+//[c]Enumerates all arguments with a name (i.e. excluding optional arguments)
+//[c]
+method eachArgument
+
+	self arguments each do a
+		yield a
+	end
+//[cf]
+//[of]:eachArgumentType
+method eachArgumentType
+
+	self eachArgument do a
+		yield a type
+	end
+//[cf]
+//[cf]
+//[of]:testing
+//[of]:match
+method match (values: *ValueList)
+
+	return values match (self arguments)
+//[cf]
+//[of]:partial
+method partial
+	
+	return self body partial
+//[cf]
+//[cf]
+//[of]:copying
+//[of]:copy
+method copy (pool: *MemoryPool)
+
+	var arguments	= self arguments copy (pool)
+	var body	= self body copy (pool, nil)
+	
+	return pool new (	Function, 
+		self module,
+		self line,
+		self directives,
+		self name,
+		arguments,
+		body,
+		self hasYield )
+//[cf]
+//[cf]
+//[of]:output
+//[of]:addToStringBuffer
+method addToStringBuffer (sb: *StringBuffer)
+
+	if self structure notNil
+		sb << self structure name
+		sb << $.
+	end
+	
+	sb << self name
+	sb << " ("
+	var comma = false
+	self eachArgument do argument
+		if comma
+			sb << ", "
+		end
+		comma = true
+		if argument type isNil
+			sb << $?
+		else
+			sb << argument type
+			if argument generalizable
+				sb << $+
+			end
+		end
+	end
+	sb << ") "
+	
+	if self returnValues isNil
+		sb << $?
+	else
+		sb << self returnValues
+	end
+//[cf]
+//[cf]
+//[cf]
+//[of]:GenericFunction
+//[of]:definition
+struct GenericFunction : Definition
+
+	// Syntax Tree
+	attr arguments	: *ArgumentList	// The list of arguments without 'self' and '...'
+	attr body	: *Block	// The body of the function
+	attr hasYield	: Bool	// The body contains one or more yield
+	
+	// Builder
+	attr structure	: *StructureType	// The generic function is included in a structure (nil otherwise)
+	attr implicitType	: *Type	// There is an implicit argument
+	attr instances	: FunctionList	// The list of all functions instanciated from this generic function
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+//[c]Creates a global function
+//[c]
+method initialize (	module	: *Module,
+	line	: LineNumber,
+	directives	: *DirectiveSet,
+	name	: String8,
+	arguments	: *ArgumentList,
+	variable	: Bool,
+	body	: *Block,
+	hasYield	: Bool)
+
+	self super initialize (	name,	// name
+		arguments size,	// number of arguments
+		variable,	// variable
+		d_generic_function,	// code
+		directives,	// directives
+		module,	// module
+		line )	// line
+
+	self instances initialize
+	
+	self arguments	= arguments
+	self body	= body
+	self hasYield	= hasYield
+	self structure	= nil
+	self implicitType	= nil
+//[cf]
+//[cf]
+//[of]:adding - removing
+//[of]:addInstance
+method addInstance (pool: *MemoryPool, func: *Function)
+
+	self instances add (pool, func)
+//[cf]
+//[cf]
+//[of]:searching
+//[of]:findInstance
+method findInstance (values: *ValueList)
+
+	self instances each do f
+		if values matchInstance (f arguments)
+			return f
+		end
+	end
+
+	return nil
+//[cf]
+//[cf]
+//[of]:copying
+//[of]:copy
+method copy (pool: *MemoryPool)
+
+	return pool new (	GenericFunction, 
+		self module,
+		self line,
+		self directives,
+		self name,
+		self arguments,
+		self variable,
+		self body,
+		self hasYield )
+//[cf]
+//[cf]
+//[cf]
+//[of]:ExternFunction
+//[of]:definition
+struct ExternFunction : Prototype
+
+	// Syntax Tree
+	attr publicName	: String8	// The name in the imported module
+	attr argumentExpressions	: *ExpressionList	// The list of arguments as expressions
+	attr returnExpressions	: *ExpressionList	// The list of returned types as expressions
+	
+	// Builder
+	attr argumentTypes	: *TypeList	// The types of arguments
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+//[c]Creates an extern function
+//[c]
+method initialize (	module	: *Module,
+	line	: LineNumber,
+	directives	: *DirectiveSet,
+	publicName	: String8,
+	name	: String8,
+	arguments	: *ExpressionList,
+	returnTypes	: *ExpressionList )
+
+	self super initialize (	name,	// name
+		arguments size,	// number of arguments
+		false,	// variable
+		d_extern_function,	// code
+		directives,	// directives
+		module,	// module
+		line )	// line
+
+	self evaluating	= false
+	self failed	= false
+	self returnValues	= nil
+	self generator	= nil
+		
+	self publicName	= publicName
+	self argumentExpressions	= arguments
+	self returnExpressions	= returnTypes
+	self argumentTypes	= nil
+//[cf]
+//[cf]
+//[of]:enumerating
+//[of]:eachArgumentType
+method eachArgumentType
+
+	self argumentTypes each do t
+		yield t
+	end
+//[cf]
+//[cf]
+//[of]:output
+//[of]:addToStringBuffer
+method addToStringBuffer (sb: *StringBuffer)
+
+	sb << self name
+	sb << " ("
+	var argumentTypes = self argumentTypes
+	if argumentTypes isNil
+		sb << $?
+	else
+		var comma = false
+		self eachArgumentType do type
+			if comma
+				sb << ", "
+			end
+			comma = true
+			sb << type
+		end
+	end
+	sb << ")"
+	
+	var values = self returnValues
+	if values isNil
+		sb << " ?"
+	elsif values notEmpty
+		sb << \w
+		sb << values
+	end
+//[cf]
+//[cf]
+//[cf]
+
+//[of]:Alias
+//[of]:definition
+struct Alias : Definition
+
+	// Syntax Tree
+	attr expression	: *Expression	// The expression
+	
+	// Builder
+	attr evaluating	: Bool	// The function is being defined
+	attr failed	: Bool	// The definition of the alias has failed
+	attr values	: ValueList1	// The signature when evaluating this alias
+	attr structure	: *StructureType	// The structure for structure aliases
+	attr implicitType	: *Type	// There is an implicit argument
+	
+	// Code Generator
+	attr generator	: Pointer	// Additional information initialized and used by the code generator
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+method initialize (	module	: *Module,
+	line	: LineNumber,
+	directives	: *DirectiveSet,
+	name	: String8,
+	size	: Size,
+	expression	: *Expression )
+
+	self super initialize (	name,	// name
+		size,	// number of arguments
+		false,	// variable
+		d_alias,	// code
+		directives,	// directives
+		module,	// module
+		line )	// line
+
+	self values initialize (	nil,	// type
+		false,	// lvalue
+		nil )	// constant
+
+	self expression	= expression
+	self evaluating	= false
+	self failed	= false
+	self structure	= nil
+	self implicitType	= nil
+	self generator	= nil
+//[cf]
+//[cf]
+//[of]:accessing
+//[of]:setValue
+method setValue (value: *ExpressionValue)
+
+	self values value set (value)
+//[cf]
+//[cf]
+//[of]:copying
+//[of]:copy
+method copy (pool: *MemoryPool)
+
+	var expression	= self expression copy (pool, nil)
+	
+	return pool new (	Alias,
+		self module, 
+		self line, 
+		self directives,
+		self name, 
+		self argumentNumber,
+		expression )
+//[cf]
+//[cf]
+//[cf]
+//[of]:GlobalVariable
+//[of]:definition
+//[c]A local variable
+//[c]
+struct GlobalVariable : Definition
+
+	// Builder
+	attr values	: ValueList1	// The signature when evaluating this argument
+	
+	// Code Generator
+	attr generator	: Pointer	// Additional information initialized and used by the code generator
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+method initialize (	module	: *Module,
+	line	: LineNumber,
+	name	: String8,
+	directives	: *DirectiveSet)
+
+	self super initialize (	name,	// name
+		0,	// number of arguments
+		false,	// variable
+		d_global_variable,	// code
+		directives,	// directives
+		module,	// module
+		line )	// line
+
+	self values initialize (	nil,	// type
+		true,	// lvalue
+		nil )	// constant
+	
+	self generator	= nil
+//[cf]
+//[cf]
+//[of]:accessing
+//[of]:setType
+method setType (type: *Type)
+
+	self values value type = type
+//[cf]
+//[of]:type
+method type
+
+	return self values value type
+//[cf]
+//[cf]
+//[of]:copying
+//[of]:copy
+method copy (pool: *MemoryPool, parent: *Block)
+
+	return pool new (GlobalVariable, self module, self line, self name, self directives)
+//[cf]
+//[cf]
+//[cf]
+//[of]:Variable
+//[of]:definition
+//[c]A local variable
+//[c]
+struct Variable : Definition
+
+	// Builder
+	attr values	: ValueList1	// The signature when evaluating this argument
+	
+	// Code Generator
+	attr generator	: Pointer	// Additional information initialized and used by the code generator
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+method initialize (	module	: *Module,
+	line	: LineNumber,
+	name	: String8)
+
+	self super initialize (	name,	// name
+		0,	// number of arguments
+		false,	// variable
+		d_variable,	// code
+		private_directives,	// directives
+		module,	// module
+		line )	// line
+
+	self values initialize (	nil,	// type
+		true,	// lvalue
+		nil )	// constant
+	
+	self generator	= nil
+//[cf]
+//[cf]
+//[of]:accessing
+//[of]:setType
+method setType (type: *Type)
+
+	self values value type = type
+//[cf]
+//[of]:type
+method type
+
+	return self values value type
+//[cf]
+//[cf]
+//[of]:copying
+//[of]:copy
+method copy (pool: *MemoryPool, parent: *Block)
+
+	return pool new (Variable, self module, self line, self name)
+//[cf]
+//[cf]
+//[cf]
+//[of]:Argument
+//[of]:definition
+//[c]A function argument
+//[c]
+struct Argument : Definition
+
+	// Syntax Tree
+	attr typeExpression	: *Expression	// The type as expression, or nil
+	
+	// Builder
+	attr type	: *Type	// The type of the argument
+	attr values	: ValueList1	// The signature when evaluating this argument
+	attr generalizable	: Bool	// The argument can be generalized (it will accepts sub-types)
+	
+	// Code Generator
+	attr generator	: Pointer	// Additional information initialized and used by the code generator	
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+method initialize (	module	: *Module,
+	line	: LineNumber,
+	name	: String8,
+	typeExpression	: *Expression)
+
+
+	self super initialize (	name,	// name
+		0,	// number of arguments
+		false,	// variable
+		d_argument,	// code
+		private_directives,	// directives
+		module,	// module
+		line )	// line
+
+	self values initialize (	nil,	// type
+		false,	// lvalue
+		nil )	// constant
+
+	self typeExpression	= typeExpression
+	self type	= nil
+	self generalizable	= false
+	self generator	= nil
+//[cf]
+//[cf]
+//[of]:accessing
+//[of]:configure
+method configure (type: *Type, generalizable: Bool)
+
+	self type	= type
+	self generalizable	= generalizable
+	self values value type	= type
+//[cf]
+//[cf]
+//[of]:copying
+//[of]:copy
+method copy (pool: *MemoryPool)
+
+	var type	= self typeExpression copy (pool, nil)
+	
+	return pool new (	Argument,
+		self module, 
+		self line, 
+		self name, 
+		type )
+//[cf]
+//[cf]
+//[cf]
+//[of]:VariableArguments
+//[of]:definition
+//[c]The definition of '...'
+//[c]
+//[c]	This object is never created at the parser stage, it is created
+//[c]	only when the list of values for extra arguments are known.
+//[c]	
+struct VariableArguments : Definition
+
+	// Builder
+	attr returnArguments	: *ArgumentList	// The list of arguments (an anonymous argument is create for each extra value)
+	attr values	: *ValueList	// The signature when evaluating these variable arguments
+	attr extraSize	: ExtraDefinition	// The definition for 'extra_size'
+	attr eachExtra	: ExtraDefinition	// The definition for 'each_extra'
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+method initialize (	module	: *Module,
+	line	: LineNumber,
+	arguments	: *ArgumentList,
+	values	: *ValueList )
+
+	self super initialize (	'_varargs',	// name
+		0,	// number of arguments
+		false,	// variable
+		d_variable_arguments,	// code
+		private_directives,	// directives
+		module,	// module
+		line )	// line
+
+	self returnArguments	= arguments
+	self values	= values
+
+	self extraSize initialize (module, line, 'extra_size', d_extra_size, self)
+	self eachExtra initialize (module, line, 'each_extra', d_each_extra, self)
+//[cf]
+//[cf]
+//[of]:accessing
+//[of]:size
+//[c]Returns the number of arguments
+//[c]
+//[c]	i.e. the number of arguments substituted to '...'
+//[c]
+method size
+
+	return self values size
+//[cf]
+//[cf]
+//[of]:enumerating
+//[of]:eachArgument
+method eachArgument
+
+	self returnArguments each do a
+		yield a
+	end
+//[cf]
+//[cf]
+//[cf]
+//[of]:Attribute
+//[of]:definition
+struct Attribute : Definition
+
+	// Syntax Tree
+	attr typeExpression	: *Expression	// The expression of the type
+	attr structure	: *StructureType	// The structure of the attribute
+	
+	// Builder
+	attr storageType	: *Type	// The type of the attribute
+	attr offset	: Offset	// The offset of the attribute in the structure
+	attr values	: ValueList1	// The signature when evaluating this attribute
+	
+	// Code Generator
+	attr generator	: Pointer	// Additional information initialized and used by the code generator	
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+method initialize (	module	: *Module,
+	line	: LineNumber,
+	directives	: *DirectiveSet,
+	name	: String8,
+	type	: *Expression)
+
+	self super initialize (	name,	// name
+		1,	// number of arguments
+		false,	// variable
+		d_attribute,	// code
+		directives,	// directives
+		module,	// module
+		line )	// line
+
+	self values initialize (	nil,	// type
+		false,	// lvalue
+		nil )	// constant
+
+	self structure	= nil
+	self typeExpression	= type
+	self storageType	= nil
+	self generator	= nil
+//[cf]
+//[cf]
+//[of]:testing
+//[of]:isDefined
+method isDefined
+	
+	return self storageType notNil
+//[cf]
+//[cf]
+//[of]:accessing
+//[of]:setStructure
+method setStructure (structure: *StructureType)
+
+	self structure	= structure
+//[cf]
+//[of]:configure
+method configure (storageType: *Type, program: *Program)
+
+	self storageType	= storageType
+	self values value type	= program getEffectiveType (storageType)
+	self values value lvalue	= storageType isLvalue
+//[cf]
+//[cf]
+//[of]:copying
+//[of]:copy
+method copy (pool: *MemoryPool)
+
+	var type = self typeExpression copy (pool, nil)
+	return pool new (Attribute, self module, self line, self directives, self name, type)
+//[cf]
+//[cf]
+//[cf]
+//[of]:Parameter
+//[of]:definition
+//[c]An structure parameter
+//[c]
+struct Parameter : Definition
+
+	// Syntax Tree
+	attr structure	: *StructureType	// The structure of the parameter
+	
+	// Builder
+	attr values	: ValueList1	// The list of values when this parameter is evaluated
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+method initialize (	module	: *Module,
+	line	: LineNumber,
+	name	: String8,
+	value	: *ExpressionValue)
+
+	self super initialize (	name,	// name
+		0,	// number of arguments
+		false,	// variable
+		d_parameter,	// code
+		private_directives,	// directives
+		module,	// module
+		line )	// line
+
+	self values initialize (	value type,	// type
+		value lvalue,	// lvalue
+		value constant )	// constant
+
+	self structure	= nil
+//[cf]
+//[cf]
+//[of]:accessing
+//[of]:setStructure
+method setStructure (structure: *StructureType)
+
+	self structure = structure
+//[cf]
+//[cf]
+//[cf]
+//[of]:EnumerationValue
+//[of]:definition
+struct EnumerationValue : Definition
+
+	// Syntax Tree
+	attr expression	: *Expression	// The value expression or nil
+	attr enumeration	: *EnumerationType	// The enumeration
+	
+	// Builder
+	attr constant	: *IntegerConstant	// The signature when evaluating this enumeration value
+	
+	// Code Generator
+	attr generator	: Pointer	// Additional information initialized and used by the code generator	
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+method initialize (	module	: *Module,
+	line	: LineNumber,
+	directives	: *DirectiveSet,
+	name	: String8,
+	expression	: *Expression)
+
+	self super initialize (	name,	// name
+		0,	// number of arguments
+		false,	// variable
+		d_enumeration_value,	// code
+		directives,	// directives
+		module,	// module
+		line )	// line
+
+	self expression	= expression
+	self constant	= nil
+	self enumeration	= nil
+	self generator	= nil
+//[cf]
+//[cf]
+//[of]:accessing
+//[of]:setEnumeration
+method setEnumeration (enumeration: *EnumerationType)
+
+	self enumeration	= enumeration
+//[cf]
+//[of]:setConstant
+method setConstant (constant: *IntegerConstant)
+
+	self constant = constant
+//[cf]
+//[cf]
+//[cf]
+//[of]:ExtraDefinition
+//[of]:definition
+//[c]Common structure for 'extra_size' and 'each_extra'
+//[c]
+struct ExtraDefinition : Definition
+
+	attr variableArguments	: *VariableArguments
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+method initialize (	module	: *Module,
+	line	: LineNumber,
+	name	: String8, 
+	code	: DefinitionCode, 
+	variableArguments	: *VariableArguments)
+
+	self super initialize (	name,	// name
+		0,	// number of arguments
+		false,	// variable
+		code,	// code
+		private_directives,	// directives
+		module,	// module
+		line )	// line
+
+	self variableArguments	= variableArguments
+//[cf]
+//[cf]
+//[cf]
+//[of]:OperationDefinition
+//[of]:definition
+struct OperationDefinition : Definition
+
+	attr values : *ValueList
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+method initialize (	name	: String8,
+	argumentNumber	: Size, 
+	code	: DefinitionCode, 
+	values	: *ValueList)
+
+	self super initialize (	name,	// name
+		argumentNumber,	// number of arguments
+		false,	// variable
+		code,	// code
+		public_directives,	// visibility
+		nil,	// module
+		no_line_number )	// line
+
+	self values = values
+//[cf]
+//[cf]
+//[cf]
+
+//[of]:TypeDefinition
+//[of]:definition
+//[c]A type with a name
+//[c]
+struct TypeDefinition : Definition
+
+	attr type	: *NamedType	// The named type
+	attr values	: ValueList1	// The values when evaluating this definition
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+method initialize (	module	: *Module,
+	line	: LineNumber,
+	directives	: *DirectiveSet,
+	type	: *NamedType)
+
+	self super initialize (	type name,	// name
+		0,	// number of arguments
+		false,	// variable
+		d_type,	// code
+		directives,	// directives
+		module,	// module
+		line )	// line
+
+	self values initialize (	type meta,
+		false,
+		nil )
+	
+	self type	= type
+//[cf]
+//[cf]
+//[cf]
+//[of]:GenericStructureDefinition
+//[of]:definition
+struct GenericStructureDefinition : Definition
+
+	// Syntax Tree
+	attr parentExpression	: *Expression	// The parent expression or nil
+	attr parameters	: *IdList	// The name of parameters
+	attr attributes	: *AttributeList	// The list of attributes
+	attr functions	: *DefinitionList	// The list of functions (regulars, generics and iterators)
+	attr aliases	: *AliasList	// The list of aliases (const)
+
+	// Builder
+	attr instances	: StructureTypeList	// All instances of this generic structure
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+method initialize (	module	: *Module,
+	line	: LineNumber,
+	directives	: *DirectiveSet,
+	name	: String8,
+	parentExpression	: *Expression,
+	parameters	: *IdList,
+	attributes	: *AttributeList,
+	functions	: *DefinitionList,
+	aliases	: *AliasList)
+
+	self super initialize (	name,	// name
+		parameters size,	// number of arguments
+		false,	// variable
+		d_generic_structure,	// code
+		directives,	// directives
+		module,	// module
+		line )	// line
+
+	self instances initialize
+	
+	self parentExpression	= parentExpression
+	self parameters	= parameters
+	self attributes	= attributes
+	self functions	= functions
+	self aliases	= aliases
+//[cf]
+//[cf]
+//[of]:adding - removing
+//[of]:add
+method add (	pool	: *MemoryPool, 
+	structure	: *StructureType )
+
+	self instances add (pool, structure)
+//[cf]
+//[cf]
+//[of]:searching
+//[of]:findStructure
+//[c]Finds an existing structure
+//[c]
+method findStructure (values: *ValueList)
+
+	self instances each do s
+		// Compare the values of each expressions
+		if s matchParameters (values)
+			return s
+		end
+	end
+	return nil
+//[cf]
+//[cf]
+//[cf]
+//[cf]
+//[of]:Types
+//[of]:TypeCode
+enum TypeCode
+
+	t_meta
+	t_nil	// match with everything
+	t_any	// everything matches with any
+	
+	t_boolean
+	
+	t_char_8
+	t_char_16
+
+	t_integer_8
+	t_integer_16
+	t_integer_32
+	t_integer_64
+
+	t_unsigned_8
+	t_unsigned_16
+	t_unsigned_32
+	t_unsigned_64
+
+	t_enumeration
+	t_pointer
+	
+	t_structure
+	t_array
+	t_function
+//[cf]
+//[of]:Type
+//[of]:definition
+struct Type
+
+	attr code	: TypeCode	// The class of type
+	attr size	: Size	// The size of the type (-1 if undefined)
+	attr align	: Size	// The alignment constraint
+	attr parent	: *Type	// The parent type
+	attr meta	: *MetaType	// The meta type
+	attr pointerType	: *PointerType	// The pointer type to this type
+	attr definitions	: *DefinitionDictionary	// The contextual definitions
+	attr generator	: Pointer	// Additional information initialized and used by the code generator
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+method initialize (	parent	: *Type, 
+	code	: TypeCode, 
+	size	: Size,
+	align	: Size)
+
+	self code	= code
+	self size	= size
+	self align	= align
+	self parent	= parent
+	self meta	= nil
+	self pointerType	= nil
+	self definitions	= nil
+	self generator	= nil
+//[cf]
+//[cf]
+//[of]:accessing
+//[of]:hash
+method hash
+
+	return self : Addr : Hash
+//[cf]
+//[of]:setParent
+method setParent (parent: *Type, program: *Program)
+
+	// The parent is changed only once and is initialized to nil
+	// so setting it to nil is useless
+	if parent isNil
+		return
+	end
+
+	self parent = parent
+	
+	// The parent of the meta is the meta of the parent
+	if self meta notNil
+		self meta setParent (parent meta, program)
+	end
+
+	// The parent of the pointer is the pointer of the parent
+	if self pointerType notNil
+		self pointerType setParent (program getPointerType (parent), program)
+	end
+//[cf]
+//[cf]
+//[of]:testing
+//[of]:isLvalue
+method isLvalue
+
+	// A flag would be faster
+	var code = self code
+	return (
+		code == t_boolean	or
+		code == t_char_8	or
+		code == t_char_16	or
+		code == t_integer_8	or
+		code == t_integer_16	or
+		code == t_integer_32	or
+		code == t_integer_64	or
+		code == t_unsigned_8	or
+		code == t_unsigned_16	or
+		code == t_unsigned_32	or
+		code == t_unsigned_64	or
+		code == t_enumeration	or
+		code == t_pointer	)
+//[cf]
+//[of]:isBoolean
+method isBoolean
+
+	return self code == t_boolean
+//[cf]
+//[of]:isPointer
+method isPointer
+
+	return self code == t_pointer
+//[cf]
+//[of]:isStructure
+method isStructure
+
+	return self code == t_structure
+//[cf]
+//[of]:isArray
+method isArray
+
+	return self code == t_array
+//[cf]
+//[of]:isEnumeration
+method isEnumeration
+
+	return self code == t_enumeration
+//[cf]
+//[of]:isInteger
+//[c]Returns true if the type is an integer type (signed or unsigned)
+//[c]
+//[c]	Boolean is not an integer type.
+//[c]
+method isInteger
+
+	var code = self code
+	return (
+		code == t_integer_8 or
+		code == t_integer_16 or
+		code == t_integer_32 or
+		code == t_integer_64 or
+		code == t_unsigned_8 or
+		code == t_unsigned_16 or
+		code == t_unsigned_32 or
+		code == t_unsigned_64 or
+		code == t_enumeration )
+//[cf]
+//[of]:isChar
+//[c]Returns true if the type is a character type (signed or unsigned)
+//[c]
+method isChar
+
+	var code = self code
+	return (
+		code == t_char_8 or
+		code == t_char_16 )
+//[cf]
+//[of]:isIntegerOrChar
+method isIntegerOrChar
+
+	// A flag with mask would be faster
+	return self isInteger or self isChar
+//[cf]
+//[of]:isSigned
+//[c]Returns true if the type is a signed integer
+//[c]
+//[c]	* Return false for characters.
+//[c]	* Undefined for other types.
+//[c]
+method isSigned
+
+	var code = self code
+	if code == t_enumeration
+		code = self asEnumeration storageType code
+	end
+
+	return (
+		code == t_integer_8 or
+		code == t_integer_16 or
+		code == t_integer_32 or
+		code == t_integer_64 )
+//[cf]
+//[of]:isSimple
+method isSimple
+
+	// A flag would be faster
+	var code = self code
+	return (
+		code == t_boolean	or
+		code == t_char_8	or
+		code == t_char_16	or
+		code == t_integer_8	or
+		code == t_integer_16	or
+		code == t_integer_32	or
+		code == t_integer_64	or
+		code == t_unsigned_8	or
+		code == t_unsigned_16	or
+		code == t_unsigned_32	or
+		code == t_unsigned_64	or
+		code == t_enumeration	or
+		code == t_pointer	)
+//[cf]
+//[of]:isChar8
+method isChar8
+	
+	return self code == t_char_8
+//[cf]
+//[of]:isChar16
+method isChar16
+
+	return self code == t_char_16
+//[cf]
+//[of]:isMeta
+method isMeta
+
+	return self code == t_meta
+//[cf]
+//[of]:isFunction
+method isFunction
+
+	return self code == t_function
+//[cf]
+//[cf]
+//[of]:comparing
+//[of]:match
+//[c]Returns true if and only if 't1' is a kind of 't2'.
+//[c]
+method match (other : *Type)
+
+	if self code == t_nil
+		// Nil matches with everything
+		return true
+		
+	elsif self code == t_function and other code == t_function
+		// Special handling of function types
+		return self asFunction match (other asFunction)
+
+	elsif self isPointer and other isPointer
+		// Because of pointer to nil and function types
+		return self asPointer target match (other asPointer target)
+	end
+
+	var t = self
+	while t notNil
+		if t == other
+			return true
+		end
+		t = t parent
+	end
+	
+	return false
+//[cf]
+//[of]:common
+//[c]Returns the common ancestor or nil
+//[c]
+method common (other : *Type, program: *Program)
+
+	if self match (other)
+		return other
+	end
+	if other match (self)
+		return self
+	end
+		
+	switch self code
+	
+	///////////////////////////////////////////////////////////////////////
+	// pointer
+	///////////////////////////////////////////////////////////////////////
+	case t_pointer
+
+		// The other type must be also a reference
+		if other code <> t_pointer
+			return nil
+		end
+		
+		// Get the common type of referenced types
+		var t = self asPointer target common (other asPointer target, program)
+		if t isNil
+			return nil
+		end
+		
+		return program getPointerType (t)
+
+	///////////////////////////////////////////////////////////////////////
+	// structure
+	///////////////////////////////////////////////////////////////////////
+	case t_structure
+
+		if other code <> t_structure
+			return nil
+		end
+			
+		var t = other asStructure
+		while t notNil
+			if self match (t)
+				return t
+			end
+			t = t parentStructure
+		end
+		
+		return nil
+	
+	///////////////////////////////////////////////////////////////////////
+	// array
+	///////////////////////////////////////////////////////////////////////
+	case t_array
+
+		// The other type must also be an array
+		if other code <> t_array
+			return nil
+		end
+
+		// Cell types must be equals
+		if self asArray cellType <> other asArray cellType
+			return nil
+		end
+		
+		// The number of cells must be equal
+		var n1 = self asArray arraySize
+		var n2 = other asArray arraySize
+		if  n1 == n2
+			return self
+		elsif n1 <> 0
+			return self parent // common is [0] T
+		else // n2 <> 0
+			return other parent // common is [0] T
+		end
+
+	end
+	
+	return nil
+//[cf]
+//[cf]
+//[of]:downcasting
+//[of]:asPointer
+method asPointer
+
+	assert (self code == t_pointer, "Downcast failure: not a pointer")
+	return self : *PointerType
+//[cf]
+//[of]:asArray
+method asArray
+
+	assert (self code == t_array, "Downcast failure: not an array")
+	return self : *ArrayType
+//[cf]
+//[of]:asStructure
+method asStructure
+
+	assert (self code == t_structure, "Downcast failure: not a structure")
+	return self : *StructureType
+//[cf]
+//[of]:asEnumeration
+method asEnumeration
+
+	assert (self code == t_enumeration, "Downcast failure: not an enumeration")
+	return self : *EnumerationType
+//[cf]
+//[of]:asMeta
+method asMeta
+
+	assert (self code == t_meta, "Downcast failure: not a meta type")
+	return self : *MetaType
+//[cf]
+//[of]:asNamed
+method asNamed
+
+	return self : *NamedType
+//[cf]
+//[of]:asFunction
+method asFunction
+
+	assert (self code == t_function, "Downcast failure: not a function type")
+	return self : *FunctionType
+//[cf]
+//[cf]
+//[of]:adding - removing
+//[of]:addDefinition
+//[c]Add a contextual definition
+//[c]
+//[c]RETURN VALUE
+//[c]	nil if the definition is not conflicting with an existing definition.
+//[c]	Otherwise the conflicting definition is returned.
+//[c]
+method addDefinition (pool: *MemoryPool, definition: *Definition)
+
+	if self definitions isNil
+		self definitions = pool new (DefinitionDictionary, pool, 256 : Size)
+	end
+	
+	return self definitions add (definition)
+//[cf]
+//[cf]
+//[of]:searching
+//[of]:findDefinition
+//[c]Finds a contextual definition
+//[c]
+method findDefinition (name: String8, argumentNumber: Size)
+
+	if self definitions isNil
+		return nil
+	end
+	
+	return self definitions findDefinition (name, argumentNumber)
+//[cf]
+//[cf]
+//[of]:integers
+//[of]:checkIntegerLimits
+//[c]Check the limits of an integer according to the type
+//[c]
+//[c]	The type must be an integer type or a char type:
+//[c]		t char8
+//[c]		t char16
+//[c]		t_integer_8
+//[c]		t_integer_16
+//[c]		t_integer_32
+//[c]		t_integer_64
+//[c]		t_unsigned_8
+//[c]		t_unsigned_16
+//[c]		t_unsigned_32
+//[c]		t_unsigned_64
+//[c]		t_enumeration
+//[c]	
+//[c]	The number to check must have its signed extended to 64 bits.
+//[c]
+method checkIntegerLimits (n: Unsigned64)
+
+	var s = n : Int64
+
+	switch self code
+	case t_char_8
+		return n <= 255
+	case t_char_16
+		return n <= 65535
+	case t_integer_8
+		return s <= 127 and s >= -128
+	case t_integer_16
+		return s <= 32767 and s >= -32768
+	case t_integer_32
+		return s <= 2147483647 and s >= -2147483648
+	case t_unsigned_8
+		return n <= 255
+	case t_unsigned_16
+		return n <= 65535
+	case t_unsigned_32
+		return n <= 4294967295
+	end
+
+	// Signed or unsigned 64 bits
+	return true
+//[cf]
+//[of]:evaluateIntegerBinaryOperation
+//[c]
+//[c]	The type must be an integer type
+//[c]		t_integer_8
+//[c]		t_integer_16
+//[c]		t_integer_32
+//[c]		t_integer_64
+//[c]		t_unsigned_8
+//[c]		t_unsigned_16
+//[c]		t_unsigned_32
+//[c]		t_unsigned_64
+//[c]		t_enumeration
+//[c]	
+method evaluateIntegerBinaryOperation (left: Unsigned64, right: Unsigned64, op: DefinitionCode)
+
+	switch op
+	case d_integer_add
+		return left + right
+	case d_integer_sub
+		return left - right
+	case d_integer_and
+		return left & right
+	case d_integer_or
+		return left | right
+	case d_integer_xor
+		return left ^ right
+	case d_integer_mul
+		if self isSigned
+			return (left : Int64 * right : Int64) : Unsigned64
+		else
+			return left * right
+		end
+	case d_integer_div
+		if self isSigned
+			return (left : Int64 / right : Int64) : Unsigned64
+		else
+			return left / right
+		end
+	case d_integer_mod
+		if self isSigned
+			return (left : Int64 % right : Int64) : Unsigned64
+		else
+			return left % right
+		end
+	case d_integer_shl
+		return left << right : Unsigned8
+	case d_integer_shr
+		var code = self code
+		if code == t_enumeration
+			code = self asEnumeration storageType code
+		end
+		switch code
+		case t_integer_8
+			return (left : Int8 >> right : Unsigned8) : Unsigned64
+		case t_integer_16
+			return (left : Int16  >> right : Unsigned8) : Unsigned64
+		case t_integer_32
+			return (left : Int32 >> right : Unsigned8) : Unsigned64
+		case t_integer_64
+			return (left : Int64 >> right : Unsigned8) : Unsigned64
+		else
+			// all unsigned types
+			return left >> right : Unsigned8
+		end
+	end
+
+	// Unsupported operation
+	return 0 : Unsigned64
+//[cf]
+//[of]:evaluateIntegerBinaryComparison
+//[c]
+//[c]	The type must be an integer type
+//[c]		t_integer_8
+//[c]		t_integer_16
+//[c]		t_integer_32
+//[c]		t_integer_64
+//[c]		t_unsigned_8
+//[c]		t_unsigned_16
+//[c]		t_unsigned_32
+//[c]		t_unsigned_64
+//[c]		t_enumeration
+//[c]	
+method evaluateIntegerBinaryComparison (left: Unsigned64, right: Unsigned64, op: DefinitionCode)
+
+	switch op
+	case d_integer_eq
+		return left == right
+	case d_integer_ne
+		return left <> right
+	case d_integer_le
+		if self isSigned
+			return left : Int64 <= right : Int64
+		else
+			return left <= right
+		end
+	case d_integer_ge
+		if self isSigned
+			return left : Int64 >= right : Int64
+		else
+			return left >= right
+		end
+	case d_integer_lt
+		if self isSigned
+			return left : Int64 < right : Int64
+		else
+			return left < right
+		end
+	case d_integer_gt
+		if self isSigned
+			return left : Int64 > right : Int64
+		else
+			return left > right
+		end
+	end
+
+	// unsupported operation
+	return false
+//[cf]
+//[of]:evaluateIntegerUnaryOperation
+//[c]
+//[c]	The type must be an integer type
+//[c]		t_integer_8
+//[c]		t_integer_16
+//[c]		t_integer_32
+//[c]		t_integer_64
+//[c]		t_unsigned_8
+//[c]		t_unsigned_16
+//[c]		t_unsigned_32
+//[c]		t_unsigned_64
+//[c]		t_enumeration
+//[c]	
+method evaluateIntegerUnaryOperation (n: Unsigned64, op: DefinitionCode)
+
+	switch op
+	case d_integer_pos
+		return n
+	case d_integer_neg
+		return - n
+	case d_integer_not
+		var code = self code
+		if code == t_enumeration
+			code = self asEnumeration storageType code
+		end
+		
+		// Not must be perform carefully depending on the type:
+		// * invert only bits according to the size
+		// * extend the sign bit after operation
+		switch code
+		case t_integer_8
+			return (n ^ 255) : Int8 : Int64 : Unsigned64
+		case t_integer_16
+			return (n ^ 65535) : Int16 : Int64 : Unsigned64
+		case t_integer_32
+			return (n ^ 4294967295) : Int32 : Int64 : Unsigned64
+		case t_integer_64
+			return not n
+		case t_unsigned_8
+			return n ^ 255
+		case t_unsigned_16
+			return n ^ 65535
+		case t_unsigned_32
+			return n ^ 4294967295
+		case t_unsigned_64
+			return not n
+		end
+	end
+
+	// unsupported operation
+	return 0 : Unsigned64
+//[cf]
+//[cf]
+//[of]:chars
+//[of]:evaluateCharBinaryComparison
+//[c]
+//[c]	The type must be an integer type 
+//[c]		t_char_8
+//[c]		t_char_16
+//[c]	
+method evaluateCharBinaryComparison (left: Unsigned64, right: Unsigned64, op: DefinitionCode)
+
+	switch op
+	case d_char_eq
+		return left == right
+	case d_char_ne
+		return left <> right
+	case d_char_le
+		return left <= right
+	case d_char_ge
+		return left >= right
+	case d_char_lt
+		return left < right
+	case d_char_gt
+		return left > right
+	end
+
+	// unsupported operation
+	return false
+//[cf]
+//[cf]
+//[of]:output
+//[of]:addToStringBuffer
+method addToStringBuffer (stream: *StringBuffer)
+
+	switch self code
+
+	///////////////////////////////////////////////////////////////////////
+	// array
+	///////////////////////////////////////////////////////////////////////
+	case t_array
+		stream  << $[
+		if self asArray arraySize <> 0
+			stream << self asArray arraySize
+		end
+		stream << "] "
+		stream << self asArray cellType
+
+	///////////////////////////////////////////////////////////////////////
+	// pointer
+	///////////////////////////////////////////////////////////////////////
+	case t_pointer
+		var target = self asPointer target
+		if target code == t_function
+			stream << (target asFunction)
+		else
+			stream  << $*
+			stream << target
+		end
+		
+	///////////////////////////////////////////////////////////////////////
+	// meta
+	///////////////////////////////////////////////////////////////////////
+	case t_meta
+		stream << "Meta ("
+		stream << self asMeta type
+		stream << ")"
+
+	///////////////////////////////////////////////////////////////////////
+	// Structure
+	///////////////////////////////////////////////////////////////////////
+	case t_structure
+		var structure = self asStructure
+		
+		stream << structure name
+		
+		if structure hasParameters
+			stream << $(
+			var comma = false
+			structure eachParameter do parameter
+				if comma
+					stream << $,
+				end
+				comma = true
+				var value = parameter values [0]
+				if value type code == t_meta
+					stream << value type asMeta type
+				else
+					stream << value constant
+				end
+			end
+			stream << $)
+		end
+		
+	///////////////////////////////////////////////////////////////////////
+	// others
+	///////////////////////////////////////////////////////////////////////
+	case t_any,
+		t_nil,
+		t_boolean,
+		t_char_8,
+		t_char_16,
+		t_integer_8,
+		t_integer_16,
+		t_integer_32,
+		t_integer_64,
+		t_unsigned_8,
+		t_unsigned_16,
+		t_unsigned_32,
+		t_unsigned_64,
+		t_enumeration
+		
+		stream << self asNamed name
+	end
+	
+	return stream
+//[cf]
+//[cf]
+//[cf]
+
+//[of]:MetaType
+//[of]:definition
+//[c]Types are also expression with methods, so they also have
+//[c]a type: the meta type.
+//[c]
+struct MetaType: Type
+	
+	attr type	: *Type	// each type has a unique meta-type, so we can get the type from the meta-type
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+method initialize (type: *Type)
+
+	var parent = Type nil
+	if type parent notNil
+		parent = type parent meta
+	end
+
+	self super initialize (	parent,	// Parent
+		t_meta, 	// Code
+		undefined_size,	// Size
+		1)	// Align
+
+	self type	= type
+	type meta	= self
+//[cf]
+//[cf]
+//[cf]
+//[of]:NamedType
+//[of]:definition
+//[c]A type having a name
+//[c]
+//[c]	It is an abstract class
+//[c]
+//[c]	It can be 
+//[c]	- enumeration
+//[c]	- structure
+//[c]	- builtin
+//[c]
+struct NamedType : Type
+	
+	attr name	: String8	// name of the type
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+method initialize (	parent	: *Type, 
+	code	: TypeCode, 
+	size	: Size,
+	name	: String8)
+
+	self super initialize (	parent,	// Parent
+		code, 	// Code
+		size,	// Size
+		size)	// Align
+	
+	self name	= name
+//[cf]
+//[cf]
+//[cf]
+//[of]:BuiltinType
+//[of]:definitions
+struct BuiltinType : NamedType
+//[cf]
+//[cf]
+//[of]:PointerType
+//[of]:definition
+struct PointerType : Type
+
+	attr target	: *Type
+	attr peer	: MetaType
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+method initialize (	target	: *Type, 
+	parent	: *Type )
+
+	self super initialize (	parent,	// Parent
+		t_pointer, 	// Code
+		pointer_size,	// Size
+		pointer_size)	// Align
+	
+	self target	= target
+	self peer initialize (self)
+//[cf]
+//[cf]
+//[cf]
+//[of]:ArrayType
+//[of]:definition
+struct ArrayType: Type
+
+	attr cellType	: *Type	// type of cells
+	attr arraySize	: Size	// number of cells
+			
+	attr values	: ValueList1	// prevent re-creating signature of one pointer to this array type
+	attr peer	: MetaType	// stores the meta type here
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+method initialize (	cellType	: *Type, 
+	arraySize	: Size,
+	parent	: *Type,
+	program	: *Program )
+
+	var size	= undefined_size
+	if cellType size <> undefined_size
+		size = arraySize *cellType size
+	end
+	
+	self super initialize (	parent,	// Parent
+		t_array, 	// Code
+		size,	// Size
+		cellType align)	// Align
+		
+	self values initialize (	program getPointerType (self),	// type
+		false,	// lvalue
+		nil )	// constant
+	
+	self peer initialize (	self )
+
+	self cellType	= cellType
+	self arraySize	= arraySize
+//[cf]
+//[cf]
+//[cf]
+//[of]:FunctionType
+//[of]:definition
+struct FunctionType : Type
+
+	attr callingConvention	: CallingConvention	// Calling convention
+	attr types	: *TypeList	// The list of types
+	attr returnTypes	: *TypeList	// The list of returned types
+			
+	attr peer	: MetaType	// Stores the meta type here
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+method initialize (	callingConvention	: CallingConvention,
+	types	: *TypeList,
+	returnTypes	: *TypeList,
+	parent	: *Type)	// type any
+
+	self super initialize (	parent,	// Parent
+		t_function, 	// Code
+		undefined_size,	// Size
+		1)	// Align
+
+	self peer initialize (self)
+	
+	self callingConvention	= callingConvention
+	self types	= types
+	self returnTypes	= returnTypes
+//[cf]
+//[cf]
+//[of]:accessing
+//[of]:hash
+method hash
+
+	var h = 0 : Hash
+	self eachType do type
+		h += type hash
+	end
+	self eachReturnType do type
+		h += type hash
+	end
+	return h
+//[cf]
+//[cf]
+//[of]:enumerating
+//[of]:eachType
+method eachType
+	
+	self types each do t
+		yield t
+	end
+//[cf]
+//[of]:eachReturnType
+method eachReturnType
+
+	self returnTypes each do t
+		yield t
+	end
+//[cf]
+//[cf]
+//[of]:comparing
+//[of]:match
+method match (other: *FunctionType)
+
+	if self callingConvention <> other callingConvention
+		return false
+	end
+
+	var t2 = other types firstElement
+	self eachType do t1
+		if t2 isNil
+			return false
+		end
+		if not t1 match (t2 object)
+			return false
+		end
+		t2 = t2 nextSibling
+	end
+	if t2 notNil
+		return false
+	end
+	
+	t2 = other returnTypes firstElement
+	self eachReturnType do t1
+		if t2 isNil
+			return false
+		end
+		if not t1 match (t2 object)
+			return false
+		end
+		t2 = t2 nextSibling
+	end
+	if t2 notNil
+		return false
+	end
+	
+	return true
+//[cf]
+//[of]:isEqual
+//[c]Compares two function type
+//[c]
+//[c]REMARKS
+//[c]	This method must be used only before creating a final function type 
+//[c]	as types are always equals if and only if pointers are equals.
+//[c]
+method isEqual (other: *FunctionType)
+
+	if self callingConvention <> other callingConvention
+		return false
+	end
+	
+	var e = other types firstElement
+	self eachType do type
+		if e isNil
+			return false
+		end
+		if type <> e object
+			return false
+		end
+		e = e nextSibling
+	end
+	if e notNil
+		return false
+	end
+
+	e = other returnTypes firstElement
+	self eachReturnType do type
+		if e isNil
+			return false
+		end
+		if type <> e object
+			return false
+		end
+		e = e nextSibling
+	end
+	if e notNil
+		return false
+	end
+	
+	return true
+//[cf]
+//[cf]
+//[of]:output
+//[of]:addToStringBuffer
+method addToStringBuffer (stream: *StringBuffer)
+
+	stream << "Function"
+	switch self callingConvention
+	case cc_cdecl
+		stream << " .cdecl"
+	case cc_stdcall
+		stream << " .stdcall"
+	end
+	
+	if self types notEmpty
+		stream << " ("
+		var comma = false
+		self eachType do type
+			if comma
+				stream << ", "
+			end
+			comma = true
+			stream << type
+		end
+		stream << $)
+	end
+		
+	if self returnTypes notEmpty
+		stream << " -> ("
+		var comma = false
+		self eachReturnType do type
+			if comma
+				stream << ", "
+			end
+			comma = true
+			stream << type
+		end
+		stream << $)
+	end
+//[cf]
+//[cf]
+//[cf]
+//[of]:StructureType
+//[of]:definition
+struct StructureType : NamedType
+
+	// Syntax Tree
+	attr parentExpression	: *Expression	// The parent as expression
+	attr attributes	: *AttributeList	// The list of attributes
+	attr functions	: *DefinitionList	// The list of definitions
+	attr aliases	: *AliasList	// The list of aliases (const)
+	attr parameters	: *ParameterList	// The parameters when the structure is an instance of a generic structure (nil otherwise)
+	
+	// Builder
+	attr parentStructure	: *StructureType	// The parent structure or nil
+	attr definition	: TypeDefinition	// Prevents re-creating a definition on this structure on each request
+	attr defined	: Bool	// The structure is not defined yet
+	attr failed	: Bool	// The structure is not valid
+	attr evaluating	: Bool	// The structure is being defined (detect recursion)
+	attr peer	: MetaType	// Stores the meta type here
+	
+	// Code Generator
+	attr structureGenerator	: Pointer	// Additional information initialized and used by the code generator	
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+method initialize (	module	: *Module, 
+	line	: LineNumber,
+	program	: *Program,
+	directives	: *DirectiveSet,
+	name	: String8,
+	parentExpression	: *Expression,
+	attributes	: *AttributeList,
+	functions	: *DefinitionList,
+	aliases	: *AliasList,
+	parameters	: *ParameterList )
+
+	self super initialize (	program anyType,	// Parent
+		t_structure, 	// Code
+		undefined_size,	// Size
+		name )	// Name
+
+	self peer initialize (self)
+	
+	self definition initialize (	module,
+		line,
+		directives,
+		self )
+	
+	self parentExpression	= parentExpression
+	self attributes	= attributes
+	self functions	= functions
+	self aliases	= aliases
+	self parameters	= parameters
+		
+	self parentStructure	= nil
+	self defined	= false
+	self failed	= false
+	self evaluating	= false
+	self structureGenerator	= nil
+
+	// Assign the structure to all parameters
+	self eachParameter do parameter
+		parameter setStructure (self)
+	end
+
+	// Assign the structure to all attributes
+	self eachAttribute do attribute
+		attribute setStructure (self)
+	end
+
+	// Register the structure
+	module addStructure (self)
+//[cf]
+//[cf]
+//[of]:accessing
+//[of]:setParentStructure
+method setParentStructure (parent: *StructureType, program: *Program)
+
+	self parentStructure = parent
+	self setParent (parent, program)
+//[cf]
+//[cf]
+//[of]:enumerating
+//[of]:eachAttribute
+method eachAttribute
+
+	self attributes each do a
+		yield a
+	end
+//[cf]
+//[of]:eachFunction
+method eachFunction
+	
+	self functions each do d
+		yield d
+	end
+//[cf]
+//[of]:eachAlias
+method eachAlias
+	
+	self aliases each do a
+		yield a
+	end
+//[cf]
+//[of]:eachParameter
+method eachParameter
+
+	if self parameters notNil
+		self parameters each do p
+			yield p
+		end
+	end
+//[cf]
+//[cf]
+//[of]:testing
+//[of]:hasParameters
+method hasParameters
+
+	// There is never an empty list of parameters: if there is no
+	// parameter, this list is nil
+	return self parameters notNil
+//[cf]
+//[of]:matchParameters
+method matchParameters (values: *ValueList)
+
+	if self parameters size <> values size
+		return false
+	end
+	
+	eachDual (values, self parameters) do value, parameter
+		if not constantEquals (parameter values [0], value)
+			return false
+		end
+	end
+
+	return true
+//[cf]
+//[of]:hasRelease
+method hasRelease
+
+	return self release notNil
+//[cf]
+//[cf]
+//[of]:searching
+//[of]:findAttribute
+method findAttribute (name: String8)
+
+	self eachAttribute do a
+		if name isEqual (a name)
+			return a
+		end
+	end
+	return nil
+//[cf]
+//[cf]
+//[cf]
+//[of]:EnumerationType
+//[of]:definition
+struct EnumerationType : NamedType
+
+	// Syntax Tree
+	attr storageTypeExpression	: *Expression	// The type as expression (nil if not specified)
+	attr enumerationValues	: *EnumerationValueList	// The list of enumeration values
+	attr functions	: *DefinitionList	// The list of functions
+	attr definition	: TypeDefinition	// Prevent re-creating a definition on this structure on each request
+	
+	// Builder
+	attr storageType	: *Type	// The physical type
+	attr defined	: Bool	// The enumeration  is not defined yet
+	attr failed	: Bool	// The enumeration is not valid
+	attr evaluating	: Bool	// The enumeration is being defined (detect recursion)
+	attr peer	: MetaType	// Stores the meta type here
+	attr next	: Unsigned64	// The last value + 1
+//[cf]
+//[of]:initialize - release
+//[of]:initialize - release
+method initialize (	module	: *Module,
+	line	: LineNumber,
+	directives	: *DirectiveSet,
+	program	: *Program,
+	name	: String8,
+	typeExpression	: *Expression,
+	enumerationValues	: *EnumerationValueList,
+	functions	: *DefinitionList)
+
+	self super initialize (	program enumerationType,	// Parent
+		t_enumeration, 	// Code
+		undefined_size,	// Size
+		name )	// Name
+	
+	self peer initialize (self)
+	
+	self definition initialize (	module,
+		line,
+		directives,
+		self )
+	
+	self storageTypeExpression	= typeExpression
+	self enumerationValues	= enumerationValues
+	self functions	= functions
+	self defined	= false
+	self failed	= false
+	self evaluating	= false
+	self storageType	= nil
+	self next	= 0
+	
+	// Attach enumeration values
+	self eachEnumerationValue do i
+		i setEnumeration (self)
+	end
+//[cf]
+//[cf]
+//[of]:enumerating
+//[of]:eachEnumerationValue
+method eachEnumerationValue
+
+	self enumerationValues each do e
+		yield e
+	end
+//[cf]
+//[cf]
+//[of]:testing
+//[of]:isDefined
+method isDefined
+	
+	return self defined
+//[cf]
+//[cf]
+//[cf]
+
+//[of]:Constants
+const undefined_size	= -1:Size
+//[cf]
+//[cf]
+//[of]:Constants
+//[of]:ConstantCode
+enum ConstantCode
+
+	c_boolean
+	c_integer
+	c_string_8
+	c_string_16
+	c_structure
+	c_array
+	c_function
+	c_nil
+	c_uninitialized
+//[cf]
+//[of]:Constant
+//[of]:definition
+struct Constant
+
+	attr code	: ConstantCode
+//[cf]
+//[of]:downcasting
+//[of]:asBoolean
+method asBoolean
+
+	assert (self code == c_boolean, "Downcasting failure: not a boolean")	
+	return self : *BooleanConstant
+//[cf]
+//[of]:asInteger
+method asInteger
+	
+	assert (self code == c_integer, "Downcasting failure: not an integer")	
+	return self : *IntegerConstant
+//[cf]
+//[of]:asString8
+method asString8
+	
+	assert (self code == c_string_8, "Downcasting failure: not a string 8")	
+	return self : *String8Constant
+//[cf]
+//[of]:asString16
+method asString16
+	
+	assert (self code == c_string_16, "Downcasting failure: not a string 16")	
+	return self : *String16Constant
+//[cf]
+//[of]:asStructure
+method asStructure
+	
+	assert (self code == c_structure, "Downcasting failure: not a structure")	
+	return self : *StructureConstant
+//[cf]
+//[of]:asArray
+method asArray
+	
+	assert (self code == c_array, "Downcasting failure: not an array")	
+	return self : *ArrayConstant
+//[cf]
+//[of]:asFunction
+method asFunction
+	
+	assert (self code == c_function, "Downcasting failure: not a function")	
+	return self : *FunctionConstant
+//[cf]
+//[of]:asNil
+method asNil
+	
+	assert (self code == c_nil, "Downcasting failure: not a nil constant")	
+	return self : *NilConstant
+//[cf]
+//[of]:asUninitialized
+method asUninitialized
+
+	return self : *UninitializedConstant
+//[cf]
+//[cf]
+//[of]:output
+//[of]:addToStringBuffer
+method addToStringBuffer (sb: *StringBuffer)
+
+	switch self code
+	case c_boolean
+		sb << self asBoolean
+	case c_integer
+		sb << self asInteger
+	case c_string_8
+		sb << self asString8
+	case c_string_16
+		sb << self asString16
+	case c_structure
+		sb << self asStructure
+	case c_array
+		sb << self asArray
+	case c_function
+		sb << self asFunction
+	case c_nil
+		sb << self asNil
+	case c_uninitialized
+		sb << self asUninitialized
+	end
+//[cf]
+//[cf]
+//[of]:testing
+//[of]:isEqual
+method isEqual (other: *Constant)
+
+	if self code <> other code
+		return false
+	end
+	
+	switch self code
+	case c_boolean
+		return self asBoolean value == other asBoolean value
+	case c_integer
+		return self asInteger value == other asInteger value
+	case c_string_8
+		return self asString8 value isEqual (other asString8 value)
+	case c_string_16
+		return self asString16 value isEqual (other asString16 value)
+	case c_structure
+		return self asStructure isEqual (other asStructure)
+	case c_array
+		return self asArray isEqual (other asArray)
+	case c_function
+		return self asFunction value == other asFunction value
+	case c_nil
+		return true
+	case c_uninitialized
+		return self asUninitialized type == other asUninitialized type
+	end
+
+	// No match
+	return false
+//[cf]
+//[cf]
+//[cf]
+
+//[of]:BooleanConstant
+struct BooleanConstant : Constant
+
+	attr value	: Bool
+
+	method addToStringBuffer (sb: *StringBuffer)
+	
+		sb << (self value cond "true" else "false")
+//[cf]
+//[of]:IntegerConstant
+//[of]:definition
+struct IntegerConstant : Constant
+
+	attr value	: Unsigned64
+//[cf]
+//[of]:initialize
+//[of]:initialize
+method initialize (value: Unsigned64)
+
+	self code	= c_integer
+	self value	= value
+//[cf]
+//[cf]
+//[of]:accessing
+//[of]:unsignedValue
+method unsignedValue
+	
+	return self value : Unsigned
+//[cf]
+//[of]:hash
+method hash
+
+	return self value : Hash
+//[cf]
+//[cf]
+//[of]:output
+//[of]:addToStringBuffer
+method addToStringBuffer (sb: *StringBuffer)
+
+	sb << (self value : Unsigned)
+//[cf]
+//[cf]
+//[of]:testing
+//[of]:isEqual
+method isEqual (other: *IntegerConstant)
+
+	return self value == other value
+//[cf]
+//[cf]
+//[cf]
+//[of]:String8Constant
+//[of]:definition
+struct String8Constant : Constant
+
+	// Builder
+	attr value	: String8
+	
+	// Code Generator
+	attr next	: *String8Constant	// Next constant in program's list
+	attr generator	: Pointer	// Additional information initialized and used by the code generator
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+method initialize (program: *Program, value: String8)
+
+	self code	= c_string_8
+	self value	= value
+	self next	= program string8Constants
+	self generator	= nil
+
+	program string8Constants = self
+//[cf]
+//[cf]
+//[of]:output
+//[of]:addToStringBuffer
+method addToStringBuffer (sb: *StringBuffer)
+
+	sb << self value
+//[cf]
+//[cf]
+//[cf]
+//[of]:String16Constant
+//[of]:definition
+struct String16Constant : Constant
+
+	// Builder
+	attr value	: String16
+	
+	// Code Generator
+	attr next	: *String16Constant	// Next constant in program's list
+	attr generator	: Pointer	// Additional information initialized and used by the code generator
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+method initialize (program: *Program, value: String16)
+
+	self code	= c_string_16
+	self value	= value
+	self next	= program string16Constants
+	self generator	= nil
+
+	program string16Constants = self
+//[cf]
+//[cf]
+//[of]:output
+//[of]:addToStringBuffer
+method addToStringBuffer (sb: *StringBuffer)
+
+	sb << self value
+//[cf]
+//[cf]
+//[cf]
+//[of]:StructureConstant
+//[of]:definition
+struct StructureConstant : Constant
+
+	attr structure	: *StructureType	// The structure type
+	attr values	: *ValueList	// The first value is the structure  type
+	
+	// Code Generator
+	attr next	: *StructureConstant	// Next constant in program's list
+	attr generator	: Pointer	// Additional information initialized and used by the code generator
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+method initialize (	program	: *Program,
+	structure	: *StructureType, 
+	values	: *ValueList)
+
+	self code	= c_structure
+	self structure	= structure
+	self values	= values
+	self next	= program structureConstants
+	self generator	= nil
+
+	program structureConstants = self
+//[cf]
+//[cf]
+//[of]:output
+//[of]:addToStringBuffer
+method addToStringBuffer (sb: *StringBuffer)
+
+	sb << self structure
+	sb << \w
+	self values addConstantsToStringBuffer (sb)
+//[cf]
+//[cf]
+//[of]:testing
+//[of]:isEqual
+method isEqual (other: *StructureConstant)
+
+	if self structure <> other structure
+		return false
+	end
+
+	return self values constantEquals (other values)
+//[cf]
+//[cf]
+//[cf]
+//[of]:ArrayConstant
+//[of]:definition
+struct ArrayConstant : Constant
+
+	attr arrayType	: *ArrayType	// The type of each cell
+	attr values	: *ValueList	// The first value is the array type
+	
+	// Code Generator
+	attr next	: *ArrayConstant	// Next constant in program's list
+	attr generator	: Pointer	// Additional information initialized and used by the code generator
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+method initialize (	program	: *Program,
+	arrayType	: *ArrayType, 
+	values	: *ValueList)
+
+	self code	= c_array
+	self arrayType	= arrayType
+	self values	= values
+	self next	= program arrayConstants
+	self generator	= nil
+
+	program arrayConstants = self
+//[cf]
+//[cf]
+//[of]:output
+//[of]:addToStringBuffer
+method addToStringBuffer (sb: *StringBuffer)
+
+	sb << self arrayType
+	sb << \w
+	self values addConstantsToStringBuffer (sb)
+//[cf]
+//[cf]
+//[of]:testing
+//[of]:isEqual
+method isEqual (other: *ArrayConstant)
+
+	if self arrayType <> other arrayType
+		return false
+	end
+
+	return self values constantEquals (other values)
+//[cf]
+//[cf]
+//[cf]
+//[of]:FunctionConstant
+//[of]:definition
+struct FunctionConstant : Constant
+
+	attr value : *Prototype
+	
+	// Code Generator
+	attr next	: *FunctionConstant
+	attr generator	: Pointer	// Additional information initialized and used by the code generator
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+method initialize (program: *Program, value: *Prototype)
+
+	self code	= c_function
+	self value	= value
+	self next	= program functionConstants
+	self generator	= nil
+
+	program functionConstants = self
+//[cf]
+//[cf]
+//[of]:output
+//[of]:addToStringBuffer
+method addToStringBuffer (sb: *StringBuffer)
+
+	if self value code == d_function
+		sb << self value asFunction
+	else
+		sb << self value name
+	end
+//[cf]
+//[cf]
+//[cf]
+//[of]:NilConstant
+//[of]:definition
+struct NilConstant : Constant
+
+	method addToStringBuffer (sb: *StringBuffer)
+	
+		sb << "nil"
+//[cf]
+//[cf]
+//[of]:UninitializedConstant
+//[of]:definition
+//[c]An uninitialized constant is a global {T} expression.
+//[c]The address is a constant but the value is modifiable
+//[c](unlike StructureConstant or ArrayConstant).
+//[c]
+struct UninitializedConstant : Constant
+
+	attr type	: *Type
+	
+	// Code Generator
+	attr next	: *UninitializedConstant	// Next constant in program's list
+	attr generator	: Pointer	// Additional information initialized and used by the code generator
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+method initialize (program: *Program, type: *Type)
+
+	self code	= c_uninitialized
+	self type	= type
+	self next	= program uninitializedConstants
+	self generator	= nil
+	
+	program uninitializedConstants = self
+//[cf]
+//[cf]
+//[of]:output
+//[of]:addToStringBuffer
+method addToStringBuffer (sb: *StringBuffer)
+
+	sb << ${
+	sb << self type
+	sb << $}
+//[cf]
+//[cf]
+//[cf]
+//[cf]
+//[of]:Directives
+//[of]:DirectiveSet
+//[of]:definition
+const private_directives	= DirectiveSet [vis_private, nc_native, cc_default, false]
+const public_directives	= DirectiveSet [vis_public, nc_native, cc_default, false]
+
+struct DirectiveSet
+
+	attr visibility	: Visibility
+	attr namingConvention	: NamingConvention
+	attr callingConvention	: CallingConvention
+	attr entry	: Bool
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+method initialize
+
+	self visibility	= vis_public
+	self namingConvention	= nc_native
+	self callingConvention	= cc_default
+	self entry	= false
+//[cf]
+//[of]:initializeFrom
+method initializeFrom (src: *DirectiveSet)
+
+	self visibility	= src visibility
+	self namingConvention	= src namingConvention
+	self callingConvention	= src callingConvention
+	self entry	= src entry
+//[cf]
+//[cf]
+//[cf]
+//[of]:Visibility
+enum Visibility : Byte
+
+	vis_public
+	vis_private
+//[cf]
+//[of]:NamingConvention
+enum NamingConvention : Byte
+
+	nc_native
+	nc_c
+//[cf]
+//[cf]
+//[of]:Lists
+//[of]:ModuleList
+const ModuleList = Module CollectionPool
+//[cf]
+//[of]:ExtensionList
+const ExtensionList = Extension CollectionPool
+//[cf]
+//[of]:ImportList
+const ImportList = Import CollectionPool
+//[cf]
+//[of]:ModuleVariableList
+const ModuleVariableList = ModuleVariables CollectionPool
+//[cf]
+//[of]:DefinitionList
+const DefinitionList = Definition CollectionPool
+//[cf]
+//[of]:AliasList
+const AliasList = Alias CollectionPool
+//[cf]
+//[of]:FunctionList
+const FunctionList = Function CollectionPool
+//[cf]
+//[of]:BlockList
+const BlockList = Block CollectionPool
+//[cf]
+//[of]:RuleList
+const RuleList = Rule CollectionPool
+//[cf]
+//[of]:ChoiceList
+const ChoiceList = Choice CollectionPool
+//[cf]
+//[of]:InstructionList
+const InstructionList = Instruction CollectionPool
+//[cf]
+//[of]:ExpressionList
+//[of]:definition
+const empty_expression_list = ExpressionList [0, nil, nil, empty_values]
+
+struct ExpressionList : Expression CollectionPool
+
+	attr values	: *ValueList
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+method initialize
+	
+	self super initialize
+	self values = nil
+//[cf]
+//[cf]
+//[of]:computing
+//[of]:computeValues
+method computeValues (pool: *MemoryPool)
+
+	// Optimization 1 - if the list is empty, just return an empty list
+	if self size == 0
+		
+		if self <> empty_expression_list
+			self values = empty_values
+		end
+	
+	// Optimization 2 - if the list contains only one expression, just use its signature
+	elsif self size == 1
+	
+		self values = self first values
+	
+	else
+	
+		// Pass 1 - count number of values
+		var n = 0 s
+		self each do e
+			n += e values size
+		end
+		
+		// Create values
+		var values = pool newValueList (n)
+		
+		// Pass 2 - set types
+		var i = 0 s
+		self each do e
+			e values each do value
+				values set (i, value)
+				i ++
+			end
+		end
+	
+		self values = values
+	
+	end
+//[cf]
+//[cf]
+//[of]:accessing
+//[of]:second
+method second
+
+	var secondElement = self firstElement nextSibling
+	return secondElement object
+//[cf]
+//[of]:firstValue
+method firstValue
+
+	return self values [0]
+//[cf]
+//[of]:secondValue
+method secondValue
+
+	return self values [1]
+//[cf]
+//[cf]
+//[of]:enumerating
+//[of]:eachValue
+method eachValue
+
+	self values each do v
+		yield v
+	end
+//[cf]
+//[cf]
+//[of]:copying
+//[of]:copy
+method copy (pool: *MemoryPool, parent: *Block)
+
+	if self isNil
+		return nil
+	end
+	
+	var copy = pool new (ExpressionList)
+	self each do expression
+		copy add (pool, expression copy (pool, parent))
+	end
+	return copy
+//[cf]
+//[cf]
+//[cf]
+//[of]:ArgumentList
+const ArgumentList = Argument CollectionPool
+//[cf]
+//[of]:VariableList
+const VariableList = Variable CollectionPool
+//[cf]
+//[of]:GlobalVariableList
+const GlobalVariableList = GlobalVariable CollectionPool
+//[cf]
+//[of]:AttributeList
+const AttributeList = Attribute CollectionPool
+//[cf]
+//[of]:ParameterList
+const ParameterList = Parameter CollectionPool
+//[cf]
+//[of]:EnumerationValueList
+const EnumerationValueList = EnumerationValue CollectionPool
+//[cf]
+//[of]:StructureTypeList
+const StructureTypeList = StructureType CollectionPool
+//[cf]
+//[of]:TypeList
+const TypeList = Type CollectionPool
+//[cf]
+//[of]:IdList
+const IdList = Id CollectionPool
+//[cf]
+//[cf]
+//[of]:Utils
+//[of]:Id
+//[of]:definition
+struct Id : Location
+
+	attr name	: String8
+
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+method initialize (	module	: *Module,
+	line	: LineNumber,
+	name	: String8)
+
+	self module	= module
+	self line	= line
+	self name	= name
+//[cf]
+//[cf]
+//[cf]
+//[of]:Location
+//[of]:definition
+struct Location
+
+	attr module	: *Module
+	attr line	: LineNumber
+//[cf]
+//[cf]
+//[of]:CollectionPool
+//[of]:definition
+struct CollectionPool (T) : T CollectionPoolElement Collection
+//[cf]
+//[of]:adding - removing
+//[of]:add
+method add (pool: *MemoryPool, object: *T)
+
+	var element = pool new (T CollectionPoolElement, object)
+	self add (element)
+//[cf]
+//[of]:addFirst
+method addFirst (pool: *MemoryPool, object: *T)
+
+	var element = pool new (T CollectionPoolElement, object)
+	self addFirst (element)
+//[cf]
+//[of]:addNew
+//[c]Creates a new object and adds it to the collection
+//[c]
+//[c]ARGUMENTS
+//[c]	pool	-- the memory pool to store the element
+//[c]	...	-- all arguments to pass to the initializer of the object
+//[c]
+method addNew (pool: *MemoryPool, ...)
+
+	var object = pool new (T, ...)
+	self add (pool, object)
+	return object
+//[cf]
+//[cf]
+//[of]:enumerating
+//[of]:each
+method each
+
+	self super each do e
+		yield e object
+	end
+//[cf]
+//[cf]
+//[of]:accessing
+//[of]:first
+method first
+
+	var first = self firstElement
+	if first isNil
+		return nil
+	end
+	return first object
+//[cf]
+//[of]:element value
+method elementValue (element)
+
+	return element object
+//[cf]
+//[cf]
+//[of]:copying
+//[of]:copy
+method copy (pool: *MemoryPool, ...)
+
+	var copy = pool new (T CollectionPool)
+	self each do e
+		copy add (pool, copy (e, pool, ...))
+	end
+	return copy
+//[cf]
+//[cf]
+//[cf]
+//[of]:CollectionPoolElement
+//[of]:definition
+struct CollectionPoolElement (T) : T CollectionPoolElement CollectionElement
+
+	attr object	: *T
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+method initialize (object: *T)
+
+	self object = object
+//[cf]
+//[cf]
+//[cf]
+
+//[cf]
+
+.private
+//[of]:Imports
+import "target-\(target)"
+import "commons"
+import "core"
+//[cf]

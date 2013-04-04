@@ -1,0 +1,22 @@
+
+struct A
+	attr x	: Int32
+
+struct B : A
+
+struct C : A
+
+function f (x)
+
+	var y = nil (C)
+	if y <> nil
+	end
+	
+	if x > 1
+		return nil (Int32)
+	end
+	return nil
+
+function main
+
+	f (5)

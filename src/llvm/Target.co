@@ -1,0 +1,71 @@
+
+.c
+.cdecl
+
+// llvm-config
+//[c]#define LLVM_HOSTTRIPLE "i686-pc-win32"
+//[c]#define LLVM_MULTITHREADED 1
+//[c]#define LLVM_NATIVE_ARCH X86
+//[c]#define LLVM_NATIVE_TARGET LLVMInitializeX86Target
+//[c]#define LLVM_NATIVE_TARGETINFO LLVMInitializeX86TargetInfo
+//[c]#define LLVM_NATIVE_ASMPRINTER LLVMInitializeX86AsmPrinter
+//[c]#define LLVM_ON_WIN32 1
+//[c]#define LLVM_PREFIX "C:/Program Files/LLVM"
+
+//[c]enum LLVMByteOrdering { LLVMBigEndian, LLVMLittleEndian };
+//[c]
+//[c]typedef struct LLVMOpaqueTargetData *LLVMTargetDataRef;
+//[c]typedef struct LLVMStructLayout *LLVMStructLayoutRef;
+//[c]
+import function LLVMInitializeX86TargetInfo
+import function LLVMInitializeX86Target
+
+//[c]static inline void LLVMInitializeAllTargetInfos(void) {
+//[c]	LLVMInitializeX86TargetInfo();
+//[c]}
+//[c]
+//[c]static inline void LLVMInitializeAllTargets(void) {
+//[c]	LLVMInitializeX86Target();
+//[c]}
+  
+function LLVMInitializeNativeTarget
+	LLVMInitializeX86TargetInfo
+	LLVMInitializeX86Target
+	return 0
+
+//[c]LLVMTargetDataRef LLVMCreateTargetData(const char *StringRep);
+//[c]
+//[c]void LLVMAddTargetData(LLVMTargetDataRef, LLVMPassManagerRef);
+//[c]
+//[c]char *LLVMCopyStringRepOfTargetData(LLVMTargetDataRef);
+//[c]
+//[c]enum LLVMByteOrdering LLVMByteOrder(LLVMTargetDataRef);
+//[c]
+//[c]unsigned LLVMPointerSize(LLVMTargetDataRef);
+//[c]
+//[c]LLVMTypeRef LLVMIntPtrType(LLVMTargetDataRef);
+//[c]
+//[c]unsigned long long LLVMSizeOfTypeInBits(LLVMTargetDataRef, LLVMTypeRef);
+//[c]
+//[c]unsigned long long LLVMStoreSizeOfType(LLVMTargetDataRef, LLVMTypeRef);
+//[c]
+//[c]unsigned long long LLVMABISizeOfType(LLVMTargetDataRef, LLVMTypeRef);
+//[c]
+//[c]unsigned LLVMABIAlignmentOfType(LLVMTargetDataRef, LLVMTypeRef);
+//[c]
+//[c]unsigned LLVMCallFrameAlignmentOfType(LLVMTargetDataRef, LLVMTypeRef);
+//[c]
+//[c]unsigned LLVMPreferredAlignmentOfType(LLVMTargetDataRef, LLVMTypeRef);
+//[c]
+//[c]unsigned LLVMPreferredAlignmentOfGlobal(LLVMTargetDataRef, LLVMValueRef GlobalVar);
+//[c]
+//[c]unsigned LLVMElementAtOffset(LLVMTargetDataRef, LLVMTypeRef StructTy, unsigned long long Offset);
+//[c]
+//[c]unsigned long long LLVMOffsetOfElement(LLVMTargetDataRef, LLVMTypeRef StructTy, unsigned Element);
+//[c]
+//[c]void LLVMInvalidateStructLayout(LLVMTargetDataRef, LLVMTypeRef StructTy);
+//[c]
+//[c]void LLVMDisposeTargetData(LLVMTargetDataRef);
+
+.private
+import "Core"

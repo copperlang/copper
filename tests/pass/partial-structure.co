@@ -1,0 +1,12 @@
+//[c]This test define a structure with attributes that are never used
+//[c]
+
+function main
+	var a = {A}
+
+struct A
+	attr b : * B
+
+struct B
+	attr a : A
+	attr x : Int32

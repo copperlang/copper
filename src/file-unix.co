@@ -1,0 +1,476 @@
+//[of]:Primitives
+//[of]:constants
+const system_path_separator	= $/
+const system_new_line_sequence	= "\n"
+const system_invalid_file_size	= -1 : Size
+//[cf]
+//[of]:filename
+//[of]:systemNormalizedFilenameChar
+function systemNormalizedFilenameChar (c: Char)
+
+	return c
+//[cf]
+//[of]:systemConvertFullName
+function systemConvertFullName (filename: String)
+
+	var p = filename
+	repeat
+		var c = p []
+		if c isNul
+			break
+		elsif c == $\
+			p [] = $/
+		end
+		p ++
+	end
+//[cf]
+//[of]:systemFullName
+function systemFullName (filename: String, fullName: *StringBuffer)
+
+	var p = filename
+	if p[0] == $~ and (p[1] isNul or p[1] == $/)
+
+		var path = getenv ('HOME') fromFilename
+		fullName << path
+		path delete
+		p ++
+		
+	// Already a fully qualified name ?
+	elsif p[0] <> $/
+
+		var buf = {[1024] Char8}
+		if getcwd (buf, 1024 : Size) notNil
+			var path = buf fromFilename
+			fullName << path
+			path delete
+			fullName << $/
+		end
+
+	end
+
+	fullName << p
+	fullName normalize
+//[cf]
+//[of]:systemResolveFullName
+//[c]Prepends the filename with the directory if the filename is
+//[c]not fully qualified.
+//[c]
+//[c]* '/' are also replaced by native '\'
+//[c]* '.' and '..' are not resolved
+//[c]
+function systemResolveFullName (	directory	: String, 
+	filename	: String, 
+	fullName	: *StringBuffer)
+
+	// Already a fully qualified name ?
+	if filename [0] <> $/
+		fullName << directory << $/
+	end
+
+	fullName << filename
+	fullName normalize
+//[cf]
+//[of]:systemGetHomeDir
+function systemGetHomeDir (name: String, sb: *StringBuffer)
+
+	var home = getenv ('HOME') fromFilename
+	sb << home << $/ << $. << name
+	home delete
+//[cf]
+//[of]:systemGetFilePath
+function systemGetFilePath (filename: String, sb: *StringBuffer)
+
+	var occurrence = filename lastCharOccurrence ($/)
+	if occurrence notNil
+		sb addRange (filename, occurrence - filename)
+	end
+//[cf]
+//[of]file size:systemFileSize
+//[c]Returns the file size or 0xFFFFFFFF if an error occurs.
+//[c]
+function systemFileSize (filename: String)
+
+	var s = filename toFilename
+	var size = file_size (s)
+	s delete
+	return size
+//[cf]
+//[of]file last modification:systemFileLastModification
+//[c]Returns the last modification date
+//[c]
+//[c]ARGUMENTS
+//[c]	last modification	-- the structure to initialize with the file time
+//[c]	filename	-- the filename
+//[c]
+//[c]RETURNS
+//[c]	Returns false if the file does not exist
+//[c]
+function systemFileLastModification (	lastModification	: *SystemFileTime, 
+	filename	: String)
+
+	var s = filename toFilename
+	var result = file_last_modification (s)
+	s delete
+	if result == -1
+		lastModification long = 0
+		return
+	end
+	
+	lastModification long = result
+//[cf]
+//[cf]
+//[of]:testing
+//[of]:systemIsAbsolute
+function systemIsAbsolute (filename: String)
+
+	return	filename [0] == $/
+//[cf]
+//[of]file exists:systemFileExists
+function systemFileExists (filename: String)
+
+	var s = filename toFilename
+	var exists = file_exists (s) <> 0
+	s delete
+	return exists
+//[cf]
+//[of]is file read only:systemIsFileReadOnly
+function systemIsFileReadOnly (filename: String)
+
+	var s = filename toFilename
+	var ro = file_read_only (s) <> 0
+	s delete
+	return ro
+//[cf]
+//[of]is directory:systemIsDirectory
+function systemIsDirectory (filename: String)
+
+	var s = filename toFilename
+	var dir = file_is_directory (s) <> 0
+	s delete
+	return dir
+//[cf]
+//[of]is same file:systemIsSameFile
+function systemIsSameFile (fn1: String, fn2: String)
+
+	return fn1 isEqual (fn2)
+//[cf]
+//[cf]
+//[of]:directory
+//[of]:systemCreateDirectory
+//[c]Creates a new directory
+//[c]
+//[c]	Returns true if success
+//[c]
+function systemCreateDirectory (path: String)
+
+	var mode = ((7 << 6) | (5 << 3) | 5) : Mode
+	var s = path toFilename
+	var res = mkdir (s, mask (7, 5, 5))
+	s delete
+	return res == 0
+//[cf]
+//[cf]
+//[cf]
+//[of]:SystemFile
+//[of]:instance creation
+//[of]:systemOpenRead
+function systemOpenRead (filename: String)
+
+	var s = filename toFilename
+	var f = fopen (s, 'r')
+	s delete
+	if f isNil
+		return nil
+	end
+
+	return f
+//[cf]
+//[of]:systemOpenWrite
+function systemOpenWrite (filename: String)
+
+	var s = filename toFilename
+	var f = fopen (s, 'w')
+	s delete
+	if f isNil
+		return nil
+	end
+
+	return f
+//[cf]
+//[cf]
+//[of]:definition
+struct SystemFile
+
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+method initialize (handle: *FILE)
+	
+	self handle = handle
+	return self
+//[cf]
+//[of]:close
+method close
+
+	var ok = self handle fclose == 0
+	self delete
+	return ok
+//[cf]
+//[cf]
+//[of]:reading - writing
+//[of]:read
+method read (base: Bytes, size: Size)
+
+	return fread (base, 1, size, self handle)
+//[cf]
+//[of]:write
+method write (base: Bytes, size: Size)
+
+	return fwrite (base, size, 1, self handle)
+//[cf]
+//[cf]
+
+:private
+//[of]:attributes
+attr handle : *FILE
+//[cf]
+//[cf]
+//[of]:SystemFileTime
+//[of]:definition
+struct SystemFileTime
+
+    attr long	: Unsigned32
+//[cf]
+//[of]:accessing
+//[of]:clear
+method clear
+	
+	self long	= 0
+//[cf]
+//[cf]
+//[of]:testing
+//[of]:isEqual
+method isEqual (other: *SystemFileTime)
+
+	return	self long == other long
+//[cf]
+//[of]:isEmpty
+method isEmpty
+	
+	return	self long == 0
+//[cf]
+//[of]:notEmpty
+method notEmpty
+	
+	return not self isEmpty
+//[cf]
+//[of]:isMorerecent
+method isMoreRecent (other: *SystemFileTime)
+	
+	return self long > other long
+//[cf]
+//[cf]
+//[cf]
+//[of]:SystemDirectory
+//[of]:definition
+struct SystemDirectory
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+method initialize (dirname: String)
+	
+	self dirname	= newString (dirname)
+	self dir	= nil
+//[cf]
+//[of]:release
+method release
+
+	self dirname delete
+//[cf]
+//[cf]
+//[of]:enumerating
+//[of]:eachFile
+method eachFile
+	
+	var found = self first
+	while found
+		if self checkFile
+			var fn = fromFilename (self dirent dirent_name)
+			yield fn
+			fn delete
+		end
+		found = self next
+	end
+	self close
+//[cf]
+//[of]:eachDirectory
+method eachDirectory
+
+	var found = self first
+	while found
+		if self checkDirectory
+			var fn = fromFilename (self dirent dirent_name)
+			yield fn
+			fn delete
+		end
+		found = self next
+	end
+	self close
+//[cf]
+//[cf]
+
+:private
+//[of]:attributes
+attr dirname	: String
+attr dir	: *DIR
+attr dirent	: *DIRENT
+//[cf]
+//[of]:utils
+//[of]:first
+method first
+
+	var s = self dirname toFilename
+	var d = dir_open (s) 
+	s delete
+	self dir = d
+	if d isNil
+		return false
+	end
+	return self next
+//[cf]
+//[of]:next
+method next
+
+	var d = self dir
+	var dirent = d dir_read
+	if dirent isNil
+		return false
+	end
+	self dirent = dirent
+	return true
+//[cf]
+//[of]:close
+method close
+
+	var d = self dir
+	if  d notNil
+		d dir_close
+	end
+//[cf]
+
+//[of]:checkFile
+method checkFile
+
+	var d = self dirent
+	var n = d dirent_name
+	if n[0] == $. and (n[1] == \0 or (n[1] == $. and n[2] == \0))
+		return false
+	end
+
+	return d dirent_is_directory == 0
+//[cf]
+//[of]:checkDirectory
+method checkDirectory
+
+	var d = self dirent
+	var n = d dirent_name
+	if n[0] == $. and (n[1] == \0 or (n[1] == $. and n[2] == \0))
+		return false
+	end
+
+	return d dirent_is_directory <> 0
+//[cf]
+//[cf]
+//[cf]
+
+.private
+//[of]:Utils
+//[of]:normalize
+//[c]Normalizes a full name
+//[c]
+//[c]	* reduces '\.'
+//[c]	* reduces '\..'
+//[c]	* reduces '\\' (except initial)
+//[c]
+//[c]	The fullname must be a fully qualified name, i.e. it must starts with '\\' or 'x:\'.
+//[c]
+function normalize (fullName: *StringBuffer)
+
+	var s = fullName string
+	var d = s
+	var start = d
+	
+	repeat
+		var c = s []
+		s ++
+		if c isNul
+			break
+		elsif c == $/
+			// Skip adjacent separators
+			while s [] == $/
+				s ++
+			end
+			if s [0] == $. and (s[1] isNul or s[1] == $/)
+				s ++
+			elsif s[0] == $. and s[1] == $. and (s[2] isNul or s[2] == $/)
+				s += 2
+				var p = d - 1
+				while p >= start
+					if p[] == $/
+						d = p
+						break
+					end
+					p --
+				end
+			else
+				d [] = c
+				d ++
+			end
+		else
+			d [] = c
+			d ++
+		end
+	end
+
+	// Empty: restore the initial '\' (both UNC and x:\)
+	if d == start
+		d [] = $/
+		d ++
+	end
+
+	var base = fullName buffer
+	fullName setSize (d - base)
+//[cf]
+//[of]:toFilename
+function toFilename (filename: String)
+
+	var n = filename size
+	var b = Char8 allocateArray (n + 1)
+	var p = filename
+	var q = b
+	repeat
+		var c = p []
+		q [] = c : Char8
+		p ++
+		q ++
+		if c isNul
+			break
+		end
+	end
+	
+	return b
+//[cf]
+//[of]:fromFilename
+function fromFilename (filename: String8)
+	
+	var sb = {TempStringBuffer} local
+	sb addStringLatin1 (filename)
+	var s = sb newString
+	sb release
+	return s
+//[cf]
+//[cf]
+//[of]:Imports
+import "core"
+import "os/io"
+//[cf]

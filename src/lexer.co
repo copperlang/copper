@@ -1,0 +1,1026 @@
+//[of]:LexerErrorCode
+enum LexerErrorCode
+
+	lexer_ok
+	error_unexpected_eof_in_string
+	error_unexpected_eol_in_string
+	error_string_too_long
+	error_unexpected_eof_in_char
+	error_invalid_escape_char
+	error_invalid_token
+	error_undefined_string_constant
+//[cf]
+//[of]:LexerError
+struct LexerError
+
+	attr code	: LexerErrorCode	// Code of the error
+	attr line	: LineNumber	// Line number of the error
+//[cf]
+//[of]:Token
+//[of]:definition
+enum Token
+
+	token_invalid	// invalid character
+	token_eof	// the last token of a stream
+	
+	// Literals
+	token_id
+	token_integer
+	token_string_8
+	token_char_8
+	token_string_16
+	token_char_16
+	
+	// Operators
+	token_add
+	token_sub
+	token_mul
+	token_div
+	token_mod
+	token_shl
+	token_shr
+	token_and
+	token_or
+	token_xor
+
+	// Assignment	
+	token_assign
+	token_assign_add
+	token_assign_sub
+	token_assign_mul
+	token_assign_div
+	token_assign_mod
+	token_assign_shl
+	token_assign_shr
+	token_assign_and
+	token_assign_or
+	token_assign_xor
+	token_assign_inc
+	token_assign_dec
+
+	// Comparators
+	token_eq
+	token_ne
+	token_le
+	token_lt
+	token_ge
+	token_gt
+	
+	// Keywords
+	token_global
+	token_import
+	token_structure
+	token_enumeration
+	token_function
+	token_variable
+	token_const
+	token_extension
+	token_end
+	token_attribute
+	token_static
+	token_method
+	token_ref
+	
+	token_if
+	token_elsif
+	token_else
+	token_while
+	token_repeat
+	token_switch
+	token_case
+	token_return
+	token_break
+	token_yield
+	token_do
+
+	token_minimal_and
+	token_minimal_or
+	token_not
+	token_cond
+	
+	// Characters
+	token_br
+	token_comma
+	token_colon
+	token_lparen
+	token_rparen
+	token_lbrac
+	token_rbrac
+	token_lbrace
+	token_rbrace
+	token_ellipsis
+	token_at
+	token_to
+	token_sharp
+	token_point
+//[cf]
+//[of]:output
+//[of]:add
+//[c]Print the token on the stream
+//[c]
+method add (	sb	: *StringBuffer, 
+	integer	: Unsigned64, 
+	string	: String8)
+
+	switch self
+	case token_id
+		sb << string
+
+	case token_integer
+		sb << integer toUnsigned	// Truncated to 32 bits
+
+	case token_char_8, token_invalid
+		sb << integer toChar8
+
+	else
+		sb << self
+	end	
+//[cf]
+//[of]:addToStringBuffer
+//[c]Print the token on the stream
+//[c]
+method addToStringBuffer (sb: *StringBuffer)
+
+	var s = self findName (keywords)
+	if s isNil
+		s = self findName (others)
+	end
+	if s isNil
+		s = '<unknown>'
+	end
+	sb << s
+//[cf]
+//[cf]
+
+//private
+//[of]:utils
+//[of]:findName
+method findName (list: *[] Keyword)
+
+	var item = list
+	while item [] name notNil
+		if self == item [] token
+			return  item [] name
+		end
+		item ++
+	end
+	return nil
+//[cf]
+//[of]:addLiteralChar
+method addLiteralchar (sb: *StringBuffer, c: Char8)
+
+	if c > 32
+
+		sb << $$
+		sb << c
+
+	else
+
+		var s = {String8}
+		switch c
+		case \a
+			s = '\\a'
+		case \b
+			s = '\\b'
+		case \f
+			s = '\\f'
+		case \n
+			s = '\\n'
+		case \r
+			s = '\\r'
+		case \t
+			s = '\\t'
+		case \v
+			s = '\\v'
+		case \w
+			s = '\\w'
+		else
+			sb << $\
+			sb << c : dword : int
+			return
+		end
+		sb << s
+
+	end
+//[cf]
+//[cf]
+//[cf]
+//[of]:TokenStream
+//[of]:definition
+struct TokenStream
+
+	attr defines	: *StringDictionary (String)	// command line defines
+	attr error	: LexerError	// last error
+	attr line	: LineNumber	// current line number
+
+	// The current lexical unit
+	attr token	: Token
+	attr string8	: String8
+	attr string16	: String16
+	attr integer	: Unsigned64
+
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+method initialize (pool: *MemoryPool, s: String8, defines: *StringDictionary (String16))
+
+	self pool	= pool
+	self defines	= defines
+	self p	= s
+	self beginningOfLine	= s
+	self line	= 1
+	self token	= token_eof
+	self string8	= nil
+	self string16	= nil
+	self integer	= 0 : Unsigned64
+	self error code	= lexer_ok
+	self error line	= 1
+	self id	= Char16 allocateArray (self maxStringConstantSize + 1)
+
+	// Read the first token
+	self nextToken
+//[cf]
+//[of]:release
+method release
+
+	Char16 freeArray (self id, self maxStringConstantSize + 1)
+//[cf]
+//[cf]
+//[of]:input
+//[of]:nextToken
+//[c]Get a token from the stream
+//[c]
+method nextToken
+
+	var token = {Token}
+	var p = self p
+	
+	p = self skipBlank (p)
+//[of]:	skip comments
+	repeat
+	
+		if p [0] <> $/
+			break
+		end
+	
+		if p [1] == $/
+	
+			// skip the line
+			p += 2
+			var c = p []
+			while c <> char_nul and c <> char_cr and c <> char_lf
+				p ++
+				c = p []
+			end
+			
+		elsif p [1] == $*
+
+			p += 2
+			var c = p []
+			
+			repeat
+				if c == $* and p [1] == $/
+	
+					p += 2
+					break
+	
+				elsif c isNul
+				
+					break
+				
+				elsif c == char_cr
+	
+					p ++
+					c = p []
+					if c == char_lf
+						p ++
+						c = p []
+					end
+					self line ++
+					self beginningOfLine = p
+				
+				elsif c == char_lf
+	
+					p ++
+					c = p []
+					self line ++
+					self beginningOfLine = p
+				
+				else
+				
+					p ++
+					c = p []
+	
+				end
+			end
+			p = self skipBlank (p)
+		
+		else
+			break
+		end
+	end
+//[cf]
+
+	// parse
+	var c = p []
+	p ++
+	switch c
+//[of]:	case \\0
+	case \0
+		p --
+		token = token_eof
+		
+//[cf]
+//[of]:	case \\r
+	case \r
+		if p [] == char_lf
+			p ++
+		end
+		self line ++
+		self beginningOfLine = p
+		token = token_br
+
+//[cf]
+//[of]:	case \\n
+	case \n
+		self line ++
+		self beginningOfLine = p
+		token = token_br
+
+//[cf]
+//[of]:	case [0-9]
+	case $0, $1, $2, $3, $4, $5, $6, $7, $8, $9
+
+		var value, endc = (p - 1) decimalToUnsigned 
+		if endc <> p - 1
+			p = endc
+		end
+
+		token = token_integer
+		self integer = value : Unsigned64
+//[cf]
+//[of]:	case [_a-zA-Z]
+	case $_,
+		$a, $b, $c, $d, $e, $f, $g, $h, $i, $j, $k, $l, $m, 
+		$n, $o, $p, $q, $r, $s, $t, $u, $v, $w, $x, $y, $z,
+		$A, $B, $C, $D, $E, $F, $G, $H, $I, $J, $K, $L, $M, 
+		$N, $O, $P, $Q, $R, $S, $T, $U, $V, $W, $X, $Y, $Z
+		
+		var s = p - 1
+		var c = p []
+		while c isIdentifierChar
+			p ++
+			c = p []
+		end
+
+		var len = (p - s) : Size
+
+		// find a keyword
+		var i = 0
+		while i < number_of_keywords
+			if memoryCompare (keywords [i] name, s, len * Char8 size) == 0 and keywords [i] name [len] == \0
+				break
+			end
+			i ++
+		end
+		if i < number_of_keywords
+			token = keywords[i] token
+		else
+			token = token_id
+			var buf = self pool allocateArray (Char8, len + 1)
+			memoryCopy (buf, s, len)
+			buf [len] = char_nul
+			self string8 = buf
+		end
+//[cf]
+//[of]:	case $"
+	case $"
+		var buf	= {[self maxStringConstantSize + 1] Char16}
+		var q	= buf
+		var limit	= buf + self maxStringConstantSize
+		
+		repeat
+			var c = p []
+			p ++
+			if c == $"
+				break
+			end
+
+			// Check for unexpected end of file in string constant
+			if c isNul
+				self error (p - 1, error_unexpected_eof_in_string)
+				return
+			end
+			
+			// Check for unexpected end of line in string constant
+			if c == char_lf
+				self error (p - 1, error_unexpected_eol_in_string)
+				return
+			end
+			
+			// Check for string length
+			if q == limit
+				self error (p - 1, error_string_too_long)
+				return
+			end
+			
+			if c == $\
+
+				c = p []
+				p ++
+				
+				switch c
+				case \0
+					// Check for unexpected end of file in string constant
+					self error (p - 1, error_unexpected_eof_in_string)
+					return
+				case $(
+					
+					// Read the name
+					var s = self id
+					var n = 0
+					repeat
+						c = p []
+						p ++
+						if c == \0
+							self error (p - 1, error_unexpected_eof_in_string)
+							return
+						elsif c == \n
+							self error (p - 1, error_unexpected_eol_in_string)
+							return
+						elsif c == $)
+							break
+						end
+						
+						if n == self maxStringConstantSize
+							self error (p - 1, error_string_too_long)
+							return
+						end
+						
+						s [] = c : Char16
+						s ++
+					end
+					s [] = \0
+					s ++
+					
+					// Find the definition
+					var value = self defines [self id]
+					if value isNil
+						self error (p, error_undefined_string_constant)
+						return
+					end
+					
+					// Add the value to the string
+					var v = value
+					repeat
+						var c = v []
+						v ++
+						
+						if c == \0
+							break
+						end
+						
+						// Check for string length
+						if q == limit
+							self error (p - 1, error_string_too_long)
+							return
+						end
+						q [] = c
+						q ++
+					end
+				case $a
+					q [] = \a
+					q ++
+				case $b
+					q [] = \b
+					q ++
+				case $f
+					q [] = \f
+					q ++
+				case $n
+					q [] = \n
+					q ++
+				case $r
+					q [] = \r
+					q ++
+				case $t
+					q [] = \t
+					q ++
+				case $v
+					q [] = \v
+					q ++
+				case $w
+					q [] = \w
+					q ++
+				else
+					q [] = c : Char16
+					q ++
+				end
+			else
+				q [] = c : Char16
+				q ++
+			end
+		end
+		
+		q [] = char_nul
+		q ++
+		
+		var len	= (q - buf) : Size
+		var persistentBuf	= self pool allocateArray (Char16, len)
+		
+		memoryCopy (persistentBuf, buf, len * Char16 size)
+		self string16 = persistentBuf
+		token = token_string_16
+//[cf]
+//[of]:	case $'
+	case $'
+		var buf	= {[self maxStringConstantSize + 1] Char8}
+		var q	= buf
+		var limit	= buf + self maxStringConstantSize
+		
+		repeat
+			var c = p []
+			p ++
+			if c == $'
+				break
+			end
+
+			// Check for unexpected end of file in string constant
+			if c isNul
+				self error (p - 1, error_unexpected_eof_in_string)
+				return
+			end
+			
+			// Check for unexpected end of line in string constant
+			if c == char_lf
+				self error (p - 1, error_unexpected_eol_in_string)
+				return
+			end
+			
+			// Check for string length
+			if q == limit
+				self error (p - 1, error_string_too_long)
+				return
+			end
+			
+			if c == $\
+
+				c = p []
+				p ++
+				
+				// Check for unexpected end of file in string constant
+				if c isNul
+					self error (p - 1, error_unexpected_eof_in_string)
+					return
+				end
+				
+				switch c 
+				case $a
+					c = \a
+				case $b
+					c = \b
+				case $f
+					c = \f
+				case $n
+					c = \n
+				case $r
+					c = \r
+				case $t
+					c = \t
+				case $v
+					c = \v
+				case $w
+					c = \w
+				end
+				q [] = c
+				q ++
+			else
+				q [] = c
+				q ++
+			end
+		end
+		
+		q [] = char_nul
+		q ++
+		
+		var len	= (q - buf) : Size
+		var persistentBuf	= self pool allocateArray (Char8, len)
+		memoryCopy (persistentBuf, buf, len * Char8 size)
+		self string8 = persistentBuf
+		token = token_string_8
+//[cf]
+//[of]:	case $$
+	case $$
+		var c = p []
+		p ++
+		
+		// Check for unexpected end of file in char constant
+		if c isNul
+			self error (p - 2, error_unexpected_eof_in_char)
+			return
+		end
+		
+		self integer = c : Unsigned64
+		token = token_char_16
+
+//[cf]
+//[of]:	case $\\
+	case $\
+		var c = p []
+		p ++
+		
+		// Check for unexpected end of file in char constant
+		if c isNul
+			self error (p - 2, error_unexpected_eof_in_char)
+			return
+		end
+		
+		switch c 
+		case $a
+			c = \a
+		case $b
+			c = \b
+		case $f
+			c = \f
+		case $n
+			c = \n
+		case $r
+			c = \r
+		case $t
+			c = \t
+		case $v
+			c = \v
+		case $w
+			c = \w
+		else
+			if c >= $0 and c <= $9
+				var l, endc = (p - 1) decimalToUnsigned
+				if endc <> p - 1
+					p = endc
+				end
+				c = l : Char8
+			else
+				// invalid escape sequence
+				self error (p - 1, error_invalid_escape_char)
+				return
+			end
+		end
+		
+		self integer = c : Unsigned64
+		token = token_char_16
+//[cf]
+//[of]:	case $,
+	case $,
+		token = token_comma
+	
+//[cf]
+//[of]:	case $\:
+	case $:
+		token = token_colon
+	
+//[cf]
+//[of]:	case $+
+	case $+
+		if p [] == $+
+			token = token_assign_inc
+			p ++
+		elsif p [] == $=
+			token = token_assign_add
+			p ++
+		else
+			token = token_add
+		end
+//[cf]
+//[of]:	case $-
+	case $-
+		if p [] == $>
+			token = token_to
+			p ++
+		elsif p [] == $-
+		      token = token_assign_dec
+		      p ++
+		elsif p [] == $=
+			token = token_assign_sub
+			p ++
+		else
+			token = token_sub
+		end
+//[cf]
+//[of]:	case $>
+	case $>
+		if p [] == $=
+			token = token_ge
+			p ++
+		elsif p [] == $>
+			p ++
+			if p[] == $=
+				token = token_assign_shr
+				p ++
+			else
+				token = token_shr
+			end
+		else
+			token = token_gt
+		end
+	
+//[cf]
+//[of]:	case $<
+	case $<
+		if p [] == $=
+			token = token_le
+			p ++
+		elsif p [] == $>
+			token = token_ne
+			p ++
+		elsif p [] == $<
+			p ++
+			if p [] == $=
+				token = token_assign_shl
+				p ++
+			else
+				token = token_shl
+			end
+		else
+			token = token_lt
+		end
+//[cf]
+//[of]:	case $=
+	case $=
+		if p[] == $=
+			token = token_eq
+			p ++
+		else
+			token = token_assign
+		end
+		
+//[cf]
+//[of]:	case $*
+	case $*
+		if p [] == $=
+			token = token_assign_mul
+			p ++
+		else
+			token = token_mul
+		end
+		
+//[cf]
+//[of]:	case $/
+	case $/
+		if p [] == $=
+			token = token_assign_div
+			p ++
+		else
+			token = token_div
+		end
+//[cf]
+//[of]:	case $%
+	case $%
+		if p [] == $=
+			token = token_assign_mod
+			p ++
+		else
+			token = token_mod
+		end
+
+		
+//[cf]
+//[of]:	case $(
+	case $(
+		token = token_lparen
+		
+//[cf]
+//[of]:	case $)
+	case $)
+		token = token_rparen
+		
+//[cf]
+//[of]:	case $[
+	case $[
+		token = token_lbrac
+		
+//[cf]
+//[of]:	case $]
+	case $]
+		token = token_rbrac
+		
+//[cf]
+//[of]:	case ${
+	case ${
+		token = token_lbrace
+		
+//[cf]
+//[of]:	case $}
+	case $}
+		token = token_rbrace
+		
+//[cf]
+//[of]:	case $.
+	case $.
+		
+		if p[] == $. and p[1] == $.
+			token = token_ellipsis
+			p += 2
+		elsif p [] isIdentifierFirstChar
+			token = token_point
+		end
+//[cf]
+//[of]:	case $&
+	case $&
+		if p [] == $=
+			token = token_assign_and
+			p ++
+		else
+			token = token_and
+		end
+		
+//[cf]
+//[of]:	case $|
+	case $|
+		if p [] == $=
+			token = token_assign_or
+			p ++
+		else
+			token = token_or
+		end
+//[cf]
+//[of]:	case $^
+	case $^
+		if p [] == $=
+			token = token_assign_xor
+			p ++
+		else
+			token = token_xor
+		end
+//[cf]
+//[of]:	case $@
+	case $@
+		token = token_at
+		
+//[cf]
+//[of]:	case $#
+	case $#
+		token = token_sharp
+		
+//[cf]
+	else
+		self integer = p[-1] : Unsigned64
+		self error (p - 1, error_invalid_token)
+		return
+	end
+
+	// Save the new pointer in the stream object
+	self p = p
+
+	// And return the token
+	self token = token
+//[cf]
+//[cf]
+
+:private
+//[of]:constants
+static maxStringConstantSize = 2048
+//[cf]
+//[of]:attributes
+	attr pool	: *MemoryPool	// bundle to store lexemes
+	attr beginningOfLine	: String8	// Pointer to the beginning of the current line
+	attr p	: String8	// Pointer to the next character
+	attr id	: String16	// Buffer to store id -- this is here only to avoid big buffer on stack
+//[cf]
+//[of]:utils
+//[of]:skipBlank
+//[c]Skips blanks and new line
+//[c]
+method skipBlank (s: String8)
+
+	var p = s
+	var c = p []
+	while c == char_space or c == char_tab
+		p ++
+		c = p []
+	end
+	return p
+//[cf]
+//[of]:error
+//[c]Return an error
+//[c]
+method error (p: String8, code: LexerErrorCode)
+
+	self p	= p
+	self token	= token_invalid
+	self error code	= code
+	self error line	= self line
+//[cf]
+//[cf]
+//[cf]
+
+.private
+//[of]:Utility Functions
+//[of]:isIdentifierFirstChar
+function isIdentifierFirstChar (c: Char8)
+
+	return (((c:Byte|0x20) - $a:Byte) < 26) or 
+		c == $_
+//[cf]
+//[of]:isIdentifierChar
+function isIdentifierChar (c: Char8)
+
+	return	(((c:Byte|0x20) - $a:Byte) < 26) or 
+		((c - $0:Byte):Byte < 10) or
+		c == $_
+//[cf]
+//[cf]
+//[of]:Constants
+struct Keyword
+	attr name	: String8
+	attr token	: Token
+
+const number_of_keywords = 28
+
+const keywords = [] Keyword [
+
+	'global',	token_global,
+	'import',	token_import,
+	'struct',	token_structure,
+	'enum',	token_enumeration,
+	'function',	token_function,
+	'var',	token_variable,
+	'const',	token_const,
+	'extend',	token_extension,
+	'end',	token_end,
+	'attr',	token_attribute,
+	'static',	token_static,
+	'method',	token_method,
+	'ref',	token_ref,
+		
+	'if',	token_if,
+	'elsif',	token_elsif,
+	'else',	token_else,
+	'while',	token_while,
+	'repeat',	token_repeat,
+	'switch',	token_switch,
+	'case',	token_case,
+	'return',	token_return,
+	'break',	token_break,
+	'yield',	token_yield,
+	'do',	token_do,
+		
+	'and',	token_minimal_and,
+	'or',	token_minimal_or,
+	'not',	token_not,
+	'cond',	token_cond,
+		
+	nil,	token_invalid ]
+
+const others = [] Keyword [
+
+	'<an identifier>',	token_id,
+	'<an integer>',	token_integer,
+	'<a char 8>',	token_char_8, 
+	'<a char 16>',	token_char_16, 
+	'<a char>',	token_invalid,
+	'<a string 8>',	token_string_8,
+	'<a string 16>',	token_string_16,
+	'<end-of-file>',	token_eof,
+	'<end-of-line>',	token_br,
+		
+	'+',	token_add,
+	'-',	token_sub,
+	'*',	token_mul,
+	'/',	token_div,
+	'%',	token_mod,
+	'<<',	token_shl,
+	'>>',	token_shr,
+		
+	'&',	token_and,
+	'|',	token_or,
+	'^',	token_xor,
+		
+	'=',	token_assign,
+		
+	'==',	token_eq,
+	'<>',	token_ne,
+	'<=',	token_le,
+	'<',	token_lt ,
+	'>=',	token_ge,
+	'>',	token_gt ,
+		
+	',',	token_comma,
+	':',	token_colon,
+	'(',	token_lparen,
+	')',	token_rparen,
+	'[',	token_lbrac,
+	']',	token_rbrac,
+	'{',	token_lbrace,
+	'}',	token_rbrace,
+	'...',	token_ellipsis,
+	'@',	token_at,
+	'#',	token_sharp,
+	'->',	token_to,
+	'.',	token_point,
+		
+	nil,	token_invalid]
+//[cf]
+//[of]:Imports
+import "commons"
+import "core"
+//[cf]

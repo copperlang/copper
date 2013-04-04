@@ -1,0 +1,14 @@
+//[c]This is an indirect but valid recursion
+//[c]
+
+function g (x)
+	if x > 0
+		return 1
+	end
+	return f (1)
+
+function f (x)
+	return g (1)
+
+function main
+	f (1)

@@ -1,0 +1,27 @@
+// This test checks that argument from definitions in generic functions
+// are duplicated before being evaluated
+//
+// Otherwise the second instance of the structure will use wrong types
+
+struct Collection (T)
+	attr first : Element (T)
+	
+	method initialize
+		var element = self first
+		self each (element) do e
+		end
+		return value (element)
+	
+	method each  (item: * Element (T))
+		yield item
+
+struct Element (T)
+	attr value : T
+
+function main
+
+	var c1 = {Int32 Collection}
+	var c2 = {Char16 Collection}
+	
+	c1 initialize
+	c2 initialize

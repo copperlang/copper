@@ -1,0 +1,20 @@
+
+function id (x)
+	return x
+
+struct Box
+	attr next	: * Box
+	
+	method test
+		var b = self id
+		b = b id
+		b = b next
+
+struct EditBox : Box
+
+function main
+
+	var edit = EditBox nil
+	var box = Box nil
+	edit test
+	box test

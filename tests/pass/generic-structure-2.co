@@ -1,0 +1,14 @@
+//[c]Generic structure with inheritance using a parameter
+//[c]
+
+struct A (T)
+	attr x	: Int32
+	attr y	: Int32
+	
+	method f (a)
+		return nil (T)
+
+struct B (T) : A (T)
+
+function main
+	return f (nil (B (Bool)), 5)

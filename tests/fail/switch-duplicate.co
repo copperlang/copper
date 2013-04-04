@@ -1,0 +1,14 @@
+
+function main
+
+	var x = 2
+	switch x
+	case 0
+		return 1
+	case 1, 2
+		return 0
+	case 2
+		return 1
+	else
+		return 1
+	end

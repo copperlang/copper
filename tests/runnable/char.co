@@ -1,0 +1,82 @@
+
+function test_char_plus_int
+
+	var errors = 0
+
+	// Both constants	
+	var c1 = $a + 1
+	var c2 = $a + 2 : Unsigned8
+	var c3 = $a + 3 : Unsigned16
+	var c4 = $a + 4 : Unsigned64
+	var c5 = $a + 5 : Unsigned16
+	
+	if c1 <> $b
+		errors = errors + 1
+	end
+	if c2 <> $c
+		errors = errors + 1
+	end
+	if c3 <> $d
+		errors = errors + 1
+	end
+	if c4 <> $e
+		errors = errors + 1
+	end
+	if c5 <> $f
+		errors = errors + 1
+	end
+	
+	// Constant char 16 + signed variable
+	var s = 1 : Int16
+	var c6 = $a + s
+	if c6 <> $b
+		errors = errors + 1
+	end
+	
+	// Constant char 16 + unsigned variable
+	var u = 1 : Unsigned16
+	var c7 = $b + u
+	if c7 <> $c
+		errors = errors + 1
+	end
+
+	// Variable char 16 + constant
+	var c8 = $A
+	c8 = c8 + 1
+	if c8 <> $B
+		errors = errors + 1
+	end
+
+	// Variable char 16 + variable
+	c8 = c8 + u
+	if c8 <> $C
+		errors = errors + 1
+	end
+
+	return errors
+
+function test_char_minus_char
+
+	var c	= $a
+	var d1	= $b - $a
+	var d2	= c - $a
+
+	return (d1 + d2 - 1) : Int32
+
+function test_char_minus_int
+
+	var c = $a
+	var d1 = $b - 1
+	var d2 = c - 1
+	
+	return (d1 : Int8 + d2 : Int8 - 97 - 96) : Int32
+
+function .c .cdecl main
+
+	var res = 0
+	
+	res = res + test_char_plus_int
+	res = res + test_char_minus_char
+	res = res + test_char_minus_int
+	
+	return res

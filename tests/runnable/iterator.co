@@ -1,0 +1,81 @@
+//[c]
+//[c]	Test nested yield and nested iterator
+//[c]
+function loop (n: Int32)
+	var i = 0
+	while i < n
+		yield i+1
+		i ++
+	end
+
+function loop2 (n: Int32)
+	loop (2 * n) do i
+		yield i
+	end
+
+function test_nesting
+	var sum = 0
+	loop2 (2) do x
+		loop (3) do y
+			sum += x * 10 + y
+			var buf = {[4] Char8}
+		end
+	end
+	return sum -11 -12 -13 -21 -22 -23 -31 -32 -33 -41 -42 -43
+
+//[c]
+//[c]	Test the return value
+//[c]
+function check_int
+	var array = {[1] Int32}
+	yield array
+	if array [0] == 1
+		return 1
+	else
+		return 2
+	end
+
+function test_iterator_return
+
+	var res = check_int do a
+		a [0] = 5
+	end
+	return res - 2
+
+//[c]
+//[c]	Test a return in the yield
+//[c]
+function test_yield_return
+
+	var res = check_int do a
+		a [0] = 5
+		if true
+			return 0
+		end
+	end
+	return 1
+
+//[c]
+//[c]	Test a break
+//[c]
+function test_iterator_break
+
+	var sum = 0
+	loop (10) do x
+		sum += x
+		if x == 4
+			break
+		end
+	end
+	return sum - 10
+
+//[c]
+//[c]
+function .c .cdecl main
+
+	var res = 0
+	res += test_nesting
+	res += test_iterator_return
+	res += test_yield_return
+	res += test_iterator_break
+	return res

@@ -1,0 +1,41 @@
+
+const Integer = Int32
+const String = [] Char8
+
+function hello (s: *String, x)
+	return 1, 23 + x
+
+function bye (s: *String, x)
+	return 2, 34 + x
+
+struct A
+
+struct B : A
+	method test
+
+function .c .cdecl main
+
+	var res = 0
+
+	// initialize
+	var f = ref hello (*String, Integer)
+	
+	var x, y = call (f, 'abc', 10)
+	res += x + y - 1 - 23 - 10
+	
+	// re-assing
+	f = ref bye (*String, Integer)
+	
+	x, y = call (f, 'def', 12)
+	res += x + y - 2 - 34 - 12
+
+	// Just test compilation		
+	var g = {& (*String, Integer) -> (Integer, Integer)}
+	g = f
+
+	// Test function matching
+	var a = {& (*A)}
+	var b = ref test (*B)
+	a = b
+	
+	return res

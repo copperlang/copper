@@ -1,0 +1,3305 @@
+//[of]:Generics
+//[of]:Primitives
+//[of]:in
+//[c]Returns true if x is in the list of given values
+//[c]
+function in (x, ...)
+
+	each_extra do value
+		if x == value
+			return true
+		end
+	end
+
+	return false
+//[cf]
+//[of]:inRange
+//[c]Returns true if x is between [a, a + b[
+//[c]
+function inRange (x, base, size)
+
+	return x >= base and x < base + size
+//[cf]
+//[of]:min
+//[c]Returns the min value of the list of arguments
+//[c]
+function min (x, ...)
+
+	var min = x
+	each_extra do y
+		if y < min
+			min = y
+		end
+	end
+	
+	return min
+//[cf]
+//[of]:max
+//[c]Returns the max value of the list of arguments
+//[c]
+function max (x, ...)
+
+	var max = x
+	each_extra do y
+		if y > max
+			max = y
+		end
+	end
+	
+	return max
+//[cf]
+//[of]:between
+//[c]Returns true if x is between a and b
+//[c]
+function between (x, a, b)
+
+	return  x >= a and x <= b
+//[cf]
+//[of]:has
+//[c]Test if an integer has a bit set
+//[c]
+function has (value, mask)
+
+	return (value & (mask : #value)) <> 0
+//[cf]
+//[of]:distance
+//[c]Compute the absolute difference, works with unsigned as well as signed
+//[c]
+function distance (x, y)
+
+	if x >= y
+		return x - y
+	else
+		return y - x
+	end
+//[cf]
+//[of]:notEmpty
+function notEmpty (x)
+
+	return not x isEmpty
+//[cf]
+//[of]:notEqual
+function notEqual (x, y)
+
+	return not x isEqual (y)
+//[cf]
+
+//[of]:setAll
+//[c]Copy all values of the iterable into the array
+//[c]
+//[c]ARGUMENTS
+//[c]	array	-- an array of any type
+//[c]	iterable	-- an object implementing 'each' to enumerate all values
+//[c]
+function setAll (array, iterable)
+
+	var i = 0 s
+	iterable each do value
+		array [i] = value
+		i ++
+	end
+//[cf]
+
+//[of]:toByte
+//[c]Converts any number, character or enumeration to an 8-bit unsigned integer
+//[c]
+function toByte (x)
+
+	return x : Byte
+//[cf]
+//[of]:toChar8
+//[c]Converts any number, character or enumeration to an 8-bit character
+//[c]
+function toChar8 (x)
+
+	return x : Char8
+//[cf]
+//[of]:toChar16
+//[c]Converts any number, character or enumeration to an 16-bit character
+//[c]
+function toChar16 (x)
+
+	return x : Char16
+//[cf]
+//[of]:toInteger
+//[c]Converts any number, including enumerations, to a signed 32 bit integer
+//[c]
+function toInteger (x)
+
+	return x : Integer
+//[cf]
+//[of]:toUnsigned
+//[c]Converts any number, including enumerations, to an unsigned 32 bit integer
+//[c]
+function toUnsigned (x)
+
+	return x : Unsigned
+//[cf]
+//[of]:toOffset
+//[c]Converts any number, including enumerations, to an offset
+//[c]
+function toOffset (x)
+
+	return x : Offset
+//[cf]
+//[of]:toSize
+//[c]Converts any number, including enumerations, to a size
+//[c]
+function toSize (x)
+
+	return x : Size
+//[cf]
+//[cf]
+//[of]:Instance Creation
+//[of]:new
+function new (T, ...)
+
+	var self = T allocateMemory
+	self initialize (...)
+	return self
+//[cf]
+//[of]:newFrom
+function newFrom (T, ...)
+
+	var self = T allocateMemory
+	self initializeFrom (...)
+	return self
+//[cf]
+//[of]:local
+function local (self, ...)
+
+	self initialize (...)
+	return self
+//[cf]
+//[of]:localFrom
+function localFrom (self, ...)
+
+	self initializeFrom (...)
+	return self
+//[cf]
+//[of]:delete
+function delete (obj)
+
+	obj release
+	#obj target freeMemory (obj)
+//[cf]
+//[of]:release
+//[c]Default release method
+//[c]
+//[c]	When a structure does not have a release method, this generic one 
+//[c]	will be used instead. It avoids to add a dummy release method in
+//[c]	structures when we want to use the delete function.
+//[c]
+function release (x)
+
+	// Default release method: nothing to do
+//[cf]
+//[cf]
+//[of]:Iterable
+//[of]:definition
+//[c]An iterable is any type having 4 methods
+//[c]
+//[c]obj firstElement
+//[c]	Returns the key to the first value. For instance, in an array it is zero,
+//[c]	in a collection it is the first element.
+//[c]
+//[c]obj elementValue (element)
+//[c]	Returns the value of the given key. In an array, it is the value at given
+//[c]	index, in a collection it is the element itself.
+//[c]
+//[c]obj nextElement (element)
+//[c]	Return the key of the value after the given key. In an array, it is just
+//[c]	the element + 1, in a collection it is the next element.
+//[c]
+//[c]each
+//[c]	Enumerates each value of the iterable.
+//[c]
+//[cf]
+//[of]:accessing
+//[of]:firstElement
+//[c]Default implementation for firstElement
+//[c]
+//[c]The default implementation assumes that the iterable has a
+//[c]direct indexed access to the values.
+//[c]
+function firstElement (iterable)
+
+	return 0 s
+//[cf]
+//[of]:elementValue
+//[c]Default implementation for elementValue
+//[c]
+//[c]The default implementation assumes that the iterable has a
+//[c]direct indexed access to the values.
+//[c]
+function elementValue (iterable, element)
+
+	return iterable [element]
+//[cf]
+//[of]:nextElement
+//[c]Default implementation for nextElement
+//[c]
+//[c]The default implementation assumes that the iterable has a
+//[c]direct indexed access to the values.
+//[c]
+function nextElement (iterable, element)
+	return element + 1
+//[cf]
+//[cf]
+//[of]:enumerating
+//[of]:eachDual
+//[c]Iterates on two lists. The second list is assumed to have same or more elements
+//[c]
+function eachDual (iterable1, iterable2)
+
+	var e2 = iterable2 firstElement
+	iterable1 each do v1
+		var v2 = iterable2 elementValue (e2)
+		yield v1, v2
+		e2 = iterable2 nextElement (e2)
+	end
+//[cf]
+//[cf]
+//[cf]
+//[cf]
+//[of]:Memory
+//[of]:Primitives
+//[of]:allocating
+//[of]:allocateMemory
+//[c]Allocate an element of type T
+//[c]
+function allocateMemory (T)
+
+	return malloc (T size) : *T
+//[cf]
+//[of]:freeMemory
+function freeMemory (T, p: Pointer)
+
+	var bytes = T size
+	
+	free (p)
+//[cf]
+//[of]:allocateArray
+//[c]Allocate an array of element of type T
+//[c]
+function allocateArray (T, n: Size)
+
+	return malloc (n *T size) : *[] T
+//[cf]
+//[of]:freeArray
+function freeArray (T, p: Pointer, n: Size)
+
+	var bytes = n * T size
+	
+	free (p)
+//[cf]
+//[cf]
+//[of]:copying
+//[of]:memoryCopy
+function memoryCopy (dst: Pointer, src: Pointer, size: Size)
+	
+	var p	= src : Bytes
+	var q	= dst : Bytes
+	var limit	= q + size
+
+	while q <> limit
+		q [] = p []
+		q ++
+		p ++
+	end
+//[cf]
+//[of]:memoryMove
+//[c]Moves a memory block
+//[c]
+function memoryMove (dst: Pointer, src: Pointer, size: Size)
+
+	var s	= src : Bytes
+	var d	= dst : Bytes
+	
+	if d == s
+		return
+	end
+	
+	// incremental copy if dst is after src or 
+	// if dst is after the end of src
+	if d < s or s + size <= d
+		memoryCopy (d, s, size)
+	else
+		var q = d + size
+		var p = s + size
+		while q <> d
+			q --
+			p --
+			q [] = p []
+		end
+	end
+//[cf]
+//[cf]
+//[of]:comparing
+//[of]:memoryCompare
+//[c]Compare two memory blocks
+//[c]
+function memoryCompare (dst: Pointer, src: Pointer, size: Size)
+
+	var p	= src : Bytes
+	var q	= dst : Bytes
+	var limit	= q + size
+	
+	while q < limit
+		var diff = q [] - p []
+		if diff <> 0
+			// extend with sign
+			return diff toInteger
+		end
+		p ++
+		q ++
+	end
+	
+	return 0
+//[cf]
+//[of]:memoryIsEqual
+function memoryIsEqual (dst: Pointer, src: Pointer, size: Size)
+
+	return memoryCompare (dst, src, size) == 0
+//[cf]
+//[of]:memoryNotEqual
+function memoryNotEqual (dst: Pointer, src: Pointer, size: Size)
+	
+	return memoryCompare (dst, src, size) <> 0
+//[cf]
+//[cf]
+//[cf]
+//[of]:Pointer
+//[of]:definition
+//[c]The parent of all pointers
+//[c]
+//[c]	This type in the signature of a function will accept any kind of pointer.
+//[c]
+const Pointer	= *Anything
+
+extend Pointer
+//[cf]
+//[of]:testing
+//[of]:isNil
+method isNil
+
+	return self == nil
+//[cf]
+//[of]:notNil
+method notNil
+
+	return self <> nil
+//[cf]
+//[cf]
+//[cf]
+//[of]:Bytes
+//[c]The basic pointer to memory
+//[c]
+//[c]	This is a pointer to bytes. It is possible to do usual pointer arithmetic with
+//[c]	this type.
+//[c]
+const Bytes	= *[] Byte
+//[cf]
+//[of]:MemoryBuffer
+//[of]:definition
+//[c]A resizable memory buffer
+//[c]
+struct MemoryBuffer
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+method initialize
+
+	self buffer	= Byte allocateArray (self defaultMemoryBufferSize)
+	self used	= 0
+	self bufferSize	= self defaultMemoryBufferSize
+//[cf]
+//[of]:release
+method release
+
+	Byte freeArray (self buffer, self bufferSize)
+//[cf]
+//[cf]
+//[of]:adding - removing
+//[of]:allocate
+//[c]Appends a unitialized area
+//[c]
+//[c]	Use this method if you want to drop data yourself.
+//[c]
+method allocate (size: Size)
+
+	self reserve (size)
+	var p = self buffer + self used
+	self used += size
+	return p
+//[cf]
+
+//[of]:<<
+//[c]Appends a simple value
+//[c]
+method _shl (x)
+
+	self add (x)
+	return self
+//[cf]
+//[of]:add
+//[c]Appends a simple value
+//[c]
+method add (x)
+
+	var size = #x size
+	self reserve (size)
+	((self buffer + self used) : * #x) [] = x
+	self used += size
+//[cf]
+//[of]:addByte
+method addByte (x: Byte)
+
+	self add (x)
+//[cf]
+//[of]:addChar8
+method addChar8 (x: Char8)
+
+	self add (x)
+//[cf]
+//[of]:addMemoryBlock
+//[c]Appends a memory block
+//[c]
+method addMemoryBlock (base: Pointer, size: Size)
+
+	self reserve (size)
+	memoryCopy (self buffer + self used, base, size)
+	self used += size
+//[cf]
+//[of]:addString
+//[c]Appends a string with the trailing zero
+//[c]
+method addString (s: String)
+	
+	var size = (s size + 1) * Char size
+	self reserve (size)
+	memoryCopy (self buffer + self used, s, size)
+	self used += size
+//[cf]
+//[of]:addStringRange
+//[c]Appends a sub string
+//[c]
+method addStringRange (s: String, n: Size)
+
+	var size = n * Char size
+	self reserve (size + Char size)
+	
+	var used = self used
+	memoryCopy (self buffer + used, s, size)
+	used += size
+	((self buffer + used) : *[]Char) [] = char_nul
+	used += Char size
+
+	self used = used
+//[cf]
+//[of]:addUnsignedToAnsi
+//[c]Appends an unsigned integer
+//[c]
+method addUnsignedToAnsi (n: Unsigned)
+
+	var i	= n
+	var buf	= {[12] Char8}
+	var p	= buf + 11
+	p [] = char_nul
+	if i == 0
+		p --
+		p [] = $0
+	else
+		while i <> 0
+			p --
+			var r = (i % 10) toByte
+			p [] = $0 toChar8 + r
+			i /= 10
+		end
+	end
+	self addMemoryBlock (p, buf + 12 - p)
+//[cf]
+//[of]:addIntegerToAnsi
+//[c]Appends an integer
+//[c]
+method addIntegerToAnsi (n: Integer)
+
+	var i = n
+	if i < 0
+		self << $- toChar8
+		i = - i
+	end
+	self addUnsignedToAnsi (i toUnsigned)
+//[cf]
+
+//[of]:removeAll
+method removeAll
+
+	self used = 0
+//[cf]
+//[of]:removeRange
+//[c]Removes a subsequence
+//[c]
+method removeRange (start: Offset, len: Size)
+
+	var limit = start + len
+
+	// move the end to overlap the range to be removed
+	memoryMove (self buffer + start, self buffer + limit, self used - limit)
+	
+	// update the used chars
+	self used -= len
+//[cf]
+//[cf]
+//[of]:accessing
+//[of]:base
+method base
+	
+	return self buffer
+//[cf]
+//[of]:size
+method size
+
+	return self used
+//[cf]
+//[of]:[]
+method _at (index: Size)
+
+	return self buffer [i]
+//[cf]
+//[of]:string8
+//[c]Returns the buffer as an ansi string
+//[c]
+method string8
+
+	return self base : *[] Char8
+//[cf]
+//[cf]
+
+:private
+//[of]:constants
+static defaultMemoryBufferSize = 4096
+//[cf]
+//[of]:attributes
+attr buffer	: Bytes
+attr used	: Size
+attr bufferSize	: Size
+//[cf]
+//[of]:reserve
+//[c]Reserves a sufficient space
+//[c]
+method reserve (l: Size)
+
+	// We always must have one more char
+	if self used + l + 1 <= self bufferSize
+		return
+	end
+	
+	// Compute new size
+	var newSize = (self used + l + 1) * 5 / 4
+	
+	// Allocate new buffer
+	var q = Byte allocateArray (newSize)
+	
+	// Copy the old buffer into the new one
+	memoryCopy (q, self buffer, self used)
+	
+	// Free the old buffer
+	Byte freeArray (self buffer, self bufferSize)
+	
+	// Update object
+	self bufferSize	= newSize
+	self buffer	= q
+//[cf]
+//[cf]
+//[of]:MemoryPool
+//[of]:definition
+struct MemoryPool
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+method initialize
+
+	return self initialize (65536)
+
+method initialize (size: Size)
+
+	self total	= 0
+	self chunkBase	= nil
+	self chunkSize	= size
+	
+	self newChunk (size)
+//[cf]
+//[of]:release
+method release
+
+	var base = self chunkBase
+	while base notNil
+		var head	= (base  - MemoryPoolHead size) : *MemoryPoolHead
+		var next	= head next
+		Byte freeArray (head, head size + MemoryPoolHead size)
+		base = next
+	end
+//[cf]
+//[cf]
+//[of]:accessing
+//[of]:size
+method size
+
+	return self total
+//[cf]
+//[cf]
+//[of]:allocating
+//[of]:new
+method new (T, ...)
+
+	var obj = self allocateMemory (T)
+	obj initialize (...)
+	return obj
+//[cf]
+//[of]:allocateMemory
+//[c]Allocates a new memory block
+//[c]
+method allocateMemory (T)
+
+	return self allocate (T size) : *T
+//[cf]
+//[of]:allocateArray
+//[c]Allocates a new memory block
+//[c]
+method allocateArray (T, n: Size)
+
+	return self allocate (T size * n) : *[] T
+//[cf]
+//[of]:reset
+//[c]Frees all memory allocated in the memory pool, but does not delete the pool.
+//[c]
+//[c]This method is useful to recycle a memory pool for another usage, it avoids
+//[c]calling the malloc and free methods.
+//[c]
+method reset
+
+	// 1 - Free all chunks but the last one
+	var h = (self chunkBase - MemoryPoolHead size) : *MemoryPoolHead
+	var base = h next
+	while base notNil
+		var head	= (base  - MemoryPoolHead size) : *MemoryPoolHead
+		var next	= head next
+		Byte freeArray (head, head size + MemoryPoolHead size)
+		base = next
+	end
+
+	// 2 - Reset the first chunk
+	self chunkFree	= self chunkBase + h size
+	h next	= nil
+//[cf]
+//[cf]
+
+:private
+//[of]:constants
+static defaultChunkSize	= (16*1024) : Size
+//[cf]
+//[of]:attributes
+attr chunkBase	: Bytes
+attr chunkFree	: Bytes
+attr chunkSize	: Size
+attr total	: Size
+//[cf]
+//[of]:allocating
+//[of]:allocate
+//[c]Allocates a new memory block
+//[c]
+method allocate (s: Size)
+
+	// Align size on next round value
+	var alignment = *MemoryPoolHead size
+	var size = s
+	size += alignment - 1
+	size &= not (alignment - 1)
+
+	// Stats
+	self total += size
+	
+	self chunkFree -= size
+	if self chunkFree >= self chunkBase
+		return self chunkFree
+	end
+	
+	self newChunk (max (size, self defaultChunkSize))
+	self chunkFree -= size
+	return self chunkFree
+//[cf]
+//[of]:newChunk
+//[c]Allocates a new chunk
+//[c]
+method newChunk (size: Size)
+
+	var oldBase	= self chunkBase
+	var head	= Byte allocateArray (size + MemoryPoolHead size)
+	
+	self chunkBase	= head + MemoryPoolHead size
+	self chunkFree	= self chunkBase + size
+
+	var h = head	: *MemoryPoolHead
+	h next = oldBase
+	h size = size
+//[cf]
+//[cf]
+//[cf]
+//[of]:MemoryReader
+//[of]:definition
+struct MemoryReader
+	
+	attr pointer	: Bytes
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+method initialize (pointer : Bytes)
+
+	self pointer = pointer
+//[cf]
+//[cf]
+//[of]:reading
+//[of]:read
+//[c]Reads a value of type T and advance the pointer to the next value
+//[c]
+//[c]RETURN VALUES
+//[c]	The value.
+//[c]	
+//[c]REMARKS
+//[c]	T must be a simple type.
+//[c]
+method read (T)
+
+	var value = (self pointer : *T) []
+	self pointer += T size
+	return value
+//[cf]
+//[of]:readByte
+method readByte
+
+	return self read (Byte)
+//[cf]
+//[of]:readString
+method readString
+
+	var p	= self pointer : String
+	var size	= (p size + 1) * Char size
+	self pointer += size
+	return p
+//[cf]
+//[cf]
+//[cf]
+//[cf]
+//[of]:Numeric
+//[of]:Byte
+//[c]A Byte is a 8-bit unsigned integer
+//[c]
+const Byte	= Unsigned8
+//[cf]
+//[of]:Int32
+//[of]:definition
+extend Int32
+//[cf]
+//[of]:accessing
+//[of]:hash
+method hash
+
+	return self : Hash
+//[cf]
+//[cf]
+//[of]:converting
+//[of]:b
+//[c]Convenient shortcut for literals
+//[c]
+//[c]e.g.:
+//[c]	0 b
+//[c]	1 b
+//[c]	255 b
+//[c]
+method b
+
+	return self : Byte
+//[cf]
+//[of]:u
+//[c]Convenient shortcut for unsigned literal
+//[c]
+//[c]e.g.:
+//[c]	0 u
+//[c]	1 u
+//[c]	...
+//[c]
+method u
+
+	return self : Unsigned
+//[cf]
+//[of]:s
+//[c]Convenient shortcut for size literal
+//[c]
+//[c]e.g.:
+//[c]	0 u
+//[c]	1 u
+//[c]	...
+//[c]
+method s
+
+	return self : Size
+//[cf]
+//[of]:unsigned
+method unsigned
+
+	return self : Unsigned
+//[cf]
+//[cf]
+//[of]:enumerating
+//[of]:each
+//[c]Enumerates from zero to self - 1
+//[c]
+method each
+
+	var i = 0
+	while i < self
+		yield i
+		i ++
+	end
+//[cf]
+//[cf]
+//[of]:output
+//[of]:addToStringBuffer
+method addToStringBuffer (sb: *StringBuffer)
+
+	sb addInteger (self)
+//[cf]
+//[cf]
+//[cf]
+//[of]:Int64
+//[of]:definition
+extend Int64
+//[cf]
+//[of]:accessing
+//[of]:low
+method low
+	
+	return self : Unsigned32
+//[cf]
+//[of]:high
+method high
+	
+	return (self >> 32) : Int32
+//[cf]
+//[cf]
+//[cf]
+//[of]:Integer
+const Integer	= Int32
+//[cf]
+//[of]:Unsigned
+//[c]Just an alias for Unsigned32
+//[c]
+const Unsigned	= Unsigned32
+//[cf]
+//[of]:Unsigned16
+//[of]:definition
+extend Unsigned16
+//[cf]
+//[of]:converting
+//[of]:signed
+method signed
+
+	return self : Int16
+//[cf]
+//[cf]
+//[cf]
+//[of]:Unsigned32
+//[of]:definition
+extend Unsigned32
+//[cf]
+//[of]:accessing
+//[of]:hash
+//[c]Converts the value to an hash value: just return self. This method is 
+//[c]useful with dictionary classes
+//[c]
+method hash
+	
+	return self
+//[cf]
+//[cf]
+//[of]:comparing
+//[of]:isEqual
+//[c]Returns true if values are equals. This method is useful with 
+//[c]dictionaries
+//[c]
+method isEqual (other: Unsigned)
+
+	return self == other
+//[cf]
+//[cf]
+//[of]:converting
+//[of]:signed
+method signed
+
+	return self : Int32
+//[cf]
+//[cf]
+//[of]:enumerating
+//[of]:each
+//[c]Enumerates from zero to self - 1
+//[c]
+method each
+
+	var i = 0 : Unsigned32
+	while i < self
+		yield i
+		i ++
+	end
+//[cf]
+//[cf]
+//[of]:output
+//[of]:addToStringBuffer
+method addToStringBuffer (sb: *StringBuffer)
+
+	sb addUnsigned (self)
+//[cf]
+//[cf]
+//[cf]
+//[of]:Unsigned64
+//[of]:definition
+extend Unsigned64
+//[cf]
+//[of]:accessing
+//[of]:low
+method low
+	
+	return self : Unsigned32
+//[cf]
+//[of]:high
+method high
+	
+	return (self >> 32) : Unsigned32
+//[cf]
+//[cf]
+//[of]:enumerating
+//[of]:each
+//[c]Enumerates from zero to self - 1
+//[c]
+method each
+
+	var i = 0 : Unsigned64
+	while i < self
+		yield i
+		i ++
+	end
+//[cf]
+//[cf]
+//[cf]
+
+//[of]:Size
+const Size	= Unsigned32	// 64 on 64bit platform
+//[cf]
+//[of]:Offset
+const Offset	= Unsigned32	// 64 on 64bit platform
+//[cf]
+//[of]:Hash
+const Hash = Size
+//[cf]
+//[cf]
+//[of]:Text
+//[of]:Char8
+//[of]:definition
+extend Char8
+//[cf]
+//[of]:testing
+//[of]:isNul
+method isNul
+
+	return self == char_nul
+//[cf]
+//[of]:notNul
+method notNul
+
+	return self <> char_nul
+//[cf]
+//[of]:isBlank
+method isBlank
+	
+	return self == char_space or self == char_tab
+//[cf]
+//[cf]
+//[of]:output
+//[of]:addToStringBuffer
+method addToStringBuffer (sb: *StringBuffer)
+
+	sb addChar8 (self)
+//[cf]
+//[cf]
+//[cf]
+//[of]:String8
+//[of]:definition
+//[c]A String8 is just a string of Char8
+//[c]
+const String8	= *[] Char8
+
+extend String8
+//[cf]
+//[of]:initialize - release
+//[of]:delete
+method delete
+
+	free (self)
+//[cf]
+//[cf]
+//[of]:accessing
+//[of]:size
+method size
+
+	var p = self
+	while p [] notNul
+		p ++
+	end
+	return (p - self) toSize
+//[cf]
+//[of]:hash
+//[c]Returns the hash code of the string
+//[c]
+method hash
+
+	var p	= self
+	var sum	= 0xA5A5A5A5 hash
+	repeat
+		var c = p []
+		p ++
+		if c isNul
+			return sum
+		end
+		sum = (sum >> 1) + (c toUnsigned << 24)
+	end
+//[cf]
+//[cf]
+//[of]:numerical conversion
+//[of]:decimalToUnsigned
+//[c]Converts a decimal string to an unsigned integer
+//[c]
+method decimalToUnsigned
+
+	var p	= self
+	var value	= 0 u
+	var base	= 10 u
+	if p [0] == $0
+		if p [1] == $x or p [1] == $X
+			p += 2
+			base = 16
+		end
+	end
+
+	repeat
+		var c = p []
+		p ++
+		if c isNul
+			break
+		end
+		
+		if c >= $a
+			c -= ($a - 10) : Unsigned8
+		elsif c >= $A
+			c -= ($A - 10) : Unsigned8
+		elsif c <= $9
+			c -= $0 : Unsigned8
+		else
+			c = 255
+		end
+	
+		if c toUnsigned > base
+			break
+		end
+		
+		value *= base
+		value += c toUnsigned
+	end
+		
+	return value, p - 1
+//[cf]
+//[cf]
+//[of]:comparing
+//[of]:isEqual
+//[c]Returns true if the two strings are equals
+//[c]
+method isEqual (s2: String8)
+
+	var p1 = self
+	var p2 = s2
+	repeat
+		var c = p1 []
+		var d = p2 []
+		if c <> d
+			return false
+		elsif c isNul
+			return true
+		end
+		p1 ++
+		p2 ++
+	end
+//[cf]
+//[cf]
+//[of]:testing
+//[of]:isEmpty
+method isEmpty
+	
+	return self [] isNul
+//[cf]
+//[cf]
+//[of]:output
+//[of]:addToStringbuffer
+method addToStringBuffer (sb: *StringBuffer)
+
+	sb addString8 (self)
+//[cf]
+//[cf]
+//[cf]
+//[of]:Char
+//[of]:constants
+const char_nul	= \0
+const char_lf	= \n
+const char_cr	= \r
+const char_tab	= \t
+const char_space	= \w
+//[cf]
+//[of]:definition
+const Char = Char16
+
+extend Char
+//[cf]
+//[of]:testing
+//[of]:isNul
+method isNul
+
+	return self == char_nul
+//[cf]
+//[of]:notNul
+method notNul
+
+	return self <> char_nul
+//[cf]
+//[of]:isBlank
+method isBlank
+	
+	return self == char_space or self == char_tab
+//[cf]
+//[of]:isAlpha
+method isAlpha
+	
+	return	(self >= $a and self <= $z) or
+		(self >= $A and self <= $Z)
+//[cf]
+//[of]:isDigit
+method isDigit
+	
+	return self >= $0 and self <= $9
+//[cf]
+//[of]:isHexDigit
+method isHexDigit
+	
+	return	self isDigit or 
+		(self >= $a and self <= $f) or
+		(self >= $A and self <= $F)
+//[cf]
+//[of]:isLower
+method isLower
+
+	return self >= $a and self <= $z
+//[cf]
+//[of]:isUpper
+method isUpper
+	
+	return self >= $A and self <= $Z
+//[cf]
+//[cf]
+//[of]:conversion
+//[of]:toUpper
+method toUpper
+
+	if self < $a 
+		return self
+	elsif self <= $z
+		return self + ($A - $a)
+	// win1252
+	elsif self == 0x9A or self == 0x9C or self == 0x9E
+		return self - 0x10
+	elsif self == 0xFF
+		return self - 0x60
+	// iso8859-1
+	elsif  self < 0xE0
+		return self
+	elsif self < 0xF7
+		return self - 0x20
+	elsif self < 0xF8
+		return self
+	elsif self < 0xFF
+		return self - 0x20
+	// Russian Lowercase Letters
+	elsif self < 0x430
+		return self
+	elsif self < 0x450
+		return self - 0x20
+	// Lowercase Ukranian, Serbian, Byelorussian
+	elsif self < 0x460
+		return self - 0x50
+	end
+	return self
+//[cf]
+//[of]:toLower
+method toLower
+
+	if self < $A
+		return self
+	elsif self <= $Z
+		return self + ($a - $A)
+	// win1252
+	elsif self == 0x8A or self == 0x8C or self == 0x8E
+		return self + 0x10
+	elsif self == 0x9F
+		return self + 0x60
+	// iso8859-1
+	elsif self < 0xC0
+		return self
+	elsif  self < 0xD7
+		return self + 0x20
+	elsif self < 0xD8
+		return self
+	elsif  self < 0xDF
+		return self + 0x20
+	// Capital Ukranian, Serbian, Byelorussian
+	elsif self < 0x400
+		return self
+	elsif self < 0x410
+		return self + 0x50
+	// Russian Capital Letters
+	elsif self < 0x430
+		return self + 0x20
+	end
+	return self
+//[cf]
+//[of]:toHexValue
+method toHexValue
+	
+	if self >= $0 and self <= $9
+		return (self - $0) toUnsigned
+	elsif self >= $A and self <= $F
+		return (self - ($A + 10)) toUnsigned
+	elsif self >= $a and self <= $f
+		return (self - ($a + 10)) toUnsigned
+	else
+		return 0 toUnsigned
+	end
+//[cf]
+//[cf]
+//[of]:output
+//[of]:addToStringBuffer
+method addToStringBuffer (sb: *StringBuffer)
+
+	sb addChar (self)
+//[cf]
+//[cf]
+//[cf]
+//[of]:String
+//[of]:constants
+const empty_string = ""
+//[cf]
+//[of]:definition
+const String = *[] Char
+
+extend String
+//[cf]
+//[of]:initialize - release
+//[of]:delete
+//[c]Deletes a string
+//[c]
+//[c]REMARKS
+//[c]	Deleting the global empty string has no effect.
+//[c]
+method delete
+
+	if self <> empty_string
+		free (self)
+	end
+//[cf]
+//[cf]
+//[of]:accessing
+//[of]:size
+method size
+
+	var p = self
+	while p [] <> char_nul
+		p ++
+	end
+	return (p - self) toSize
+//[cf]
+//[of]:hash
+//[c]Returns the hash code of the string
+//[c]
+method hash
+
+	var p	= self
+	var sum	= 0xA5A5A5A5 hash
+	repeat
+		var c = p []
+		p ++
+		if c isNul
+			return sum
+		end
+		sum = (sum >> 1) + (c toUnsigned << 24)
+	end
+//[cf]
+//[cf]
+//[of]:numerical conversion
+//[of]:hexaToUnsigned
+//[c]Converts an hexadecimal string to an integer
+//[c]
+method hexaToUnsigned
+
+	var value = 0 : Unsigned
+	var q = self
+	repeat
+		var c = q []
+		if $0 <= c and c < $9 + 1
+			value <<= 4
+			value += (c - $0) : Unsigned
+		elsif $a <= c and c < $f + 1
+			value <<= 4
+			value += (c - $a + 10) : Unsigned
+		elsif $A <= c and c < $F + 1
+			value <<= 4
+			value += (c - $A + 10) : Unsigned
+		else
+			break
+		end
+		q ++
+	end
+	
+	return value, q
+//[cf]
+//[of]:hexaToInteger
+//[c]Converts an hexadecimal string to an integer
+//[c]
+method hexaToInteger
+
+	var value, endptr = self hexaToUnsigned
+	return value : Integer, endptr
+//[cf]
+//[of]:decimalToUnsigned
+//[c]Converts a decimal string to an integer
+//[c]
+method decimalToUnsigned
+
+	var p	= self
+	var value	= 0 u
+	var base	= 10 u
+	if p [0] == $0
+		if p [1] == $x or p [1] == $X
+			p += 2
+			base = 16
+		end
+	end
+
+	repeat
+		var c = p []
+		p ++
+		if c isNul
+			break
+		end
+		
+		if c >= $a
+			c -= ($a - 10) : Unsigned16
+		elsif c >= $A
+			c -= ($A - 10) : Unsigned16
+		elsif c <= $9
+			c -= $0 : Unsigned16
+		else
+			c = 255
+		end
+	
+		if c toUnsigned > base
+			break
+		end
+		
+		value *= base
+		value += c toUnsigned
+	end
+		
+	return value, p - 1
+//[cf]
+//[of]:decimalToInteger
+//[c]Converts the string to an integer
+//[c]
+method decimalToInteger
+
+	var p = self
+	var c	= p []
+	var neg = false
+	if c == $-
+		neg = true
+		p ++
+	elsif c == $+
+		p ++
+	end
+	
+	var unsigned, endptr = p decimalToUnsigned
+	var value = unsigned signed
+	if neg
+		value = - value
+	end
+	
+	return value, endptr
+//[cf]
+//[cf]
+//[of]:case mutation
+//[of]:toLower
+method toLower
+
+	var p = self
+	repeat
+		var c = p []
+		if c isNul
+			break
+		end
+		p [] = c toLower
+		p ++
+	end
+//[cf]
+//[of]:toUpper
+method toUpper
+
+	var p = self
+	repeat
+		var c = p []
+		if c isNul
+			break
+		end
+		p [] = c upper
+		p ++
+	end
+//[cf]
+//[cf]
+//[of]:searching
+//[of]:firstCharOccurrence
+//[c]Returns the first occurrence of a char, nil if not found
+//[c]
+method firstCharOccurrence (c: Char)
+
+	var p = self
+	repeat
+		var d = p []
+		if d isNul
+			break
+		elsif d == c
+			return p
+		end
+		p ++
+	end
+	
+	// not found
+	return nil
+//[cf]
+//[of]:lastCharOccurrence
+//[c]Returns the last occurrence of a char, nil if not found
+//[c]
+method lastCharOccurrence (c: Char)
+
+	var p = self + self size - 1
+	while p >= self
+		if p [] == c
+			return p
+		end
+		p --
+	end
+	
+	// not found
+	return nil
+//[cf]
+//[of]:firstStringOccurrence
+//[c]Returns the first occurrence of a substring, nil if not found
+//[c]
+method firstStringOccurrence (t: String)
+
+	var p = self
+	var q = t
+	var c = p []
+	var d = q []
+	p ++
+	q ++
+	var size = q size * Char size
+	while c notNul
+		if c == d
+			if memoryIsEqual (p, q, size)
+				return p - 1
+			end
+		end
+		c = p []
+		p ++
+	end
+	
+	// not found
+	return nil
+//[cf]
+
+//[of]:skipBlanks
+method skipBlanks
+	
+	var p = self
+	while p [] isBlank
+		p ++
+	end
+	return p
+//[cf]
+//[of]:skipBlanksRange
+method skipBlanksRange (limit: String)
+
+	var p = self
+	while p <> limit and p [] isBlank
+		p ++
+	end
+	return p
+//[cf]
+//[of]:skipNonBlanks
+method skipNonBlanks
+
+	var p = self
+	repeat
+		var c = p []
+		if c isNul
+			break
+		elsif c isBlank
+			break
+		end
+		p ++
+	end
+	return p
+//[cf]
+//[cf]
+//[of]:comparing
+//[of]:compare
+//[c]Compares two strings
+//[c]
+method compare (s2: String)
+
+	var p1	= self
+	var p2	= s2
+	repeat
+		var c = p1 []
+		if c <> p2 []
+			return c toInteger - p2 [] toInteger
+		elsif c isNul
+			return 0
+		end
+		p1 ++
+		p2 ++
+	end
+//[cf]
+//[of]:compareWithSize
+//[c]
+//[c]REMARKS
+//[c]	The size is assumed to be less or equal than the size of s2
+//[c]
+method compareWithSize (s2: String, size: Size)
+
+	var p1	= self
+	var p2	= s2
+	var limit	= s2 + size
+
+	while p2 < limit
+		if p1 [] > p2 []
+			return +1
+		elsif p1 [] < p2 []
+			return -1
+		end
+		p1 ++
+		p2 ++
+	end
+	
+	return 0
+//[cf]
+//[of]:compareNoCase
+//[c]Compares two strings in case insensitive mode
+//[c]
+method compareNoCase (s2: String)
+
+	var p1 = self
+	var p2 = s2
+	repeat
+		var c1 = p1 [] toUpper
+		var c2 = p2 [] toUpper
+		if c1 <> c2
+			return c1 toInteger - c2 toInteger
+		elsif isNul (c1)
+			return c1 toInteger - c2 toInteger
+		end
+		p1 ++
+		p2 ++
+	end
+//[cf]
+//[of]:compareNoCaseWithSize
+//[c]Compare two strings in case insensitive mode
+//[c]
+//[c]REMARKS
+//[c]	The size is assumed to be less or equal than the size of s2
+//[c]
+method compareNoCaseWithSize (s2: String, size: Size)
+
+	var p1	= self
+	var p2	= s2
+	var limit	= s2 + size
+	while p2 < limit
+		var c1 = p1 [] upper
+		var c2 = p2 [] upper
+		if c1 <> c2
+			return c1 toInteger - c2 toInteger
+		elsif c1 isNul
+			return c1 toInteger - c2 toInteger
+		end
+		p1 ++
+		p2 ++
+	end
+	return 0
+//[cf]
+//[of]:isEqual
+//[c]Returns true if the two strings are equals
+//[c]
+method isEqual (s2: String)
+
+	var p1 = self
+	var p2 = s2
+	repeat
+		var c = p1 []
+		var d = p2 []
+		if c <> d
+			return false
+		elsif c isNul
+			return true
+		end
+		p1 ++
+		p2 ++
+	end
+//[cf]
+//[cf]
+//[of]:testing
+//[of]:isEmpty
+method isEmpty
+	
+	return self [] isNul
+//[cf]
+
+//[of]:startsWithChar
+method startsWithChar (c: Char)
+	
+	return self [] == c
+//[cf]
+//[of]:endsWithChar
+//[c]Returns true if the last char is the given one
+//[c]
+method endsWithChar (c: Char)
+	
+	var n = self size
+	if n == 0
+		return false
+	end
+	return self [n - 1] == c
+//[cf]
+//[of]:startsWithString
+method startsWithString (substr: String)
+
+	return memoryIsEqual (self, substr, substr size * Char size)
+//[cf]
+//[of]:endsWithString
+method endsWithString (substr: String)
+
+	var size1	= self size
+	var size2	= substr size
+	if size2 > size1
+		return false
+	end
+	
+	return memoryIsEqual (	self + size1 - size2, 
+		substr, 
+		size2 * Char size)
+//[cf]
+//[of]:containsString
+method containsString (substr: String)
+	
+	return self firstStringOccurrence (substr) notNil
+//[cf]
+//[cf]
+//[of]:copying
+//[of]:copy
+method copy
+
+	if self == empty_string
+		return self
+	end
+	
+	var n	= self size + 1
+	var buf	= Char allocateArray (n)
+	memoryCopy (buf, self, n * Char size)
+	return buf
+//[cf]
+//[of]:copyRange
+//[c]Constructs a string from a raw buffer
+//[c]
+method copyRange (size: Size)
+
+	var buf	= Char allocateArray (size + 1)
+	memoryCopy (buf, self, size * Char size)
+	buf [size] = char_nul
+	return buf
+//[cf]
+//[cf]
+//[of]:output
+//[of]:addToStringBuffer
+method addToStringBuffer (sb: *StringBuffer)
+
+	sb addString (self)
+//[cf]
+//[cf]
+//[cf]
+//[of]:StringBuffer
+//[of]:definition
+struct StringBuffer
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+method initialize
+	
+	self buffer	= Char allocateArray (self defaultStringBufferSize)
+	self used	= 0
+	self bufferSize	= self defaultStringBufferSize
+//[cf]
+//[of]:release
+method release
+
+	Char freeArray (self buffer, self bufferSize)
+//[cf]
+//[cf]
+//[of]:accessing
+//[of]:base
+method base
+
+	return self buffer
+//[cf]
+//[of]:size
+method size
+
+	return self used
+//[cf]
+//[of]:[]
+method _at (index)
+
+	return self buffer [index]
+//[cf]
+//[of]:first
+method first
+
+	return self buffer [0]
+//[cf]
+//[of]:last
+method last
+
+	return self buffer [self used - 1]
+//[cf]
+//[cf]
+//[of]:conversion
+//[of]:newString
+//[c]Creates a new string from the content of the string buffer
+//[c]
+method newString
+
+	return self string copy
+//[cf]
+//[of]:string
+//[c]Convert the buffer to a string
+//[c]
+method string
+	
+	self reserve (1)
+	self buffer [self used] = char_nul
+	return self buffer
+//[cf]
+//[cf]
+//[of]:adding - removing
+//[of]:<<
+method _shl (obj)
+
+	obj addToStringBuffer (self)
+	return self
+//[cf]
+//[of]:printFormat
+method printFormat (s: String, ...)
+
+	self removeAll
+	self addFormat (s, ...)
+//[cf]
+//[of]:addFormat
+method addFormat (s: String, ...)
+
+	var parameters = {[extra_size] Pointer}
+	var p = parameters
+	each_extra do arg
+		var x = {[1] #arg}
+		x [] = arg
+		p [] = x
+		p ++
+	end
+	
+	self addFormatParameters (s, extra_size, parameters)
+
+method addFormatParameters (	s	: String, 
+	parameterCount	: Size, 
+	parameters	: *[] Pointer)
+
+	var arg	= parameters
+	var limit	= parameters + parameterCount
+	var p	= s
+	repeat 
+		var c = p []
+		p ++
+		if c isNul
+			break
+		elsif c == $%
+			c = p []
+			p ++
+			if c isNul
+				break
+			elsif c == $s
+				if arg <> limit
+					self << (arg : *[] *[1] String) [][]
+					arg ++
+				else
+					self << $?
+				end
+			elsif c == $i
+				if arg <> limit
+					self << (arg : *[] *[1] Integer) [][]
+					arg ++
+				else
+					self << $?
+				end
+			elsif c == $u
+				if arg <> limit
+					self << (arg : *[] *[1] Unsigned) [][]
+					arg ++
+				else
+					self << $?
+				end
+			elsif c == $c
+				if arg <> limit
+					self << (arg : *[] *[1] Char) [][1]
+					arg ++
+				else
+					self << $?
+				end
+			else
+				self << c
+			end
+		else
+			self << c
+		end
+	end
+//[cf]
+//[of]:addChar8
+//[c]Appends a single char
+//[c]
+method addChar8 (c: Char8)
+
+	self reserve (1)
+	self buffer [self used] = c : Char
+	self used ++
+//[cf]
+//[of]:addString8
+//[c]Appends a string
+//[c]
+method addString8 (str: String8)
+
+	var size = str size
+	self reserve (size)
+	
+	var p = str
+	var q = self buffer + self used
+	repeat
+		var c = p []
+		q [] = c toChar16
+		p ++
+		q ++
+		if c isNul
+			break
+		end
+	end
+	
+	self used += size
+//[cf]
+//[of]:addChar
+//[c]Appends a single char
+//[c]
+method addChar (c: Char)
+
+	self reserve (1)
+	self buffer [self used] = c
+	self used ++
+//[cf]
+//[of]:addString
+//[c]Appends a string
+//[c]
+method addString (str: String)
+
+	var size = str size
+	self reserve (size)
+	memoryCopy (self buffer + self used, str, size * Char size)
+	self used += size
+//[cf]
+//[of]:addRange
+//[c]Appends a sub string
+//[c]
+method addRange (str: String, size: Size)
+
+	self reserve (size)
+	memoryCopy (self buffer + self used, str, size * Char size)
+	self used += size
+//[cf]
+//[of]:addStringBuffer
+//[c]Appends a string
+//[c]
+method addStringBuffer (sb: *StringBuffer)
+	
+	var size = sb size
+	self reserve (size)
+	memoryCopy (self buffer + self used, sb buffer, size * Char size)
+	self used += size
+//[cf]
+//[of]:addUnsigned
+//[c]Appends an unsigned integer
+//[c]
+method addUnsigned (n: Size)
+
+	var i	= n
+	var buf	= {[12] Char}
+	var p	= buf + 11
+	p [] = char_nul
+	if i == 0
+		p --
+		p [] = $0
+	else
+		while i <> 0
+			p --
+			var r = (i % 10)  : Unsigned16
+			p [] = $0 + r
+			i /= 10
+		end
+	end
+	self addString (p)
+//[cf]
+//[of]:addInteger
+//[c]Appends an integer
+//[c]
+method addInteger (n: Integer)
+
+	var i = n
+	if i < 0
+		self addChar ($-)
+		i = - i
+	end
+	self addUnsigned (i unsigned)
+//[cf]
+//[of]:addHexa
+//[c]Appends an integer as hexadecimal
+//[c]
+method addHexa (n: Unsigned)
+
+	var i	= n
+	var buf	= {[10] Char}
+	var p	= buf + 9
+	p [] = char_nul
+	if i == 0
+		p --
+		p [] = $0
+	else
+		while i <> 0
+			p --
+			var r = (i & 15)  : Unsigned16
+			if r < 10
+				p [] = $0 + r
+			else
+				p [] = $A + r - 10
+			end
+			i >>= 4
+		end
+	end
+	self addString (p)
+//[cf]
+//[of]:addHexaByte
+//[c]Appends a byte as 2-digit hexadecimal
+//[c]
+method addHexaByte (n: Byte)
+
+	var a	= ((n >> 4) & 15) : Unsigned16
+	var b	= (n & 15) : Unsigned16
+
+	self << (a < 10 cond ($0 + a) else ($A + a - 10))
+	self << (b < 10 cond ($0 + b) else ($A + b - 10))
+//[cf]
+//[of]:addRoom
+//[c]Appends an unitialized area
+//[c]Use this method if you want to drop a text yourself
+//[c]One more byte is automatically reserved for a terminating nul 
+//[c]char.
+//[c]
+method addRoom (size: Size)
+
+	self reserve (size)
+	var p = self buffer + self used
+	self used += size
+	return p
+//[cf]
+
+//[of]:removeAll
+//[c]Removes content
+//[c]
+//[c]	The buffer is not free in order to optimize the recycling of this
+//[c]	string buffer.
+//[c]
+method removeAll
+
+	self used = 0
+//[cf]
+//[of]:removeRange
+//[c]Removes a substring
+//[c]
+method removeRange (start: Offset, size: Size)
+
+	var limit = start + size
+
+	// move the end to overlap the range to be removed
+	memoryMove (self buffer + start, self buffer + limit, (self used - limit) * Char size)
+	
+	// update the used chars
+	self used -= size
+//[cf]
+//[of]:removeLast
+//[c]Removes the last char
+//[c]
+method removeLast
+
+	// Update the used chars
+	self used --
+//[cf]
+//[of]:removeFrom
+//[c]Removes all chars after start
+//[c]
+method removeFrom (start: Offset)
+
+	self used = start
+//[cf]
+//[cf]
+//[of]:testing
+//[of]:endsWithChar
+//[c]Returns true if the last char is the given one
+//[c]
+method endsWithChar (c: Char)
+	
+	var n = self size
+	if n == 0
+		return false
+	end
+	return self [n - 1] == c
+//[cf]
+//[of]:isEmpty
+method isEmpty
+
+	return self size == 0
+//[cf]
+//[cf]
+
+:private
+//[of]:constants
+static defaultStringBufferSize = 1024
+//[cf]
+//[of]:attributes
+attr buffer	: String
+attr used	: Size
+attr bufferSize	: Size
+//[cf]
+//[of]:utils
+//[of]:reserve
+//[c]Reserves a sufficient space
+//[c]
+method reserve (l: Size)
+
+	// We always must have one more char
+	if self used + l + 1 <= self bufferSize
+		return
+	end
+	
+	// Compute new size
+	var newSize = (self used + l + 1) * 5 / 4
+	
+	// Allocate new buffer
+	var q = Char allocateArray (newSize)
+	
+	// Copy the old buffer into the new one
+	memoryCopy (q, self buffer, self used * Char size)
+	
+	// Free the old buffer
+	Char freeArray (self buffer, self bufferSize)
+	
+	// Update object
+	self bufferSize	= newSize
+	self buffer	= q
+//[cf]
+//[cf]
+//[cf]
+//[of]:TempStringBuffer
+//[c]A temp string buffer is a string buffer with a short life time.
+//[c]The class try to re-use an existing buffer to reduce the number of
+//[c]memory allocations.
+//[c]
+const TempStringBuffer = StringBuffer
+
+//[cf]
+//[of]:StringDictionary
+//[c]A dictionary when keys are strings
+//[c]
+//[c]The key are not owned by the dictionary, they won't be
+//[c]released when releasing the dictionary.
+//[c]
+struct StringDictionary (T) : Dictionary (String, T, nil, ref hash (String), ref isEqual (String, String))
+//[cf]
+//[cf]
+//[of]:Collections
+//[of]:Vector
+//[of]:definition
+//[c]A vector of primitive types
+//[c]
+//[c]	A vector is a resizable array.
+//[c]
+const notFoundIndex	= -1 : Offset
+const invalidIndex	= -1 : Offset
+
+struct Vector (T)
+//[cf]
+//[of]:initialize - release
+//[of]:from
+method from (src: *Vector (T))
+
+	self size	= src size
+	self allocated	= src allocated
+	self array	= T allocateArray (src allocated)
+	
+	memoryCopy (	self array, 
+		src array, 
+		src size * (T) size)
+//[cf]
+//[of]:initialize
+method initialize
+	
+	self initialize (self defaultVectorSize)
+
+method initialize (initialAllocated: Size)
+
+	self size	= 0
+	self allocated	= initialAllocated
+	self array	= T allocateArray (initialAllocated)
+//[cf]
+//[of]:release
+method release
+	
+	T freeArray (self array, self allocated)
+//[cf]
+//[cf]
+//[of]:accessing
+//[of]:array
+//[c]The array should never be accessed directly except for performance
+//[c]reasons.
+//[c]
+attr array	: *[] T
+//[cf]
+//[of]:size
+attr size	: Size
+//[cf]
+//[of]:[]
+//[c]Returns an element
+//[c]
+method _at (i: Size)
+
+	return self array [i]
+//[cf]
+//[of]:set
+method set (index: Offset, value: T)
+
+	self array [index] = value
+//[cf]
+//[of]:first
+method first
+
+	return self [0]
+//[cf]
+//[of]:last
+method last
+
+	return self [self size - 1]
+//[cf]
+//[cf]
+//[of]:adding - removing
+//[of]:add
+//[c]Appends an element
+//[c]
+method add (value: T)
+
+	var index = self size
+	if self allocated == index
+		self reserve
+	end
+	
+	self array [index] = value
+	self size ++
+//[cf]
+//[of]:addFirst
+//[c]Adds an element at the beginning
+//[c]
+method addFirst (value: T)
+
+	self insert (value, 0)
+//[cf]
+//[of]:insert
+//[c]Inserts an element at index
+//[c]
+method insert (value: T, index: Offset)
+
+	var n = self size
+	if self allocated == n
+		self reserve
+	end
+
+	var base = self array + index
+	memoryMove (	base + 1, 
+		base, 
+		T size * (n - index))
+
+	self array [index] = value
+	self size ++
+//[cf]
+
+//[of]:remove
+//[c]Removes an element at index
+//[c]
+method remove (index: Offset)
+
+	var base	= self array + index
+	var n	= self size
+
+	memoryMove (	base, 
+		base + 1, 
+		T size * (n - index - 1))
+
+	self size --
+//[cf]
+//[of]:removeValue
+//[c]Removes an element
+//[c]
+method removeValue (value: T)
+
+	self size each do i
+		if self [i] == value
+			self remove (i)
+			return
+		end
+	end
+//[cf]
+//[of]:removeAll
+//[c]Removes all elements
+//[c]
+method removeAll
+	
+	self size = 0
+//[cf]
+//[of]:removeFrom
+//[c]Removes all elements starting from index
+//[c]
+method removeFrom (index: Offset)
+	
+	self size = index
+//[cf]
+//[of]:removeFirst
+method removeFirst
+
+	self remove (0)
+//[cf]
+//[of]:removeLast
+method removeLast
+
+	self size --
+//[cf]
+
+//[of]:replace
+//[c]Replaces the n1 slots at index by n2 slots 
+//[c]
+//[c]Values are unchanged/uninitialized
+//[c]
+method replace (index: Offset, n1: Size, n2: Size)
+
+	var delta = n2 - n1
+
+	if delta == 0
+		return
+	end
+	
+	var size	= self size
+	var newSize	= size + delta
+
+	if delta > 0 and self allocated < newSize
+		self allocate (newSize * 3 / 2)
+	end
+
+	var base = self array + index
+	memoryMove (	base + n2, 
+		base + n1,
+		*T size * (size - index - n1))
+	self size += delta
+//[cf]
+//[of]:reserve
+//[c]Reserves space for n elements
+//[c]
+//[c]This method is for optimization only: it avoids to much re-allocations 
+//[c]while filling the vector.
+//[c]
+method reserve (n: Size)
+
+	if self allocated < n
+		self allocate (n)
+	end
+//[cf]
+//[cf]
+//[of]:enumerating
+//[of]:each
+//[c]Enumerates all elements
+//[c]
+method each
+
+	self size each do i
+		yield self [i]
+	end
+//[cf]
+//[of]:reverseEach
+//[c]Enumerates all elements
+//[c]
+method reverseEach
+
+	var i = self size
+	while i <> 0
+		i --
+		yield self [i]
+	end
+//[cf]
+//[cf]
+//[of]:searching
+//[of]:indexOf
+//[c]Finds an element
+//[c]
+//[c]Returns its index or 'notFoundIndex' if not found
+//[c]
+method indexOf (value: T)
+
+	self size each do i
+		if self [i] == value
+			return i
+		end
+	end
+	return notFoundIndex
+//[cf]
+//[cf]
+//[of]:sorting
+//[of]:insertionSort
+//[c]Sorts elements using the insertion sort algorithm
+//[c]
+//[c]Naive algorithm but more efficient than quick sort on almost
+//[c]sorted lists.
+//[c]
+//[c]Elements are compared using the '<' operators on items.
+//[c]
+method insertionSort
+
+	var n = self size
+	if n < 2
+		return
+	end
+	var a = self array
+	var i = 1 s
+	while i < n
+		var item = a [i]
+		var k = i
+		while k > 0 and item < a [k - 1]
+			a [k] = a [k - 1]
+			k --
+		end
+		a [k] = item
+		i ++
+	end
+//[cf]
+//[cf]
+//[of]:testing
+//[of]:contains
+//[c]Tests if the vector contains an item
+//[c]
+method contains (value: T)
+
+	self each do e
+		if e == value
+			return true
+		end
+	end
+	return false
+//[cf]
+//[of]:isEmpty
+method isEmpty
+
+	return self size == 0
+//[cf]
+//[cf]
+
+:private
+//[of]:constants
+static defaultVectorSize	= 8
+//[cf]
+//[of]:attributes
+attr allocated	: Size
+//[cf]
+//[of]:utils
+//[of]:reserve
+//[c]Reserves space
+//[c]
+method reserve
+	
+	self allocate (self allocated * 3 / 2 + 1)
+//[cf]
+//[of]:allocate
+//[c]Reserves space
+//[c]
+method allocate (n: Size)
+
+	// Create new array
+	var a = T allocateArray (n)
+	
+	// Copy content of old array into the new one
+	memoryCopy (a, self array, self allocated * T size)
+
+	// Delete the old array
+	T freeArray (self array, self allocated)
+
+	self allocated	= n
+	self array	= a
+//[cf]
+//[cf]
+//[cf]
+//[of]:Array
+//[of]:definition
+//[c]A Vector where elements are deleted when released
+//[c]
+//[c]Elements are not deleted when removed, elements are only
+//[c]deleted if still attached to the array at destruction time
+//[c](an element could be moved from an array to another one).
+//[c]
+struct Array (T) : Vector (T)
+//[cf]
+//[of]:initialize - release
+//[of]:release
+method release
+
+	self each do e
+		e delete
+	end
+	self super release
+//[cf]
+//[cf]
+//[cf]
+//[of]:Collection
+//[of]:definition
+//[c]Linked list of elements
+//[c]
+struct Collection (Element)
+
+	attr size	: Size
+	attr firstElement	: *Element
+	attr lastElement	: *Element
+//[cf]
+//[of]:initialize
+//[of]:initialize
+method initialize
+
+	self size	= 0
+	self firstElement	= nil
+	self lastElement	= nil
+//[cf]
+//[cf]
+//[of]:enumerating
+//[of]:each
+method each
+
+	var e = self firstElement
+	while e notNil
+		yield e
+		e = e nextSibling
+	end
+//[cf]
+//[cf]
+//[of]:adding - removing
+//[of]:add
+//[c]Adds an element at the end of the collection
+//[c]
+method add (e: *Element)
+
+	if self lastElement notNil
+		self lastElement nextSibling = e
+	end
+	
+	self lastElement = e
+	
+	if self firstElement isNil
+		self firstElement = e
+	end
+	
+	self size ++
+	
+	// The next sibling is set when inserting the element in the collection
+	e nextSibling = nil
+//[cf]
+//[of]:addFirst
+//[c]Inserts an element at the beginning
+//[c]
+method addFirst (e: *Element)
+
+	e nextSibling = self firstElement
+	self firstElement = e
+	self size ++
+		
+	if self lastElement isNil
+		self lastElement = e
+	end
+//[cf]
+//[of]:addAll
+//[c]Adds all the element of another collection to this one
+//[c]
+//[c]ARGUMENTS
+//[c]	other	-	The elements to append
+//[c]
+//[c]REMARKS
+//[c]	The other collection is no longer valid after using this
+//[c]	method: elements can belong to one collection only.
+//[c]
+method addAll (other: *Collection (Element))
+
+	if self lastElement notNil
+		self lastElement nextSibling = other firstElement
+	else
+		self firstElement = other firstElement
+	end
+	self lastElement = other lastElement
+//[cf]
+//[of]:removeAll
+//[c]Removes all elements from the collection
+//[c]
+method removeAll
+	
+	self initialize
+//[cf]
+//[cf]
+//[of]:accessing
+//[of]:nextElement
+//[c]Returns the next element
+//[c]
+//[c]	This method is useful to iterate through a collection in an uniform manner
+//[c]		firstElement (obj)	-- returns the reference to the first element
+//[c]		nextElement (obj, element)	-- returns the reference to the next element of 'element'
+//[c]		elementValue (obj, element)	-- returns the item
+//[c]	
+//[c]	These 3 methods are used by the global each (iterable1, iterable2) function to iterate on
+//[c]	the second list (iterable2)
+//[c]
+method nextElement (element)
+	
+	return element nextSibling
+//[cf]
+//[of]:elementValue
+//[c]Returns the value of an element
+//[c]
+//[c]	This method is useful to iterate through a collection in an uniform manner
+//[c]		firstElement (obj)	-- returns the reference to the first element
+//[c]		nextElement (obj, element)	-- returns the reference to the next element of 'element'
+//[c]		elementValue (obj, element)	-- returns the item
+//[c]	
+//[c]	These 3 methods are used by the global each (iterable1, iterable2) function to iterate on
+//[c]	the second list (iterable2)
+//[c]
+method elementValue (element)
+	
+	return element
+//[cf]
+//[cf]
+//[of]:testing
+//[of]:isEmpty
+method isEmpty
+
+	return self firstElement isNil
+//[cf]
+//[cf]
+//[cf]
+//[of]:CollectionElement
+//[of]:definition
+struct CollectionElement (Element)
+
+	attr nextSibling	: *Element
+//[cf]
+//[of]:testing
+//[of]:isLast
+//[c]Returns true if the element is the last element of the collection
+//[c]
+method isLast
+
+	return self nextSibling isNil
+//[cf]
+//[cf]
+//[cf]
+//[of]:LinkCollection
+//[of]:definition
+//[c]Linked list of elements with double linked list
+//[c]
+struct LinkCollection (Element)
+
+	attr size	: Size
+	attr firstElement	: *Element
+	attr lastElement	: *Element
+//[cf]
+//[of]:initialize
+//[of]:initialize
+method initialize
+
+	self size	= 0
+	self firstElement	= nil
+	self lastElement	= nil
+//[cf]
+//[of]:release
+method release
+
+	// empty
+//[cf]
+//[of]:deleteAllAndRelease
+//[c]This method is used to delete each element of the collection
+//[c]and release it.
+//[c]
+method deleteAllAndRelease
+
+	var e = self firstElement
+	while e notNil
+		var next = e nextSibling
+		e delete
+		e = next
+	end
+
+	self release
+//[cf]
+//[cf]
+//[of]:enumerating
+//[of]:each
+method each
+
+	var e = self firstElement
+	while e notNil
+		yield e
+		e = e nextSibling
+	end
+//[cf]
+//[cf]
+//[of]:adding - removing
+//[of]:add
+//[c]Adds an element at the end of the collection
+//[c]
+method add (e: *Element)
+
+	e nextSibling	= nil
+	e previousSibling	= self lastElement
+
+	if self firstElement isNil
+		self firstElement = e
+	end
+	
+	if self lastElement notNil
+		self lastElement nextSibling = e
+	end
+	
+	self lastElement = e
+	
+	self size ++
+//[cf]
+//[of]:addFirst
+//[c]Inserts an element at the beginning
+//[c]
+method addFirst (e: *Element)
+
+	e nextSibling	= self firstElement
+	e previousSibling	= nil
+	
+	if self firstElement notNil
+		self firstElement previousSibling = e
+	end
+	
+	self firstElement	= e
+	self size ++
+		
+	if self lastElement isNil
+		self lastElement = e
+	end
+//[cf]
+//[of]:removeAll
+//[c]Removes all elements from the collection
+//[c]
+method removeAll
+	
+	self initialize
+//[cf]
+//[of]:remove
+//[c]Removes an element
+//[c]
+method remove (e: *Element)
+
+	if self firstElement == e
+		self firstElement = e nextSibling
+	end
+	
+	if self lastElement == e
+		self lastElement = e previousSibling
+	end
+
+	if e previousSibling notNil
+		e previousSibling nextSibling = e nextSibling
+	end
+
+	if e nextSibling notNil
+		e nextSibling previousSibling = e previousSibling
+	end
+//[cf]
+//[cf]
+//[of]:accessing
+//[of]:nextElement
+//[c]Returns the next element
+//[c]
+//[c]	This method is useful to iterate through a collection in an uniform manner
+//[c]		firstElement (obj)	-- returns the reference to the first element
+//[c]		nextElement (obj, element)	-- returns the reference to the next element of 'element'
+//[c]		elementValue (obj, element)	-- returns the item
+//[c]	
+//[c]	These 3 methods are used by the global each (iterable1, iterable2) function to iterate on
+//[c]	the second list (iterable2)
+//[c]
+method nextElement (element)
+	
+	return element nextSibling
+//[cf]
+//[of]:elementValue
+//[c]Returns the value of an element
+//[c]
+//[c]	This method is useful to iterate through a collection in an uniform manner
+//[c]		firstElement (obj)	-- returns the reference to the first element
+//[c]		nextElement (obj, element)	-- returns the reference to the next element of 'element'
+//[c]		elementValue (obj, element)	-- returns the item
+//[c]	
+//[c]	These 3 methods are used by the global each (iterable1, iterable2) function to iterate on
+//[c]	the second list (iterable2)
+//[c]
+method elementValue (element)
+	
+	return element
+//[cf]
+//[cf]
+//[of]:testing
+//[of]:isEmpty
+method isEmpty
+
+	return self firstElement isNil
+//[cf]
+//[cf]
+//[cf]
+//[of]:LinkCollectionElement
+//[of]:definition
+struct LinkCollectionElement (Element)
+
+	attr nextSibling	: *Element
+	attr previousSibling	: *Element
+//[cf]
+//[of]:testing
+//[of]:isFirst
+//[c]Returns true if the element is the first element of the collection
+//[c]
+method isFirst
+
+	return self previousSibling isNil
+//[cf]
+//[of]:isLast
+//[c]Returns true if the element is the last element of the collection
+//[c]
+method isLast
+
+	return self nextSibling isNil
+//[cf]
+//[cf]
+//[cf]
+
+//[of]:Dictionary
+//[of]:definition
+//[c]The hashtable class
+//[c]
+struct Dictionary (Key, Value, emptyKey, hashFunction, compareFunction)
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+method initialize
+
+	self collisions	= 0 s
+	self tally	= 0 s
+	self allocated	= self defaultAllocated
+	self associations	= Association (Key, Value) allocateArray (self defaultAllocated)
+	
+	self eachAssociation (self associations, self defaultAllocated) do a
+		a key = emptyKey
+	end
+//[cf]
+//[of]:release
+method release
+
+	// it is the responsibility of the sub-class to free the keys and values
+	Association (Key, Value) freeArray (	self associations,
+		self allocated)
+//[cf]
+//[cf]
+//[of]:adding - removing
+//[of]:add
+//[c]Puts value
+//[c]
+//[c]There must be at least one free slot.
+//[c]If there were already a value at this slot, the old value is returned.
+//[c]In such a case, the returned value, and the passed key are no more
+//[c]referenced by the dictionary, it is the responsibility of the sub-class
+//[c]to free them.
+//[c]
+method add (k: Key, v: Value)
+
+	var location	= self slot (k)
+	var count	= 1 s
+	
+	repeat
+		var a = self associations [location]
+		if a key <> emptyKey
+			if self isEqual (k, a key)
+				var old = a value
+				a key = k	// It is the same value but not necessarily the same object (the key may be attached to the old value)
+				a value = v
+				return old
+			else
+				location ++
+				if location == self allocated
+					location = 0
+				end
+				count ++
+			end
+		else
+			a key = k
+			a value = v
+			if count > self collisions
+				self collisions = count
+			end
+			self increaseTally
+			return nil
+		end
+	end
+//[cf]
+//[of]:addIfExists
+//[c]Same as add but execute the given block if there is already a value
+//[c]with the same key. It can be useful to delete the previous key
+//[c]and value.
+//[c]
+method addIfExists (k: Key, v: Value)
+
+	var location	= self slot (k)
+	var count	= 1 s
+	
+	repeat
+		var a = self associations [location]
+		if a notEmpty
+			if self isEqual (k, a key)
+				yield a key, a value
+				a key = k	// It is the same value but not necessarily the same object (the key may be attached to the old value)
+				a value = v
+				return
+			else
+				location ++
+				if location == self allocated
+					location = 0
+				end
+				count ++
+			end
+		else
+			a key = k
+			a value = v
+			if count > self collisions
+				self collisions = count
+			end
+			self increaseTally
+			return
+		end
+	end
+//[cf]
+//[of]:remove
+//[c]Removes an item
+//[c]
+//[c]Returns the item for the given key or nil if not found
+//[c]
+method remove (k: Key)
+
+	var location	= self slot (k)
+	var count	= self collisions
+
+	while count > 0 and self notEmpty (location)
+		var a = self associations [location]
+		if self isEqual (k, a key)
+			a clear
+			location ++
+			if location == self allocated
+				location = 0
+			end
+			self fillUp (location) // useless if we are going to resize
+			self decreaseTally
+			return
+		end
+		location ++
+		if location == self allocated
+			location = 0
+		end
+		count --
+	end
+//[cf]
+//[of]:removeAll
+//[c]Removes all items
+//[c]
+method removeAll
+
+	self allocated each do i
+		self associations [i] clear
+	end
+	self tally = 0
+//[cf]
+//[cf]
+//[of]:enumerating
+//[of]:eachKeyAndValue
+//[c]Enumerates keys and values
+//[c]
+method eachKeyAndValue
+
+	self allocated each do i
+		if self notEmpty (i)
+			var a = self associations [i]
+			yield a key, a value
+		end
+	end
+//[cf]
+//[of]:eachKey
+//[c]Enumerates keys
+//[c]
+method eachKey
+
+	self allocated each do i
+		if self notEmpty (i)
+			yield self associations [i] key
+		end
+	end
+//[cf]
+//[of]:eachValue
+//[c]Enumerates values
+//[c]
+method eachValue
+
+	self allocated each do i
+		if self notEmpty (i)
+			yield self associations [i] value
+		end
+	end
+//[cf]
+//[cf]
+//[of]:accessing
+//[of]:size
+method size
+	
+	return self tally
+//[cf]
+//[of]:[]
+//[c]Finds value
+//[c]
+//[c]	Returns the value for the given key
+//[c]
+method _at (k: Key)
+
+	var location	= self slot (k)
+	var count	= self collisions
+	
+	while count > 0 and self notEmpty (location)
+		var a = self associations [location]
+		if self isEqual (a key, k)
+			return a value
+		end
+		location ++
+		if location == self allocated
+			location = 0
+		end
+		count --
+	end
+	
+	return nil
+//[cf]
+//[cf]
+//[of]:testing
+//[of]:isEmpty
+method isEmpty
+	
+	return self tally == 0
+//[cf]
+//[cf]
+
+:private
+//[of]:constants
+static defaultAllocated = 10 : Size
+//[cf]
+//[of]:attributes
+attr associations	: *[] Association (Key, Value)	// Buffer to all associations
+attr tally	: Size	// Number of used slots
+attr allocated	: Size	// Total number of slots
+attr collisions	: Size	// Maximum of collisions occured
+		// It is an upper bound: after removing an association the
+		// value may not be up to date
+//[cf]
+//[of]:utils
+//[of]:resize
+//[c]Resizes the list of associations
+//[c]
+method resize (s: Size)
+
+	var c = 0 s
+	var a = Association (Key, Value) allocateArray (s)
+	
+	self eachAssociation (a, s) do e
+		e key = emptyKey
+	end
+
+	self eachKeyAndValue do key, value
+	
+		var count = 1 s
+		var location = self hash (key) % s
+		while a [location] key <> emptyKey
+			location ++
+			if location == s
+				location = 0
+			end
+			count ++
+		end
+		
+		a [location] key = key
+		a [location] value = value
+		c = max (count, c)
+	end
+	
+	Association (Key, Value) freeArray (self associations, self allocated)
+	
+	self collisions	= c
+	self associations	= a
+	self allocated	= s
+//[cf]
+//[of]:increaseTally
+//[c]Increases the counter of items
+//[c]Grow the array if more than 75% of slots are used
+//[c]
+method increaseTally
+
+	self tally ++
+	if self tally * 4 > self allocated * 3
+		self resize (self allocated * 3 / 2)
+	end
+//[cf]
+//[of]:decreaseTally
+//[c]Decreases the counter of items
+//[c]Reduce the array if less than 30% of slots are used
+//[c]
+method decreaseTally
+
+	self tally --
+	if self tally * 3 < self allocated
+		self resize (max (self defaultAllocated, self allocated * 2 / 3))
+	end
+//[cf]
+//[of]:fillUp
+//[c]Fixes collisions after freeing a slot
+//[c]
+method fillUp (position: Size)
+
+	var current = position
+	while self notEmpty (current)
+		var best = self slot (self key (current))
+		var count = 0 s
+		if current <> best
+			while self notEmpty (best)
+				best ++
+				if best == self allocated
+					best = 0
+				end
+				count ++
+			end
+		end
+		if current <> best
+			self associations [best] set (self associations [current])
+			self clear (current)
+			self collisions = max (self collisions, count)
+		end
+		current ++
+		if current == self allocated
+			current = 0
+		end
+	end
+//[cf]
+
+//[of]:hash
+method hash (k: Key)
+	
+	return hashFunction call (k) : Size
+//[cf]
+//[of]:isEqual
+method isEqual (k1: Key, k2: Key)
+	
+	return compareFunction call (k1, k2)
+//[cf]
+//[of]:slot
+method slot (k: Key)
+	
+	return self hash (k) % self allocated
+//[cf]
+
+//[of]:eachAssociation
+method eachAssociation (a: *[] Association (Key, Value), s: Size)
+
+	s each do i
+		yield a [i]
+	end
+//[cf]
+//[cf]
+//[of]:slot
+//[of]:key
+method key (i: Size)
+	
+	return self associations [i] key
+//[cf]
+//[of]:value
+method value (i: Size)
+
+	return self associations [i] value
+//[cf]
+//[of]:isEmpty
+method isEmpty (i: Size)
+
+	return self key (i) == emptyKey
+//[cf]
+//[of]:notEmpty
+method notEmpty (i: Size)
+	
+	return self key (i) <> emptyKey
+//[cf]
+//[of]:clear
+method clear (i: Size)
+	
+	self associations [i] key = emptyKey
+//[cf]
+//[cf]
+//[cf]
+//[of]:Association
+//[of]:definition
+struct Association (Key, Value)
+	
+	attr key	: Key
+	attr value	: Value
+//[cf]
+//[of]:testing
+//[of]:isEmpty
+method isEmpty
+
+	return self key isNil
+//[cf]
+//[cf]
+//[of]:accessing
+//[of]:clear
+method clear
+
+	self key = nil
+//[cf]
+//[of]:set
+method set (src: *Association (Key, Value))
+
+	self key	= src key
+	self value	= src value
+//[cf]
+//[cf]
+
+//[cf]
+//[cf]
+//[of]:Debug Utils
+//[of]:assertFailure
+function assertFailure (s: String)
+
+	puts16 (s)
+//[cf]
+//[of]:assert
+function assert (condition: Bool, s: String)
+
+	if not condition
+		assertFailure (s)
+	end
+//[cf]
+//[of]:output
+function output (s: String, ...)
+
+	var sb = {TempStringBuffer} local
+	sb printFormat (s, ...)
+	puts16 (sb string)
+	sb release
+//[cf]
+//[of]:puts16
+function puts16 (s: String)
+
+	var p = s
+	while p [] <> char_nul
+		putchar (p [] : Int32)
+		p ++
+	end
+	putchar (char_lf : Int32)
+//[cf]
+//[cf]
+
+.private
+//[of]:Memory
+//[of]:MemoryPoolHead
+//               base                        limit
+//  +------+------+----------------------------+
+//  | next | size |                            |
+//  +------+------+----------------------------+
+//
+// next is a pointer on the next base
+// size is the size of the chunk
+
+struct MemoryPoolHead
+
+	attr next	: Bytes
+	attr size	: Size
+//[cf]
+//[cf]
+//[of]:Imports
+.cdecl .c
+
+import function putchar (Int32)
+import function malloc (Unsigned32) -> (Pointer)
+import function free (Pointer)
+//[cf]

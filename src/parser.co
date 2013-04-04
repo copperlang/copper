@@ -1,0 +1,2256 @@
+//[of]:Parser
+//[of]:definition
+//[c]The Parser creates a Parse Tree from a source text
+//[c]
+struct Parser
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+//[c]DESCRIPTION
+//[c]	Initialize the parsing
+//[c]
+//[c]ARGUMENTS
+//[c]	program	--	The program
+//[c]	source	--	The source code
+//[c]	file	--	The reference to file being parsed (for error reporting)
+//[c]	defines	--	The command line defines (-Dname=value)
+//[c]
+method initialize (	program	: *Program,
+	source	: String8,
+	file	: FileLocation,
+	defines	: *StringDictionary (String16) )
+
+	self program	= program
+	self pool	= program pool
+	self module	= program pool new (Module, program, file)
+	self block	= nil
+	self currentDirectives	= public_directives
+	
+	self stream initialize (program pool, source, defines)
+	self error initialize
+//[cf]
+//[of]:release
+method release
+
+	self stream release
+//[cf]
+//[cf]
+//[of]:reading
+//[of]:getModule
+method getModule
+
+	var pool	= self pool
+	var module	= self module
+	
+	repeat
+		self skipEmptyTokens
+		switch self currentToken
+//[of]:		const
+	case token_const
+		
+		var alias  = self getAlias (0)
+		if alias isNil
+			return nil
+		end
+		
+		module addGlobalAlias (alias)
+//[cf]
+//[of]:		global
+	case token_global
+
+		var variables = self getVariables
+		if variables isNil
+			return nil
+		end
+		
+		module addGlobalVariables (variables)
+//[cf]
+//[of]:		function
+	case token_function
+
+		var definition = self getFunction (false)
+		if definition isNil
+			return nil
+		end
+		
+		module addGlobalFunction (definition)
+//[cf]
+//[of]:		structure
+	case token_structure
+
+		var structure = self getStructure
+		if structure isNil
+			return nil
+		end
+		
+		module addGlobalStructure (structure)
+//[cf]
+//[of]:		enumeration
+	case token_enumeration
+
+		var enumeration = self getEnumeration
+		if enumeration isNil
+			return nil
+		end
+		
+		module addGlobalEnumeration (enumeration)
+//[cf]
+//[of]:		extension
+	case token_extension
+
+		var extension = self getExtension
+		if extension isNil
+			return nil
+		end
+		
+		module addGlobalExtension (extension)
+//[cf]
+//[of]:		import
+	case token_import
+	
+		self nextToken
+		
+		if self currentToken == token_function
+			var imp = self getImportFunction
+			if imp isNil
+				return nil
+			end
+			module addGlobalExternFunction (imp)
+		else
+			var imp = self getImport
+			if imp isNil
+				return nil
+			end
+			module addGlobalImport (imp)
+		end
+		
+//[cf]
+//[of]:		.
+	case token_point
+
+		var ok = self applyCurrentDirective
+		if not ok
+			return nil
+		end
+//[cf]
+//[of]:		eof
+	case token_eof
+		break
+//[cf]
+		else
+			return self syntaxError
+		end
+	end
+
+	return module
+//[cf]
+//[cf]
+//[of]:accessing
+//[of]:error
+method error
+
+	return self lastError
+//[cf]
+//[cf]
+
+:private
+//[of]:attributes
+	attr program	: *Program	// The program to build
+	attr pool	: *MemoryPool	// Memory pool to store the objects of the parse tree
+	attr stream	: TokenStream	// The tokenizer
+	attr lastError	: ParserError	// The last error	
+	attr hasYield	: Bool	// Hack to check if a function has a yield
+	attr currentDirectives	: *DirectiveSet	// Current directives
+	attr module	: *Module	// The module being parsed
+	attr block	: *Block	// The current block
+//[cf]
+//[of]:reading
+//[of]:getAlias
+//[c]Reads a constant
+//[c]
+method getAlias (size: Size)
+
+	self nextToken
+
+	// Save the current line
+	var line = self currentLine
+	
+	// Read the name
+	var name = self getId
+	if name isNil
+		return nil
+	end
+	
+	// Read the equal
+	if not self readExpected (token_assign)
+		return nil
+	end
+
+	// Read the expression
+	var expression = self getExpression
+	if expression isNil
+		return nil
+	end
+	
+	// Create the constant
+	return self pool new (Alias, self module, line, self currentDirectives, name, size, expression)
+//[cf]
+//[of]:getVariables
+//[c]Read a global variable
+//[c]
+method getVariables
+
+	self nextToken
+
+	// Save the current line
+	var line	= self currentLine
+	var module	= self module
+	var pool	= self pool
+	
+	// Retrieve the list of variables
+	var variables = self pool new (GlobalVariableList)
+	repeat
+		// Read name
+		var name = self getId
+		if name isNil
+			return nil
+		end
+		
+		// Add the name to the list of arguments
+		variables addNew (pool, module, self currentLine, name, self currentDirectives)
+		
+		// Next
+		if self currentToken <> token_comma
+			break
+		end
+		self nextToken
+	end
+
+	// Read the '='
+	if not self readExpected (token_assign)
+		return nil
+	end
+	
+	// Retrieve the tuple to assign to the variables
+	var values = self getExpressionList
+	if values isNil
+		return nil
+	end
+
+	// Create the variable definition node
+	return pool new (ModuleVariables, module, line, variables, values)
+//[cf]
+//[of]:getFunction
+method getFunction (addSelf: Bool)
+
+	self nextToken
+
+	// Save the current line
+	var line = self currentLine
+	
+	// Read the directives
+	var directives = self getDirectives
+	if directives isNil
+		return nil
+	end
+	
+	// Read the name
+	var name = self getId
+	if name isNil
+		return nil
+	end
+
+	// Read the arguments
+	var arguments, variable, generic = self getArgumentList
+	if arguments isNil
+		return nil
+	end
+	if addSelf
+		var selfArgument = self pool new (Argument, self module, line, 'self', nil)
+		arguments addFirst (self pool, selfArgument)
+	end
+	
+	// Reset the yield flag before reading the body	
+	self hasYield = false
+	
+	// Read the body
+	if not self readExpected (token_br)
+		return nil
+	end
+	var body = self getInstructionList
+	if body isNil
+		return nil
+	end
+
+	// Read the has yield flag
+	// This code works because functions can not be nested.
+	var hasYield = self hasYield
+
+	// Create a function, an iterator or a generic function depending
+	// on what we got:
+	var pool	= self pool
+	var module	= self module
+	if generic
+		// The function is variadic or has an argument without type: create a generic function
+		return pool new (GenericFunction, module, line, directives, name, arguments, variable, body, hasYield)
+	else
+		// No yield, no genericity: create a simple function
+		return pool new (Function, module, line, directives, name, arguments, body, hasYield)
+	end
+//[cf]
+//[of]:getStructure
+method getStructure
+
+	self nextToken
+	
+	// Save the current line
+	var line = self currentLine
+	
+	// Read the name
+	var name = self getId
+	if name isNil
+		return nil
+	end
+
+	// Read the parameters
+	var parameters = IdList nil
+	if self currentToken == token_lparen
+		parameters = self getStructureParameterList
+		if parameters isNil
+			return nil
+		end
+	end
+	
+	// Read the parent structure
+	var parent = Expression nil
+	if self currentToken == token_colon
+		self nextToken
+		parent = self getExpression
+		if parent isNil
+			return nil
+		end
+	end
+
+	// Skip the end of line
+	if not self readExpected (token_br)
+		return nil
+	end
+	
+	// Read the content
+	var oldDirectives = self publicDirectives
+	var attributes, functions, aliases = self getStructureContent
+	self currentDirectives = oldDirectives
+	if attributes isNil
+		return nil
+	end
+	
+	// Create the structure
+	if parameters notNil
+		return self pool new (GenericStructureDefinition, self module, line, self currentDirectives, name, parent, parameters, attributes, functions, aliases)
+	else
+		var structure = self pool new (StructureType, self module, line, self program, self currentDirectives, name, parent, attributes, functions, aliases, nil)
+		return structure definition
+	end
+
+//[c]
+method getStructureContent
+
+	var pool	= self pool
+	var attributes	= pool new (AttributeList)
+	var functions	= pool new (DefinitionList)
+	var aliases	= pool new (AliasList)
+	repeat
+		switch self currentToken
+//[of]:		br
+	case token_br
+		// ignore
+		self nextToken
+//[cf]
+//[of]:		\:
+	case token_colon
+
+		var ok = self applyCurrentDirective
+		if not ok
+			return nil, nil, nil
+		end
+//[cf]
+//[of]:		method
+	case token_method
+		
+		var definition = self getFunction (true)
+		if definition isNil
+			return nil, nil, nil
+		end
+		
+		functions add (pool, definition)
+//[cf]
+//[of]:		attr
+	case token_attribute
+
+		self nextToken
+			
+		// Read the name
+		var attributeName = self getId
+		if attributeName isNil
+			return nil, nil, nil
+		end
+		
+		// Skip the colon
+		if not self readExpected (token_colon)
+			return nil, nil, nil
+		end
+		
+		// Read the type
+		var type = self getExpression
+		if type isNil
+			return nil, nil, nil
+		end
+		
+		attributes addNew (pool, self module, self currentLine, self currentDirectives, attributeName, type)
+//[cf]
+//[of]:		static
+	case token_static
+		
+		var alias  = self getAlias (1)
+		if alias isNil
+			return nil, nil, nil
+		end
+		
+		aliases add (pool, alias)
+//[cf]
+		else
+			break
+		end
+	end
+
+	return attributes, functions, aliases
+//[cf]
+//[of]:getEnumeration
+method getEnumeration
+
+	self nextToken
+
+	// Save the current line
+	var line = self currentLine
+	
+	// Read the name
+	var name = self getId
+	if name isNil
+		return nil
+	end
+
+	var pool = self pool
+	
+	// Read the optional type
+	var type = Expression nil
+	if self currentToken == token_colon
+		self nextToken
+		type = self getExpression
+		if type isNil
+			return nil
+		end
+	end
+
+	// Skip the end of line
+	if not self readExpected (token_br)
+		return nil
+	end
+	
+	// Read the content
+	var values	= pool new (EnumerationValueList)
+	var functions	= pool new (DefinitionList)
+	repeat
+		var token = self currentToken
+		if token == token_br
+			// ignore
+			self nextToken
+		
+		elsif token == token_id
+			var itemLine	= self currentLine
+			var itemName	= self currentString8
+			self nextToken
+			token = self currentToken
+			var itemValue = Expression nil
+			if token == token_assign
+				self nextToken
+				itemValue = self getExpression
+			end
+			
+			if not self readExpected (token_br)
+				return nil
+			end
+			
+			values addNew (pool, self module, itemLine, self currentDirectives, itemName, itemValue)
+		
+		elsif token == token_method
+			var definition = self getFunction (true)
+			if definition isNil
+				return nil
+			end
+			functions add (pool, definition)
+
+		else
+			break
+		end
+	end
+	
+	// Create the enumeration
+	var enumeration = pool new (EnumerationType, self module, line, self currentDirectives, self program, name, type, values, functions)
+	
+	// Create the definition
+	return enumeration definition
+//[cf]
+//[of]:getExtension
+method getExtension
+
+	self nextToken
+	
+	// Save the current line
+	var line = self currentLine
+	
+	// Read the type
+	var type = self getExpression
+	if type isNil
+		return nil
+	end
+
+	// Skip the end of line
+	if not self readExpected (token_br)
+		return nil
+	end
+
+	var oldDirectives = self publicDirectives
+	var functions = self getExtensionContent
+	self currentDirectives = oldDirectives
+	if functions isNil
+		return nil
+	end
+	
+	// Create the extension
+	return self pool new (Extension, type, functions)
+	
+//[c]
+method getExtensionContent
+
+	// Read the content
+	var pool	= self pool
+	var functions	= pool new (DefinitionList)
+	repeat
+		switch self currentToken
+		case token_br
+			// ignore
+			self nextToken
+		case token_method
+			var definition = self getFunction (true)
+			if definition isNil
+				return nil
+			end
+			functions add (pool, definition)
+		else
+			break
+		end
+	end
+
+	return functions
+//[cf]
+//[of]:getImportFunction
+method getImportFunction
+
+	self nextToken
+
+	// Save the current line
+	var line = self currentLine
+	
+	// Read the directives
+	var directives = self getDirectives
+	if directives isNil
+		return nil
+	end
+	
+	// Read the optional symbol
+	var symbol = nil : String8
+	if self currentToken == token_string_8
+		self nextToken
+		symbol = self currentString8
+	end
+	
+	// Read the name
+	var name = self getId
+	if name isNil
+		return nil
+	end
+
+	// Read the arguments
+	var arguments = self getParameterList
+	if arguments isNil
+		return nil
+	end
+	
+	var returnType = ExpressionList nil
+	if self currentToken == token_to
+		self nextToken
+
+		// skip '('
+		if  not self readExpected (token_lparen)
+			return nil
+		end
+		
+		returnType = self getExpressionList
+
+		// skip ')'
+		if  not self readExpected (token_rparen)
+			return nil
+		end
+	end
+	
+	// Create the import
+	return self pool new (	ExternFunction, 
+		self module, 
+		line, 
+		directives, 
+		symbol, 
+		name, 
+		arguments, 
+		returnType)
+//[cf]
+//[of]:getImport
+method getImport
+
+	// Save the current line
+	var line = self currentLine
+	
+	// Read the name
+	if self unexpected (token_string_16)
+		return nil
+	end
+	var name = self currentString16
+	self nextToken
+
+	// Create the import
+	return self pool new (Import, self module, line, self currentDirectives visibility, name)
+//[cf]
+
+//[of]:getStructureParameterList
+//[c]Read a list of parameters (it can be empty)
+//[c]
+//[c]list-of-arguments:
+//[c]	'(' id { ',' id } [ ',' '...' ] ')'
+//[c]
+method getStructureParameterList
+
+	var pool	= self pool
+	var ids	= pool new (IdList)
+
+	// Skip (
+	self nextToken
+	
+	// Read the list of arguments
+	repeat
+		var name = self getId
+		if name isNil
+			return nil
+		end
+		
+		// Add the argument to the list of arguments
+		ids addNew (pool, self module, self currentLine, name)
+		
+		// Next
+		if self currentToken <> token_comma
+			break
+		end
+		self nextToken
+	end
+
+	// Skip )
+	if not self readExpected (token_rparen)
+		return nil
+	end
+	
+	return ids
+//[cf]
+//[of]:getArgumentList
+//[c]Read a list of arguments (it can be empty)
+//[c]
+//[c]list-of-arguments:
+//[c]	empty
+//[c]	'(' argument { ',' argument } [ ',' '...' ] ')'
+//[c]	'(' '...' ')'
+//[c]
+//[c]argument:
+//[c]	id [ ':' type ]
+//[c]
+method getArgumentList
+
+	var pool	= self pool	
+	var arguments	= pool new (ArgumentList)
+	var variable	= false
+	var generic	= false
+	
+	if self currentToken <> token_lparen
+		return arguments, variable, generic
+	end
+
+	// Skip (
+	self nextToken
+	
+	repeat
+		self skipEmptyTokens
+		
+		// Read name or ellipsis
+		if self currentToken == token_ellipsis
+			self nextToken
+			variable	= true
+			generic	= true
+			// Do not read more id
+			break
+		end
+			
+		var name = self getId
+		if name isNil
+			return nil, false, false
+		end
+		
+		// Read the type if any
+		var type = Expression nil
+		if self currentToken == token_colon
+			self nextToken
+			type = self getExpression
+			if type isNil
+				return nil, false, false
+			end
+		else
+			generic = true
+		end
+		
+		// Add the argument to the list of arguments
+		arguments addNew (pool, self module, self currentLine, name, type)
+
+		// Next
+		if self currentToken <> token_comma
+			break
+		end
+		self nextToken
+	end
+
+	// Skip )
+	if not self readExpected (token_rparen)
+		return nil, false, false
+	end
+	
+	return arguments, variable, generic
+//[cf]
+//[of]:getParameterList
+//[c]Gets a list of expression between parenthesis
+//[c]
+//[c]list-of-parameters:
+//[c]	empty
+//[c]	"(" list-of-expression ")"
+//[c]
+method getParameterList
+
+	if self currentToken == token_lparen
+
+		// Skip '('
+		self nextToken
+	
+		// Get the list of expressions
+		var list = self getExpressionList
+		if list isNil
+			return nil
+		end
+		
+		// skip ')'
+		if not self readExpected (token_rparen)
+			return nil
+		end
+
+		return list
+
+	else
+
+		return empty_expression_list
+
+	end
+//[cf]
+//[of]:getExpressionList
+//[c]Gets a list of expressions
+//[c]
+//[c]list-of-expression:
+//[c]	expression 
+//[c]	list-of-expression "," expression
+//[c]
+method getExpressionList
+
+	var list = self pool new (ExpressionList)
+	
+	repeat
+		var e = self getExpression
+		if e isNil
+			return nil
+		end
+		
+		list add (self pool, e)
+	
+		if self currentToken <> token_comma
+			break
+		end
+	
+		// skip comma
+		self nextToken
+	end
+
+	return list
+//[cf]
+//[of]:getInstructionList
+//[c]Gets a sequence of instructions
+//[c]
+//[c]list-of-instructions:
+//[c]	empty
+//[c]	list-of-instructions instruction br
+//[c]
+method getInstructionList
+
+	var block	= self pool new (Block, self block)
+	
+	// This block becomes the current block
+	self block = block
+
+	repeat
+		self skipEmptyTokens
+		var token = self currentToken
+		if not firstsInstruction [token]
+			break
+		end
+		
+		var instr = self getInstruction
+		if instr isNil
+			return nil
+		end
+			
+		block instructions add (self pool, instr)
+			
+		if not self readExpected (token_br)
+			return nil
+		end
+		
+	end
+	
+	// Restore the previous block
+	self block = block parent
+	
+	return block
+//[cf]
+//[of]:getIdList
+//[c]Gets a list of identifiers
+//[c]
+//[c]	Returns nil if an error occurs, in such a case the error object
+//[c]	is set.
+//[c]
+//[c]list-of-ids:
+//[c]	id
+//[c]	list-of-ids ',' id
+//[c]
+method getIdList
+
+	// Read the list of arguments
+	var ids = self pool new (IdList)
+	
+	repeat
+		// Read name
+		var name = self getId
+		if name isNil
+			return nil
+		end
+		
+		// Add the argument to the list of arguments
+		ids addNew (self pool, self module, self currentLine, name)
+		
+		// Next
+		if self currentToken <> token_comma
+			break
+		end
+		self nextToken
+	end
+	
+	return ids
+//[cf]
+//[of]:getInstruction
+//[c]Gets an instruction
+//[c]
+//[c]instruction:
+//[c]	'return'
+//[c]	'return' list-of-expressions
+//[c]	
+//[c]	list-of-expressions
+//[c]	list-of-expressions = list-of-expressions
+//[c]	
+method getInstruction
+
+	var pool	= self pool
+	var module	= self module
+	var line	= self currentLine
+	
+	var e = Instruction nil
+	switch self currentToken
+//[of]:	return
+	case token_return
+		self nextToken
+
+		var values = ExpressionList nil
+		if self currentToken <> token_br
+			values = self getExpressionList
+			if values isNil
+				return nil
+			end
+		end
+		
+		e = pool new (ReturnInstruction, module, line, values)
+//[cf]
+//[of]:	yield
+	case token_yield
+		self nextToken
+
+		var values = {ExpressionList}
+		if self currentToken <> token_br
+			values = self getExpressionList
+			if values isNil
+				return nil
+			end
+		else
+			values = empty_expression_list
+		end
+		
+		// Remember that the function includes a yield
+		self hasYield = true
+	
+		e = pool new (YieldInstruction, module, line, values)
+//[cf]
+//[of]:	if
+	case token_if
+		self nextToken
+
+		// list of rules
+		var rules = pool new (RuleList)
+		
+		// get the first condition/action
+		var condition = self getExpression
+		if condition isNil
+			return nil
+		end
+		
+		var block = self getMiniBlock
+		if block isNil
+			return nil
+		end
+		rules addNew (pool, condition, block)
+
+		var noElseBlock = true
+		repeat
+			var token = self currentToken
+			
+			// get the next condition/action
+			if token == token_elsif and noElseBlock
+				self nextToken
+
+				condition = self getExpression
+				if condition isNil
+					return nil
+				end
+				block = self getMiniBlock
+				if block isNil
+					return nil
+				end
+				rules addNew (pool, condition, block)
+			
+			// get the default action
+			elsif token == token_else and noElseBlock
+				self nextToken
+				
+				block = self getMiniBlock
+				if block isNil
+					return nil
+				end
+				rules addNew (pool, nil, block)
+
+				noElseBlock = false
+
+			elsif token == token_end
+				self nextToken
+				break
+			else
+				return self syntaxError
+			end
+		
+		end
+		
+		e = pool new (IfInstruction, module, line, rules)
+//[cf]
+//[of]:	while
+	case token_while
+		self nextToken
+
+		var condition = self getExpression
+		if condition isNil
+			return nil
+		end
+		
+		var block = self getBlock
+		if block isNil
+			return nil
+		end
+		
+		e = pool new (WhileInstruction, module, line, condition, block)
+//[cf]
+//[of]:	repeat
+	case token_repeat
+		self nextToken
+
+		var block = self getBlock
+		if block isNil
+			return nil
+		end
+		
+		e = pool new (WhileInstruction, module, line, nil, block)
+//[cf]
+//[of]:	switch
+	case token_switch
+		self nextToken
+
+		var value = self getExpression
+		if value isNil
+			return nil
+		end
+
+		if not self readExpected (token_br)
+			return nil
+		end
+
+		var cases = pool new (ChoiceList)
+
+		var noElseBlock = true
+		
+		repeat
+			self skipEmptyTokens
+			var token = self currentToken
+			if token == token_case and noElseBlock
+				self nextToken
+
+				// get constants
+				var constants = self getExpressionList
+				if constants isNil
+					return nil
+				end
+			
+				// get block
+				var block = self getMiniBlock
+				if block isNil
+					return nil
+				end
+			
+				cases addNew (pool, constants, block)
+
+			elsif token == token_else and noElseBlock
+				self nextToken
+
+				var block = self getMiniBlock
+				if block isNil
+					return nil
+				end
+				
+				cases addNew (pool, empty_expression_list, block)
+				noElseBlock = false
+
+			elsif token == token_end
+				self nextToken
+				break
+			else
+				return self syntaxError
+			end
+		end
+		
+		e = pool new (SwitchInstruction, module, line, value, cases)
+//[cf]
+//[of]:	var
+	case token_variable
+		self nextToken
+
+		// Retrieve the list of variables
+		var variables = self pool new (VariableList)
+		repeat
+			// Read name
+			var name = self getId
+			if name isNil
+				return nil
+			end
+			
+			// Add the argument to the list of arguments
+			variables addNew (pool, module, self currentLine, name)
+			
+			// Next
+			if self currentToken <> token_comma
+				break
+			end
+			self nextToken
+		end
+
+		// Read the '='
+		if not self readExpected (token_assign)
+			return nil
+		end
+		
+		// Retrieve the tuple to assign to the variables
+		var values = self getExpressionList
+		if values isNil
+			return nil
+		end
+	
+		// Create the variable definition node
+		e = pool new (VariableInstruction, module, line, variables, values)
+//[cf]
+//[of]:	break
+	case token_break
+		self nextToken
+
+		e = pool new (BreakInstruction, module, line)
+//[cf]
+//[of]:	evaluation or assignment
+//[c]
+//[c]instruction:
+//[c]	list-of-expressions
+//[c]	list-of-expressions '=' list-of-expressions
+//[c]
+else
+
+	// Does not start with a regular keyword, it must be an
+	// evaluation or an assignment
+	var lvalues = self getExpressionList
+	if lvalues isNil
+		return nil
+	end
+
+	// is it an assignment or just an expression evaluation
+	if self currentToken == token_assign
+		self nextToken
+	
+		var rvalues = self getExpressionList
+		if rvalues isNil
+			return nil
+		end
+		e = pool new (AssignInstruction, module, line, lvalues, rvalues)
+	else
+		e = pool new (EvaluateInstruction, module, line, lvalues)
+	end
+//[cf]
+	end
+
+	return e
+//[cf]
+//[of]:getBlock
+//[c]Gets a block
+//[c]
+//[c]block: 
+//[c]	br list-of-instructions end
+//[c]
+method getBlock
+
+	if not self readExpected (token_br)
+		return nil
+	end
+	
+	var block = self getInstructionList
+	if block isNil
+		return nil
+	end
+	
+	if not self readExpected (token_end)
+		return nil
+	end
+
+	return block
+//[cf]
+//[of]:getMiniBlock
+//[c]Gets a block preceded by a new line
+//[c]
+//[c]mini-block:
+//[c]	br list-of-instructions
+//[c]	
+method getMiniBlock
+
+	if not self readExpected (token_br)
+		return nil
+	end
+	
+	return self getInstructionList
+//[cf]
+//[of]:getInlineBlock
+//[c]Gets an inline block
+//[c]
+//[c]inline-block: 
+//[c]	br list-of-instructions
+//[c]	list-of-ids br list-of-instructions
+//[c]	
+method getInlineBlock
+
+	// Read the list of arguments
+	var ids = {*IdList}
+	if self currentToken == token_id
+		ids = self getIdList
+		if ids isNil
+			return nil
+		end
+	else
+		ids = self pool new (IdList)
+	end
+	
+	// Read the block
+	var instructions = self getBlock
+	if instructions isNil
+		return nil
+	end
+	
+	return self pool new (InlineBlock, ids, instructions)
+//[cf]
+//[of]:getExpression
+//[c]Gets an expression
+//[c]
+//[c]expression:
+//[c]	'(' expression ')'
+//[c]	integer
+//[c]	string
+//[c]	char
+//[c]	id optional-arguments optional-block
+//[c]	expression op expression
+//[c]	
+//[c]
+//[c]optional-arguments:
+//[c]	empty
+//[c]	'(' list-of-expressions ')'
+//[c]
+//[c]optional-block:
+//[c]	empty
+//[c]	'do' optional-parameters br list-of-instructions 'end'
+//[c]
+//[c]optional-parameters:
+//[c]	empty
+//[c]	list-of-ids
+//[c]
+method getExpression
+
+	return self getExpression (0)
+
+//[c]
+method getExpression (currentPriority: Integer)
+
+	var pool	= self pool
+	var module	= self module
+	var line	= self currentLine
+	var e	= Expression nil
+	
+	self skipEmptyTokens
+	
+	switch self currentToken
+//[of]:	(
+case token_lparen
+	self nextToken
+	
+	e = self getExpression
+	if e isNil
+		return nil
+	end
+	
+	if not self readExpected (token_rparen)
+		return nil
+	end
+//[cf]
+//[of]:	[
+//[c]
+//[c]	[ expression ] expression
+//[c]	[ ] expression
+//[c]
+case token_lbrac
+	self nextToken
+
+	var e1 = Expression nil
+	
+	// The expression between brackets is optional
+	if self currentToken <> token_rbrac
+		e1 = self getExpression
+		if e1 isNil
+			return nil
+		end
+	end
+	
+	if not self readExpected (token_rbrac)
+		return nil
+	end
+
+	var e2 = self getExpression (32)	// maximum priority
+	if e2 isNil
+		return nil
+	end
+	
+	// Create the expression node
+	var arguments = pool new (ExpressionList)
+	arguments add (pool, e2)
+	if e1 notNil
+		arguments add (pool, e1)
+	end
+	e = pool new (DefinitionExpression, module, line, '_array', arguments, nil)
+//[cf]
+//[of]:	{
+//[c]local
+//[c]
+//[c]expression:
+//[c]	'{' expression '}'
+//[c]
+case token_lbrace
+
+	// skip '{'
+	self nextToken
+	
+	var argument = self getExpression
+	if argument isNil
+		return nil
+	end
+	
+	// skip '}'
+	if not self readExpected (token_rbrace)
+		return nil
+	end
+
+	var arguments = pool new (ExpressionList)
+	arguments add (pool, argument)
+	e = pool new (DefinitionExpression, module, line, op_local, arguments, nil)
+//[cf]
+//[of]:	integer
+case token_integer
+	e = pool new (IntegerExpression, module, line, e_literal_integer, self currentInteger)
+	self nextToken
+//[cf]
+//[of]:	string 8
+case token_string_8
+	e = pool new (String8Expression, module, line, self currentString8)
+	self nextToken
+//[cf]
+//[of]:	string 16
+case token_string_16
+	e = pool new (String16Expression, module, line, self currentString16)
+	self nextToken
+//[cf]
+//[of]:	char 8
+case token_char_8
+	e = pool new (IntegerExpression, module, line, e_literal_char_8, self currentInteger)
+	self nextToken
+//[cf]
+//[of]:	char 16
+case token_char_16
+	e = pool new (IntegerExpression, module, line, e_literal_char_16, self currentInteger)
+	self nextToken
+//[cf]
+//[of]:	id
+case token_id
+
+	// Read the id
+	var name = self currentString8
+
+	self nextToken
+	
+	// Read the list of parameters
+	var parameters = self getParameterList
+	if parameters isNil
+		return nil
+	end
+	
+	// Read the inline block
+	var inlineBlock = InlineBlock nil
+	if self currentToken == token_do
+		self nextToken
+		inlineBlock = self getInlineBlock
+		if inlineBlock isNil
+			return nil
+		end
+	end
+
+	e = pool new (DefinitionExpression, module, line, name, parameters, inlineBlock)
+//[cf]
+//[of]:	* + - ~ #
+//[c]Prefix operator
+//[c]
+//[c]expression:
+//[c]	'*' expression
+//[c]	'+' expression
+//[c]	'-' expression
+//[c]	'not' expression
+//[c]	'#' expression
+//[c]
+case	token_mul, 
+	token_add, 
+	token_sub, 
+	token_not, 
+	token_sharp
+
+	var name, priority = self prefixParams (self currentToken)
+	
+	self nextToken
+	
+	var argument = self getExpression (priority)
+	if argument isNil
+		return nil
+	end
+
+	var arguments = pool new (ExpressionList)
+	arguments add (pool, argument)
+	e = pool new (DefinitionExpression, module, line, name, arguments, nil)
+//[cf]
+//[of]:	...
+case token_ellipsis
+
+	self nextToken
+	
+	var arguments = pool new (ExpressionList)
+	e = pool new (DefinitionExpression, module, line, '_varargs', arguments, nil)
+//[cf]
+//[of]:	&
+case token_and
+
+	self nextToken
+
+	// Read the directives
+	var directives = self getDirectives
+	if directives isNil
+		return nil
+	end
+	
+	// Read the list of types
+	var arguments = self getParameterList
+	if arguments isNil
+		return nil
+	end
+	
+	var returnType = empty_expression_list
+	if self currentToken == token_to
+		self nextToken
+		
+		// skip '('
+		if  not self readExpected (token_lparen)
+			return nil
+		end
+		
+		returnType = self getExpressionList
+		
+		// skip ')'
+		if  not self readExpected (token_rparen)
+			return nil
+		end
+	end
+	
+	e = pool new (FunctionTypeExpression, module, line, directives callingConvention, arguments, returnType)
+//[cf]
+//[of]:	ref
+case token_ref
+
+	self nextToken
+	
+	// Read the name
+	var name = self getId
+	if name isNil
+		return nil
+	end
+	
+	// Read the list of types
+	var arguments = self getParameterList
+	if arguments isNil
+		return nil
+	end
+	
+	e = pool new (FunctionExpression, module, line, name, arguments)
+//[cf]
+	else
+		return self syntaxError
+	end
+	
+//[c]
+//[c]	Now, we have a valid expression
+//[c]	the next token must be checked (for recursive productions):
+//[c]		E -> E op
+//[c]		E -> E op ...
+//[c]		E -> E [ ]
+//[c]
+	repeat
+		var op = self currentToken
+		switch op
+//[of]:		cond
+//[c]
+//[c]instruction:
+//[c]	expression cond expression else expression
+//[c]	
+case token_cond
+
+	// Compare the precedence of operators
+	// The next operator is ignored if the previous one has
+	// a greater priority.
+	if currentPriority >= 6
+		return e
+	end
+	
+	// Skip the operator
+	self nextToken
+	
+	// Get the next expression
+	var first = self getExpressionList
+	if first isNil
+		return nil
+	end
+
+	// Skip the else keyword
+	if not self readExpected (token_else)
+		return nil
+	end
+
+	// Get the last expression
+	var second = self getExpressionList
+	if second isNil
+		return nil
+	end
+	
+	// Build the list of expressions
+	e = pool new (CondExpression, module, line, e, first, second)
+//[cf]
+//[of]:		and
+//[c]
+//[c]instruction:
+//[c]	expression and expression
+//[c]	
+case	token_minimal_and
+
+	// Compare the precedence of operators
+	// The next operator is ignored if the previous one has
+	// a greater priority.
+	if currentPriority >= 10
+		return e
+	end
+	
+	// Skip the operator
+	self nextToken
+	
+	// Get the next expression
+	// exit if the expression is not valid
+	var e2 = self getExpression (10)
+	if e2 isNil
+		return nil
+	end
+	
+	// Build the list of expressions
+	e = pool new (PairExpression, module, line, e_minimal_and, e, e2)
+//[cf]
+//[of]:		or
+//[c]
+//[c]instruction:
+//[c]	expression or expression
+//[c]
+case	token_minimal_or
+
+	// Compare the precedence of operators
+	// The next operator is ignored if the previous one has
+	// a greater priority.
+	if currentPriority >= 8
+		return e
+	end
+	
+	// Skip the operator
+	self nextToken
+	
+	// Get the next expression
+	// exit if the expression is not valid
+	var e2 = self getExpression (8)
+	if e2 isNil
+		return nil
+	end
+	
+	// Build the list of expressions
+	e = pool new (PairExpression, module, line, e_minimal_or, e, e2)
+//[cf]
+//[of]:		\:
+//[c]
+//[c]instruction:
+//[c]	expression ':' expression
+//[c]
+case	token_colon
+
+	// Compare the precedence of operators
+	// The next operator is ignored if the previous one has
+	// a greater priority.
+	if currentPriority >= 28
+		return e
+	end
+	
+	// Skip the operator
+	self nextToken
+	
+	// Get the next expression
+	// exit if the expression is not valid
+	var e2 = self getExpression (28)
+	if e2 isNil
+		return nil
+	end
+	
+	// Build the list of expressions
+	var arguments = pool new (ExpressionList)
+	arguments add (pool, e2)
+	arguments add (pool, e)
+	e = pool new (DefinitionExpression, module, line, op_cast, arguments, nil)
+//[cf]
+//[of]:		binary operators
+//[c]
+//[c]instruction:
+//[c]	expression op expression
+//[c]	
+case	token_add, token_sub, token_mul, token_div, token_mod, token_shl, token_shr, 
+	token_eq, token_ne, token_le, token_lt, token_ge, token_gt,
+	token_and, token_or, token_xor,
+	token_assign_add, token_assign_sub,
+	token_assign_mul, token_assign_div, token_assign_mod,
+	token_assign_shl, token_assign_shr,
+	token_assign_and, token_assign_or , token_assign_xor
+
+	var name, leftPriority, rightPriority = self operatorParams (op)
+	
+	// Compare the precedence of operators
+	// The next operator is ignored if the previous one has
+	// a greater priority.
+	if currentPriority >= leftPriority
+		return e
+	end
+	
+	// Skip the operator
+	self nextToken
+	
+	// Get the next expression
+	// exit if the expression is not valid
+	var e2 = self getExpression (rightPriority)
+	if e2 isNil
+		return nil
+	end
+	
+	// Build the list of expressions
+	var arguments = pool new (ExpressionList)
+	arguments add (pool, e)
+	arguments add (pool, e2)
+	e = pool new (DefinitionExpression, module, line, name, arguments, nil)
+//[cf]
+//[of]:		suffix operators
+//[c]
+//[c]instruction:
+//[c]	expression op
+//[c]	
+case	token_assign_inc, token_assign_dec
+
+	var name = op == token_assign_inc cond	op_assign_inc else op_assign_dec
+	
+	// Compare the precedence of operators
+	// The next operator is ignored if the previous one has
+	// a greater priority.
+	if currentPriority >= 2
+		return e
+	end
+	
+	// Skip the operator
+	self nextToken
+	
+	// Build the list of expressions
+	var arguments = pool new (ExpressionList)
+	arguments add (pool, e)
+	e = pool new (DefinitionExpression, module, line, name, arguments, nil)
+//[cf]
+//[of]:		[
+//[c]
+//[c]instruction:
+//[c]	expression '[' list-of-expressions ']'
+//[c]
+case token_lbrac
+
+	var leftPriority	= 32
+	var name	= op_at
+
+	// Compare the precedence of operators
+	// The next operator is ignored if the previous one has
+	// a greater priority.
+	if currentPriority >= leftPriority
+		return e
+	end
+
+	// Skip the '['
+	self nextToken
+
+	// Get argument list
+	var arguments = {*ExpressionList}
+	if self currentToken <> token_rbrac
+		arguments = self getExpressionList
+		if arguments isNil
+			return nil
+		end
+	else
+		arguments = pool new (ExpressionList)
+	end
+
+	// Get close bracket
+	if not self readExpected (token_rbrac)
+		return nil
+	end
+	
+	// Insert the expression at the head of the list
+	arguments addFirst (pool, e)
+	
+	// Create the composite expression
+	e = pool new (DefinitionExpression, module, line, name, arguments, nil)
+//[cf]
+//[of]:		@
+case token_at
+
+	// Compare the precedence of operators
+	// The next operator is ignored if the previous one has
+	// a greater priority.
+	if currentPriority >= 34
+		return e
+	end
+
+	// Skip the '@'
+	self nextToken
+
+	// Read the name of the attribute
+	var name = self getId
+	if name isNil
+		return nil
+	end
+		
+	// Create the composite expression
+	e = pool new (OffsetExpression, module, line, e, name)
+//[cf]
+//[of]:		id
+case token_id
+
+	var leftPriority = 32
+	
+	// Compare the precedence of operators
+	// The next operator is ignored if the previous one has
+	// a greater priority.
+	if currentPriority >= leftPriority
+		return e
+	end
+	
+	// Read id
+	var name = self currentString8
+	self nextToken
+	
+	// Read the list of parameters
+	var parameters = self getParameterList
+	if parameters isNil
+		return nil
+	end
+
+	// Read the inline block
+	var inlineBlock = InlineBlock nil
+	if self currentToken == token_do
+		self nextToken
+		inlineBlock = self getInlineBlock
+		if inlineBlock isNil
+			return nil
+		end
+	end
+	
+	// Insert the expression at the head of the list
+	if parameters == empty_expression_list
+		// Special: do not alter the global empty list
+		parameters = pool new (ExpressionList)
+	end
+	parameters addFirst (pool, e)
+		
+	e = pool new (DefinitionExpression, module, line, name, parameters, inlineBlock)
+//[cf]
+		else
+			// No operator: return the expression
+			return e
+		end
+	end
+//[cf]
+//[of]:getId
+//[c]Reads an identifier
+//[c]
+method getId
+
+	if self unexpected (token_id)
+		return nil
+	end
+	var id = self currentString8
+	
+	self nextToken
+	return id
+//[cf]
+//[of]:getDirectives
+method getDirectives
+
+	// Optimization: no directive, don't clone directives
+	if self currentToken <> token_point
+		return self currentDirectives
+	end
+	
+	var directives = self cloneDirectives
+	
+	repeat
+		if self currentToken <> token_point
+			break
+		end
+		
+		var ok = self applyDirective (directives)
+		if not ok
+			return nil
+		end
+	end
+	
+	return directives
+//[cf]
+//[cf]
+//[of]:utils
+//[of]:readExpected
+//[c]Read the next token and check that it matches with the expected one
+//[c]if it doesn't match, the error object is set
+//[c]
+method readExpected (expectedToken: Token)
+
+	var ok = not self unexpected (expectedToken)
+	if ok
+		self nextToken
+	end
+	return ok
+//[cf]
+//[of]:skipEmptyTokens
+method skipEmptyTokens
+
+	repeat
+		var token = self currentToken
+		if token <> token_br
+			break
+		end
+		self nextToken
+	end
+//[cf]
+//[of]:currentToken
+method currentToken
+
+	return self stream token
+//[cf]
+//[of]:nextToken
+method nextToken
+	
+	self stream nextToken
+//[cf]
+//[of]:currentString16
+method currentString16
+
+	return self stream string16
+//[cf]
+//[of]:currentString8
+method currentString8
+
+	return self stream string8
+//[cf]
+//[of]:currentInteger
+method currentInteger
+
+	return self stream integer
+//[cf]
+
+//[of]:currentLine
+method currentLine
+	
+	return self stream line
+//[cf]
+//[of]:operatorParams
+//[c]Get operator parameters
+//[c]
+//[c]RETURN VALUES
+//[c]	* The name of the operator
+//[c]	* The left priority
+//[c]	* The right priority
+//[c]
+method operatorParams (op: Token)
+
+	switch op
+
+	case token_mul
+		return op_mul, 26, 26
+	case token_div
+		return op_div, 26, 26
+	case token_mod
+		return op_mod, 26, 26
+	
+	case token_add
+		return op_add, 24, 24
+	case token_sub
+		return op_sub, 24, 24
+	
+	case token_shl
+		return op_shl, 22, 22
+	case token_shr
+		return op_shr, 22, 22
+	
+	case token_le
+		return op_le, 20, 20
+	case token_lt
+		return op_lt, 20, 20
+	case token_ge
+		return op_ge, 20, 20
+	case token_gt
+		return op_gt, 20, 20
+
+	case token_eq
+		return op_eq, 18, 18
+	case token_ne
+		return op_ne, 18, 18
+	
+	case token_and
+		return op_and, 16, 16
+	case token_xor
+		return op_xor, 14, 14
+	case token_or
+		return op_or, 12, 12
+
+	case token_assign_add
+		return op_assign_add, 2, 2
+	case token_assign_sub
+		return op_assign_sub, 2, 2
+	case token_assign_mul
+		return op_assign_mul, 2, 2
+	case token_assign_div
+		return op_assign_div, 2, 2
+	case token_assign_mod
+		return op_assign_mod, 2, 2
+	case token_assign_shl
+		return op_assign_shl, 2, 2
+	case token_assign_shr
+		return op_assign_shr, 2, 2
+	case token_assign_and
+		return op_assign_and, 2, 2
+	case token_assign_or 
+		return op_assign_or, 2, 2
+	else // token_assign_xor
+		return op_assign_xor, 2, 2
+	end
+//[cf]
+//[of]:prefixParams
+//[c]Get the name and priority for the operator corresponding to the given token
+//[c]
+method prefixParams (op: Token)
+
+	switch op
+	case token_sharp
+		return op_typeof, 34
+	case token_mul
+		return op_mul, 34
+	case token_add 
+		return op_add, 30
+	case token_sub
+		return op_sub, 30
+	else // token_not
+		return op_not, 30
+	end
+//[cf]
+
+//[of]:unexpected
+//[c]Checks that the token matches with what is expected
+//[c]if it doesn't match, an error is logged.
+//[c]Returns true if the token is not the expected one.
+//[c]
+method unexpected (expectedToken: Token)
+
+	if self currentToken == expectedToken
+		return false
+	end
+	
+	// If the token is 'invalid' it means it is an error from the lexer
+	if self currentToken == token_invalid
+		self error code	= error_lexer
+		self error lexerError	= self stream error
+	else
+		self error code	= error_syntax_expected
+		self error line	= self stream line
+		self error token1	= expectedToken
+		self error token2	= self currentToken
+		self error string2	= self currentString8
+		self error integer2	= self currentInteger
+	end
+	
+	return true
+//[cf]
+//[of]:syntaxError
+//[c]Notify the user that the given token is unexpected
+//[c]
+method syntaxError
+
+	// If the token is 'invalid' it means it is an error from the lexer
+	if self currentToken == token_invalid
+		self error code	= error_lexer
+		self error lexerError	= self stream error
+	else
+		self error code	= error_syntax
+		self error line	= self stream line
+		self error token1	= self currentToken
+	end
+	
+	return nil
+//[cf]
+//[cf]
+//[of]:directives
+//[of]:publicDirectives
+method publicDirectives
+
+	var oldDirectives = self currentDirectives
+	self currentDirectives = self cloneDirectives
+	self currentDirectives visibility = vis_public
+	return oldDirectives
+//[cf]
+//[of]:cloneDirectives
+method cloneDirectives
+
+	var directives = self pool allocateMemory (DirectiveSet)
+	directives initializeFrom (self currentDirectives)
+	return directives
+//[cf]
+//[of]:applyCurrentDirective
+method applyCurrentDirective
+
+	self currentDirectives = self cloneDirectives
+	return self applyDirective (self currentDirectives)
+//[cf]
+//[of]:applyDirective
+//[c]Reads a directive
+//[c]
+//[c]	Returns false if an error occurs, in such a case the error object
+//[c]	is set.
+//[c]
+method applyDirective (directives: *DirectiveSet)
+
+	// skip the '.' or ':'
+	self nextToken
+	
+	if self unexpected (token_id)
+		return false
+	end
+	var name = self currentString8
+	
+	if name isEqual ('public')
+		directives visibility = vis_public
+	elsif name isEqual ('private')
+		directives visibility = vis_private
+	elsif name isEqual ('c')
+		directives namingConvention = nc_c
+	elsif name isEqual ('stdcall')
+		directives callingConvention = cc_stdcall
+	elsif name isEqual ('cdecl')
+		directives callingConvention = cc_cdecl
+	elsif name isEqual ('fast')
+		directives callingConvention = cc_default
+	elsif name isEqual ('entry')
+		directives entry = true
+	else
+		self syntaxError
+		return false
+	end
+	
+	self nextToken
+	return true
+//[cf]
+//[cf]
+//[cf]
+//[of]:ParserError
+//[of]:definition
+struct ParserError
+
+	attr code	: ParserErrorCode
+	attr line	: LineNumber
+	attr lexerError	: *LexerError	// for lexer error
+	attr token1	: Token	// for syntax error
+	attr token2	: Token	// for syntax error with token expected
+	attr string2	: String8	//
+	attr integer2	: Unsigned64	//
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+method initialize
+
+	self code = parser_ok
+//[cf]
+//[cf]
+//[cf]
+//[of]:ParserErrorCode
+enum ParserErrorCode
+
+	parser_ok
+	error_lexer	// error from lexer
+	error_syntax	// unexpected token
+	error_syntax_expected	// unexpected token (one specific expected)
+//[cf]
+//[of]:Constants
+const op_add	= '_add'
+const op_sub	= '_sub'
+const op_mul	= '_mul'
+const op_div	= '_div'
+const op_mod	= '_mod'
+const op_shl	= '_shl'
+const op_shr	= '_shr'
+	
+const op_eq	= '_eq'
+const op_ne	= '_ne'
+const op_le	= '_le'
+const op_lt	= '_lt' 
+const op_ge	= '_ge'
+const op_gt	= '_gt'
+	
+const op_and	= '_and'
+const op_xor	= '_xor'
+const op_or	= '_or'
+const op_not	= '_not'
+const op_at	= '_at'
+const op_cast	= '_cast'
+const op_local	= '_local'
+const op_typeof	= '_type'
+	
+const op_assign_add	= '_assign_add'
+const op_assign_sub	= '_assign_sub'
+const op_assign_mul	= '_assign_mul'
+const op_assign_div	= '_assign_div'
+const op_assign_mod	= '_assign_mod'
+const op_assign_shl	= '_assign_shl'
+const op_assign_shr	= '_assign_shr'
+const op_assign_and	= '_assign_and'
+const op_assign_xor	= '_assign_xor'
+const op_assign_or	= '_assign_or'
+const op_assign_inc	= '_assign_inc'
+const op_assign_dec	= '_assign_dec'
+//[cf]
+
+.private
+//[of]:Utils
+//[of]:DirectiveContext
+//[of]:definition
+struct DirectiveContext
+
+	attr parent	: *DirectiveContext	// The parent directives or nil
+	attr directives	: *DirectiveSet
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+method initialize (parent: *DirectiveContext)
+
+	self parent = parent
+	
+	if parent isNil
+		self visibility	= vis_public
+		self namingConvention	= nc_native
+		self callingConvention	= cc_default
+	else
+		self visibility	= vis_public
+		self namingConvention	= parent namingConvention
+		self callingConvention	= parent callingConvention
+	end
+//[cf]
+//[cf]
+//[cf]
+//[cf]
+//[of]:Tables
+const firstsInstruction = [Token next] Bool [
+
+	false,	// token_invalid
+	false,	// token_eof
+	
+	true,	// token_id
+	true,	// token_integer
+	true,	// token_string_8
+	true,	// token_char_8
+	true,	// token_string_16
+	true,	// token_char_16
+	
+	true,	// token_add
+	true,	// token_sub
+	true,	// token_mul
+	false,	// token_div
+	false,	// token_mod
+	false,	// token_shl
+	false,	// token_shr
+	true,	// token_and
+	false,	// token_or
+	false,	// token_xor
+
+	false,	// token_assign
+	false,	// token_assign_add
+	false,	// token_assign_sub
+	false,	// token_assign_mul
+	false,	// token_assign_div
+	false,	// token_assign_mod
+	false,	// token_assign_shl
+	false,	// token_assign_shr
+	false,	// token_assign_and
+	false,	// token_assign_or
+	false,	// token_assign_xor
+	false,	// token_assign_inc
+	false,	// token_assign_dec
+
+	false,	// token_eq
+	false,	// token_ne
+	false,	// token_le
+	false,	// token_lt
+	false,	// token_ge
+	false,	// token_gt
+	
+	false,	// token_global
+	false,	// token_import
+	false,	// token_structure
+	false,	// token_enumeration
+	false,	// token_function
+	true,	// token_variable
+	false,	// token_const
+	false,	// token_extension
+	false,	// token_end
+	false,	// token_attribute
+	false,	// token_static
+	false,	// token_method
+	true,	// token_ref
+	
+	true,	// token_if
+	false,	// token_elsif
+	false,	// token_else
+	true,	// token_while
+	true,	// token_repeat
+	true,	// token_switch
+	false,	// token_case
+	true,	// token_return
+	true,	// token_break
+	true,	// token_yield
+	false,	// token_do
+
+	false,	// token_minimal_and
+	false,	// token_minimal_or
+	true,	// token_not
+	false,	// token_cond
+	
+	true,	// token_br
+	false,	// token_comma
+	false,	// token_colon
+	true,	// token_lparen
+	false,	// token_rparen
+	true,	// token_lbrac
+	false,	// token_rbrac
+	true,	// token_lbrace
+	false,	// token_rbrace
+	true,	// token_ellipsis
+	false,	// token_at
+	false,	// token_to
+	true,	// token_sharp
+	false] // token_point
+//[cf]
+//[of]:Imports
+import "syntax-tree"
+import "lexer"
+import "commons"
+import "core"
+//[cf]

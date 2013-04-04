@@ -1,0 +1,2457 @@
+//[of]:P-Code
+//[of]:PFunction
+//[of]:definition
+struct PFunction
+
+	attr pool	: *MemoryPool	// The memory pool to store elements
+	attr arguments	: PArgument Collection	// The list of local arguments
+	attr variables	: PVariable Collection	// The list of local variables
+	attr locals	: PLocal Collection	// The list of local structures and arrays
+	attr instructions	: PInstruction Collection	// The list of instructions
+	attr labels	: PLabel Collection	// The list of labels
+	attr references	: PLabelReference Collection	// The list of switch tables
+	attr object	: *ObjectFunction	// The storage in the object file
+	attr comparing	: Bool	// Detect recursion when comparing functions
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+method initialize (pool: *MemoryPool)
+
+	self pool	= pool
+	self object	= nil
+	self comparing	= false
+	self arguments	initialize
+	self variables	initialize
+	self locals	initialize
+	self instructions	initialize
+	self labels	initialize
+	self references	initialize
+//[cf]
+//[cf]
+//[of]:accessing
+//[of]:hash
+method hash
+
+	var hash = 0 : Hash
+	self instructions each do i
+		hash *= 33
+		hash += i hash
+	end
+	
+	return hash
+//[cf]
+//[cf]
+//[of]:operations
+//[of]:reduce
+//[c]Eliminates all variable and argument values: they are replaced by their 
+//[c]actual values.
+//[c]
+method reduce
+
+	self instructions each do i
+		i reduce
+	end
+//[cf]
+//[of]:computeVariableIntervals
+method computeVariableIntervals
+
+	self variables each do v
+		v firstIndex = invalidInstructionIndex
+	end
+	
+	var index = 0 : InstructionIndex
+	self instructions each do instruction
+		self markVariables (instruction, index)
+		index ++
+	end
+//[cf]
+//[cf]
+//[of]:creating
+//[of]:newVariableValue
+method newVariableValue (pvariable: *PVariable)
+
+	return self pool new (PVariableValue, pvariable)
+//[cf]
+//[of]:newValueArray
+method newValueArray (size: Size)
+
+	return self pool allocateArray (*PValue, size)
+//[cf]
+//[cf]
+//[of]:adding - removing
+//[of]:newArgument
+method newArgument (	name	: String8, 
+	size	: PValueSize)
+
+	var pargument = self pool new (	PArgument,
+		name,
+		self arguments size,
+		size)
+	self arguments add (pargument)
+	return self pool new (PArgumentValue, pargument)
+//[cf]
+//[of]:newVariable
+method newVariable (	name	: String8, 
+	size	: PValueSize)
+
+	var pvariable = self pool new (	PVariable,
+		name,
+		self variables size,
+		size)
+	self variables add (pvariable)
+	return self newVariableValue (pvariable)
+//[cf]
+//[of]:newLocal
+method newLocal (size: Size)
+
+	var plocal = self pool new (PLocal, self locals size, size)
+	self locals add (plocal)
+	return self pool new (PLocalValue, plocal)
+//[cf]
+//[of]:newLabel
+method newLabel
+
+	var plabel = self pool new (PLabel, self labels size)
+	self labels add (plabel)
+	return plabel
+//[cf]
+//[of]:newUndefined
+method newUndefined (size: PValueSize)
+
+	return self pool new (PValue, vc_undefined, size)
+//[cf]
+//[of]:newInteger
+method newInteger (	size	: PValueSize,
+	n	: Unsigned64)
+
+	return self pool new (PIntegerValue, size, n)
+//[cf]
+//[of]:newSwitchTable32
+method newSwitchTable32 (size: Size)
+
+	var table = self pool allocateArray (Byte, SwitchTable32 size + SwitchItem32 size * size) : *SwitchTable32
+	table initialize (size)
+	return table
+//[cf]
+//[of]:newLabelReference
+method newLabelReference (	object	: *ObjectData,
+	offset	: Offset,
+	label	: *PLabel)
+
+	var reference = self pool new (PLabelReference, object, offset, label)
+	self references add (reference)
+	return reference
+//[cf]
+//[cf]
+//[of]:output
+//[of]:addToStringBuffer
+method addToStringBuffer (sb: *StringBuffer)
+
+	sb << "Locals:"
+	sb << \n
+	self locals each do loc
+		sb << \t
+		sb << loc
+		sb << \t
+		sb << loc size
+		sb << \t
+		sb << loc offset signed
+		sb << \n
+	end
+	sb << \n
+	
+	sb << "Variables:"
+	sb << \n
+	self variables each do v
+		sb << \t
+		sb << v
+		sb << \t
+		sb << v size
+		sb << \t
+		sb << v firstIndex
+		sb << \t
+		sb << v lastIndex
+		sb << \t
+		sb << v value
+		sb << \n
+	end
+	sb << \n
+	
+	sb << "Instructions:"
+	sb << \n
+	var line = 0 s
+	self instructions each do i
+		sb << line
+		sb << \t
+		sb << i
+		sb << \n
+		line ++
+	end
+//[cf]
+//[cf]
+//[of]:testing
+//[of]:isEqual
+method isEqual (other: *PFunction)
+	
+	if self == other
+		return true
+	end
+	
+	// Can't compare recursive functions
+	if self comparing
+		return false
+	end
+
+	// Check the number of arguments
+	// Instructions could be identical but the number
+	// of arguments could differs requiring a different
+	// code in stdcall
+	if self arguments size <> other arguments size
+		return false
+	end
+	
+	self comparing = true
+	var eq = self instructions isEqualInstructions (other instructions)
+	self comparing = false
+	return eq
+//[cf]
+//[cf]
+
+:private
+//[of]:utils
+//[of]:markVariables
+//[c]Marks all variables referenced in the given instruction
+//[c]
+method markVariables (instruction: *PInstruction, index: InstructionIndex)
+
+	switch instruction code
+	case pc_call
+		var call = instruction call
+		call address setLastIndex (index)
+		call eachArgument do a
+			a setLastIndex (index)
+		end
+		call eachValue do v
+			v setFirstIndex (index)
+			v setLastIndex (index)
+		end
+		
+	case pc_jumpi
+		instruction jumpi value setLastIndex (index)
+	
+	case pc_jump
+		self extendVariables (instruction jump, index)
+	
+	case pc_jumpc, pc_jumpnc
+		var condition = instruction condition
+		condition condition setLastIndex (index)
+		self extendVariables (instruction condition, index)
+	
+	case pc_lookup
+		var lookup = instruction lookup
+		lookup value setLastIndex (index)
+		lookup table setLastIndex (index)
+
+	case pc_evaluate
+		instruction evaluate value setLastIndex (index)
+	
+	case	pc_assign
+		var op = instruction operation
+		op lvalue setFirstIndex (index + 1)
+		op lvalue setLastIndex (index)
+		op rvalue setLastIndex (index)
+	
+	case	pc_add,
+		pc_sub,
+		pc_smul,
+		pc_umul,
+		pc_sdiv,
+		pc_udiv,
+		pc_smod,
+		pc_umod,
+		pc_shl,
+		pc_sshr,
+		pc_ushr,
+		pc_and,
+		pc_or,
+		pc_xor
+		
+		var op = instruction operation
+		op lvalue setLastIndex (index)
+		op rvalue setLastIndex (index)
+
+	case pc_label
+		instruction label label index = index
+
+	case pc_return
+		instruction ret each do v
+			v setLastIndex (index)
+		end
+		
+	end
+//[cf]
+//[of]:extendVariables
+//[c]Extends the range of all variables actives at the label targetted by the jump
+//[c]to the index of the jump (the index argument).
+//[c]
+method extendVariables (jump: *PJumpInstruction, index: InstructionIndex)
+
+	var labelIndex = jump label index
+	// We are only interested in backward jumps, forward jumps are
+	// not set yet.
+	if labelIndex <> invalidInstructionIndex
+		self variables each do pvariable
+			// If the variable is active at the label: extend the range
+			if pvariable firstIndex <= labelIndex and pvariable lastIndex >= labelIndex
+				pvariable lastIndex = index
+			end
+		end
+	end
+//[cf]
+//[cf]
+//[cf]
+//[of]:PVariable
+//[of]:definition
+struct PVariable : PVariable CollectionElement
+
+	attr name	: String8
+	attr id	: Unsigned	// number if no name
+	attr size	: PValueSize	// the size of the variable
+	attr firstIndex	: InstructionIndex	// First index where the variable is referenced
+	attr lastIndex	: InstructionIndex	// Last index where the variable is referenced
+			
+	attr register	: RegisterId	// The register used by the variable (rid_none if the variable is stored on stack)
+	attr value	: *PValue	// The value when evaluating the variable (constant, register or stack value)
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+method initialize (	name	: String8,
+	id	: Unsigned,
+	size	: PValueSize)
+
+	self name	= name
+	self id	= id
+	self size	= size
+	self register	= rid_none
+//[cf]
+//[cf]
+//[of]:comparing
+//[of]:<
+method _lt (other: *PVariable)
+
+	return self firstIndex < other firstIndex
+//[cf]
+//[cf]
+//[of]:output
+//[of]:addToStringBuffer
+method addToStringBuffer (sb: *StringBuffer)
+
+	if self name notNil
+		sb << self name
+	else
+		sb << $V
+		sb << self id
+	end
+//[cf]
+//[cf]
+//[cf]
+//[of]:PArgument
+//[of]:definition
+struct PArgument : PArgument CollectionElement
+
+	attr name	: String8	// The name of the argument
+	attr id	: Unsigned	// Number if no name
+	attr size	: PValueSize	// The size of the argument
+	attr referenceCount	: Unsigned	// Number of accesses to this argument
+			
+	attr register	: RegisterId	// The register used by the variable (rid_none if the variable is stored on stack)
+	attr value	: *PValue	// The value when evaluating the variable (constant, register or stack value)
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+method initialize (	name	: String8,
+	id	: Unsigned,
+	size	: PValueSize)
+
+	self name	= name
+	self id	= id
+	self size	= size
+	self referenceCount	= 0
+	self register	= rid_none
+//[cf]
+//[cf]
+//[of]:accessing
+//[of]:incReferenceCount
+method incReferenceCount
+
+	self referenceCount ++
+//[cf]
+//[cf]
+//[of]:output
+//[of]:addToStringBuffer
+method addToStringBuffer (sb: *StringBuffer)
+
+	sb << $$
+	if self name notNil
+		sb << self name
+	else
+		sb << self id
+	end
+//[cf]
+//[cf]
+//[cf]
+//[of]:PLocal
+//[of]:definition
+struct PLocal : PLocal CollectionElement
+
+	attr id	: Unsigned	// number to identify the local (locals have no name)
+	attr size	: Size	// The size to allocate on stack
+	attr offset	: StackOffset	// The offset on stack
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+method initialize (id: Unsigned, size: Size)
+
+	self id	= id
+	self size	= size
+//[cf]
+//[cf]
+//[of]:output
+//[of]:addToStringBuffer
+method addToStringBuffer (sb: *StringBuffer)
+
+	sb << "ST"
+	sb << self id
+//[cf]
+//[cf]
+//[cf]
+//[of]:PLabel
+//[of]:definition
+//[c]A label defines a position in the code of a function.
+//[c]
+//[c]It is possible to jump to a label in the same function but it is not
+//[c]possible to jump to a label defined in another function.
+//[c]
+struct PLabel : PLabel CollectionElement
+
+	attr id	: Unsigned
+	attr index	: InstructionIndex
+	
+	// Native Code Generator
+	attr offset	: Address	// x86: address relative to the beginning of the function
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+method initialize (id: Unsigned)
+
+	self id	= id
+	self index	= invalidInstructionIndex
+	self offset	= undefined_address
+//[cf]
+//[cf]
+//[of]:testing
+//[of]:isDefined
+method isDefined
+
+	return self offset <> undefined_address
+//[cf]
+//[cf]
+//[of]:output
+//[of]:addToStringBuffer
+method addToStringBuffer (sb: *StringBuffer)
+
+	sb << $L
+	sb << self id
+//[cf]
+//[cf]
+//[cf]
+//[of]:SwitchTable32
+//[of]:definition
+struct SwitchTable32 : SwitchTable32 CollectionElement
+
+	attr size	: Size
+	attr choices	: [] SwitchItem32
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+method initialize (size: Size)
+
+	self size = size
+//[cf]
+//[cf]
+//[of]:accessing
+//[of]:setCase
+method setCase (	index	: Offset, 
+	value	: Integer, 
+	label	: *PLabel)
+
+	self choices [index] value	= value
+	self choices [index] label	= label
+//[cf]
+//[cf]
+//[of]:enumerating
+//[of]:each
+method each
+
+	self size each do i
+		var item = self choices [i]
+		yield item value, item label
+	end
+//[cf]
+//[cf]
+//[cf]
+//[of]:SwitchItem32
+struct SwitchItem32
+
+	attr value	: Integer
+	attr label	: *PLabel
+//[cf]
+//[of]:PLabelReference
+//[of]:definition
+struct PLabelReference	: PLabelReference CollectionElement
+
+	attr object	: *ObjectData	// The object containing the reference to the label
+	attr offset	: Offset	// The position of the reference in the object
+	attr label	: *PLabel	// The target label
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+method initialize (	object	: *ObjectData,
+	offset	: Offset,
+	label	: *PLabel)
+
+	self object	= object
+	self offset	= offset
+	self label	= label
+//[cf]
+//[cf]
+//[cf]
+//[cf]
+//[of]:P-Instruction
+//[of]:PInstructionCode
+enum PInstructionCode
+
+	pc_assign
+	pc_add
+	pc_sub
+	pc_smul
+	pc_umul
+	pc_sdiv
+	pc_udiv
+	pc_smod
+	pc_umod
+	pc_shl
+	pc_sshr
+	pc_ushr
+	pc_and
+	pc_or
+	pc_xor
+
+	pc_label
+	pc_evaluate
+	pc_call
+	pc_return
+	pc_jump
+	pc_jumpi
+	pc_jumpc
+	pc_jumpnc
+	pc_lookup
+//[cf]
+//[of]:PInstruction
+//[of]:definition
+struct PInstruction : PInstruction CollectionElement
+
+	attr code	: PInstructionCode
+	attr line	: LineNumber
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+method initialize (code)
+
+	self code = code
+//[cf]
+//[cf]
+//[of]:accessing
+//[of]:hash
+method hash
+
+	switch self code
+	case	pc_assign,
+		pc_add,
+		pc_sub,
+		pc_smul,
+		pc_umul,
+		pc_sdiv,
+		pc_udiv,
+		pc_smod,
+		pc_umod,
+		pc_shl,
+		pc_sshr,
+		pc_ushr,
+		pc_and,
+		pc_or,
+		pc_xor
+	
+		var op = self operation
+		return op lvalue hash + op rvalue hash
+		
+	case pc_evaluate
+	
+		return self evaluate value hash
+		
+	case pc_return
+		var hash = 0 : Hash
+		self ret each do v
+			hash += v hash
+		end
+		return hash
+	else
+		return self code : Hash
+	end
+	
+//[cf]
+//[cf]
+//[of]:testing
+//[of]:isFollowedByLabel
+method isFollowedByLabel (label: *PLabel)
+
+	var next = self nextSibling
+	
+	// No more instruction
+	if next isNil
+		return false
+	end
+	
+	// Not a label
+	if next code <> pc_label
+		return false
+	end
+	
+	// Compare labels
+	return next label label == label
+//[cf]
+//[of]:isEqual
+method isEqual (other: *PInstruction)
+
+	if self code <> other code
+		return false
+	end
+	
+	switch self code
+	case	pc_assign,
+		pc_add,
+		pc_sub,
+		pc_smul,
+		pc_umul,
+		pc_sdiv,
+		pc_udiv,
+		pc_smod,
+		pc_umod,
+		pc_shl,
+		pc_sshr,
+		pc_ushr,
+		pc_and,
+		pc_or,
+		pc_xor
+	
+		var op1 = self operation
+		var op2 = other operation
+		return op1 lvalue isEqual (op2 lvalue) and op1 rvalue isEqual (op2 rvalue)
+
+	case pc_label
+		return self label label id == other label label id
+	
+	case pc_evaluate
+		return self evaluate value isEqual (other evaluate value)
+	
+	case pc_call
+		var c1 = self call
+		var c2 = other call
+		if c1 callingConvention <> c2 callingConvention
+			return false
+		end
+		if not c1 address isEqual (c2 address)
+			return false
+		end
+		c1 argumentCount each do i
+			if not c1 arguments [i] isEqual (c2 arguments [i])
+				return false
+			end
+		end
+		c1 valueCount each do i
+			if not c1 values [i] isEqual (c2 values [i])
+				return false
+			end
+		end
+		return true
+	
+	case pc_return
+		var r1 = self ret
+		var r2 = other ret
+		if r1 valueCount <> r2 valueCount
+			return false
+		end
+		r1 valueCount each do i
+			if not r1 values [i] isEqual (r2 values [i])
+				return false
+			end
+		end
+		return true
+	
+	case pc_jump
+		return self jump label id == other jump label id
+	
+	case pc_jumpi
+		return self jumpi value isEqual (other jumpi value)
+		
+	case	pc_jumpc,
+		pc_jumpnc
+	
+		var j1 = self condition
+		var j2 = other condition
+		return j1 label id == j2 label id and j1 condition isEqual (j2 condition)
+		
+	else // pc_lookup
+	
+		var i1 = self lookup
+		var i2 = other lookup
+		return i1 value isEqual (i2 value) and i1 table isEqual (i2 table)
+	end
+//[cf]
+//[cf]
+//[of]:reducing
+//[of]:reduce
+method reduce
+
+	switch self code
+	case	pc_assign,
+		pc_add,
+		pc_sub,
+		pc_smul,
+		pc_umul,
+		pc_sdiv,
+		pc_udiv,
+		pc_smod,
+		pc_umod,
+		pc_shl,
+		pc_sshr,
+		pc_ushr,
+		pc_and,
+		pc_or,
+		pc_xor
+		self operation reduce
+	case pc_label
+		// nothing to do
+	case pc_evaluate
+		self evaluate reduce
+	case pc_call
+		self call reduce
+	case pc_return
+		self ret reduce
+	case pc_jump
+		// nothing to do
+	case pc_jumpi
+		self jumpi reduce
+	case pc_jumpc, pc_jumpnc
+		self condition reduce
+	case pc_lookup
+		self lookup reduce
+	end
+//[cf]
+//[cf]
+//[of]:downcasting
+//[of]:label
+method label
+
+	return self : *PLabelInstruction
+//[cf]
+//[of]:evaluate
+method evaluate
+
+	return self : *PEvaluateInstruction
+//[cf]
+//[of]:operation
+method operation
+
+	return self : *POperationInstruction
+//[cf]
+//[of]:jump
+method jump
+
+	return self : *PJumpInstruction
+//[cf]
+//[of]:jumpi
+method jumpi
+
+	return self : *PJumpiInstruction
+//[cf]
+//[of]:condition
+method condition
+
+	return self : *PConditionInstruction
+//[cf]
+//[of]:ret
+method ret
+
+	return self : *PReturnInstruction
+//[cf]
+//[of]:call
+method call
+
+	return self : *PCallInstruction
+//[cf]
+//[of]:lookup
+method lookup
+
+	return self : *PLookupInstruction
+//[cf]
+//[cf]
+//[of]:output
+//[of]:addToStringBuffer
+method addToStringBuffer (sb: *StringBuffer)
+
+	switch self code
+	case	pc_assign,
+		pc_add,
+		pc_sub,
+		pc_smul,
+		pc_umul,
+		pc_sdiv,
+		pc_udiv,
+		pc_smod,
+		pc_umod,
+		pc_shl,
+		pc_sshr,
+		pc_ushr,
+		pc_and,
+		pc_or,
+		pc_xor
+	
+		sb << self operation
+	
+	case pc_label
+		sb << self label
+	case pc_evaluate
+		sb << self evaluate
+	case pc_call
+		sb << self call
+	case pc_return
+		sb << self ret
+	case pc_jump
+		sb << self jump
+	case pc_jumpi
+		sb << self jumpi
+	
+	case	pc_jumpc,
+		pc_jumpnc
+	
+		sb << self condition
+
+	case pc_lookup
+		sb << self lookup
+	end
+//[cf]
+//[cf]
+//[cf]
+//[of]:PLabelInstruction
+//[of]:definition
+struct PLabelInstruction : PInstruction
+
+	attr label	: *PLabel
+
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+method initialize (label: *PLabel)
+
+	self super initialize (pc_label)
+	self label = label
+//[cf]
+//[cf]
+//[of]:output
+//[of]:addToStringBuffer
+method addToStringBuffer (sb: *StringBuffer)
+
+	sb << self label
+	sb << $:
+//[cf]
+//[cf]
+//[cf]
+//[of]:PEvaluateInstruction
+//[of]:definition
+struct PEvaluateInstruction : PInstruction
+
+	attr value	: *PValue
+
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+method initialize (value: *PValue)
+
+	self super initialize (pc_evaluate)
+	self value = value
+//[cf]
+//[cf]
+//[of]:reducing
+//[of]:reduce
+method reduce
+	
+	self value	= self value reduce
+//[cf]
+//[cf]
+//[of]:output
+//[of]:addToStringBuffer
+method addToStringBuffer (sb: *StringBuffer)
+
+	sb << \t
+	sb << "eval"
+	sb << \t
+	sb << self value
+//[cf]
+//[cf]
+//[cf]
+//[of]:POperationInstruction
+//[of]:definition
+struct POperationInstruction : PInstruction
+
+	attr lvalue	: *PValue
+	attr rvalue	: *PValue
+
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+method initialize (code: PInstructionCode, lvalue: *PValue, rvalue: *PValue)
+
+	self super initialize (code)
+	self lvalue = lvalue
+	self rvalue = rvalue
+//[cf]
+//[cf]
+//[of]:reducing
+//[of]:reduce
+method reduce
+	
+	self lvalue	= self lvalue reduce
+	self rvalue	= self rvalue reduce
+//[cf]
+//[cf]
+//[of]:output
+//[of]:addToStringBuffer
+method addToStringBuffer (sb: *StringBuffer)
+
+	var names = [] String [
+		"assign",
+		"add",
+		"sub",
+		"smul",
+		"umul",
+		"sdiv",
+		"udiv",
+		"smod",
+		"umod",
+		"shl",
+		"sshr",
+		"ushr",
+		"and",
+		"or",
+		"xor"]
+	
+	sb << \t
+	sb << names [self code]
+	sb << \t
+	sb << self rvalue
+	sb << " -> "
+	sb << self lvalue
+//[cf]
+//[cf]
+//[cf]
+//[of]:PJumpInstruction
+//[of]:definition
+struct PJumpInstruction : PInstruction
+
+	attr label	: *PLabel
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+method initialize (	code	: PInstructionCode,
+	label	: *PLabel)
+
+	self super initialize (code)
+	self label	= label
+//[cf]
+//[cf]
+//[of]:output
+//[of]:addToStringBuffer
+method addToStringBuffer (sb: *StringBuffer)
+
+	sb << \t
+	sb << "jump"
+	sb << \t
+	sb << self label
+//[cf]
+//[cf]
+//[cf]
+//[of]:PJumpiInstruction
+//[of]:definition
+struct PJumpiInstruction : PInstruction
+
+	attr value	: *PValue
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+method initialize (	value	: *PValue)
+
+	self super initialize (pc_jumpi)
+	self value = value
+//[cf]
+//[cf]
+//[of]:reducing
+//[of]:reduce
+method reduce
+	
+	self value = self value reduce
+//[cf]
+//[cf]
+//[of]:output
+//[of]:addToStringBuffer
+method addToStringBuffer (sb: *StringBuffer)
+
+	sb << \t
+	sb << "jump"
+	sb << \t
+	sb << self value
+//[cf]
+//[cf]
+//[cf]
+//[of]:PConditionInstruction
+//[of]:definition
+struct PConditionInstruction : PJumpInstruction
+
+	attr condition	: *PValue
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+method initialize (	code	: PInstructionCode,
+	condition	: *PValue,
+	label	: *PLabel)
+
+	self super initialize (code, label)
+	self condition	= condition
+//[cf]
+//[cf]
+//[of]:reducing
+//[of]:reduce
+method reduce
+	
+	self condition	= self condition reduce
+//[cf]
+//[cf]
+//[of]:output
+//[of]:addToStringBuffer
+method addToStringBuffer (sb: *StringBuffer)
+
+	sb << \t
+	sb << (self code == pc_jumpc cond "jumpc" else "jumpnc")
+	sb << \t
+	sb << self condition
+	sb << $,
+	sb << \w
+	sb << self label
+//[cf]
+//[cf]
+//[cf]
+//[of]:PReturnInstruction
+//[of]:definition
+struct PReturnInstruction : PInstruction
+
+	attr valueCount	: Size
+	attr values	: *[] *PValue
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+method initialize (	valueCount	: Size,
+	values	: *[] *PValue)
+
+	self super initialize (pc_return)
+	self valueCount	= valueCount
+	self values	= values
+//[cf]
+//[cf]
+//[of]:enumerating
+//[of]:each
+method each
+
+	self valueCount each do i
+		yield self values [i]
+	end
+//[cf]
+//[cf]
+//[of]:reducing
+//[of]:reduce
+method reduce
+	
+	self valueCount each do i
+		self values [i] = self values [i] reduce
+	end
+//[cf]
+//[cf]
+//[of]:output
+//[of]:addToStringBuffer
+method addToStringBuffer (sb: *StringBuffer)
+
+	sb << \t
+	sb << "return"
+	sb << \t
+	var comma = false
+	self each do value
+		if comma
+			sb << $,
+			sb << \w
+		end
+		comma = true
+		sb << value
+	end
+//[cf]
+//[cf]
+//[cf]
+//[of]:PCallInstruction
+//[of]:definition
+struct PCallInstruction : PInstruction
+
+	attr callingConvention	: CallingConvention	// The calling convention
+	attr address	: *PValue	// The function to call
+	attr argumentCount	: Size	// Number of arguments
+	attr arguments	: *[] *PValue	// The arguments
+	attr valueCount	: Size	// Number of return values
+	attr values	: *[] *PValue	// The return values
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+method initialize (	callingConvention	: CallingConvention,
+	address	: *PValue,
+	argumentCount	: Size,
+	arguments	: *[] *PValue,
+	valueCount	: Size,
+	values	: *[] *PValue)
+
+	self super initialize (pc_call)
+	
+	self callingConvention	= callingConvention
+	self address	= address
+	self argumentCount	= argumentCount
+	self arguments	= arguments
+	self valueCount	= valueCount
+	self values	= values
+//[cf]
+//[cf]
+//[of]:enumerating
+//[of]:eachArgument
+method eachArgument
+
+	self argumentCount each do i
+		yield self arguments [i]
+	end
+//[cf]
+//[of]:eachValue
+method eachValue
+
+	self valueCount each do i
+		yield self values [i]
+	end
+//[cf]
+//[cf]
+//[of]:reducing
+//[of]:reduce
+method reduce
+
+	self address = self address reduce
+		
+	self argumentCount each do i
+		self arguments [i] = self arguments [i] reduce
+	end
+
+	self valueCount each do i
+		self values [i] = self values [i] reduce
+	end
+//[cf]
+//[cf]
+//[of]:output
+//[of]:addToStringBuffer
+method addToStringBuffer (sb: *StringBuffer)
+
+	sb << \t
+	sb << "call"
+	sb << \t
+	sb << self address
+	if self argumentCount > 0
+		sb << " ("
+		var comma = false
+		self eachArgument do value
+			if comma
+				sb << ", "
+			end
+			comma = true
+			sb << value
+		end
+		sb << $)
+	end
+	
+	if self valueCount > 0
+		sb << " -> "
+		var comma = false
+		self eachValue do value
+			if comma
+				sb << ", "
+			end
+			comma = true
+			sb << value
+		end
+	end
+//[cf]
+//[cf]
+//[cf]
+//[of]:PLookupInstruction
+//[of]:definition
+struct PLookupInstruction : PInstruction
+
+	attr value	: *PValue
+	attr table	: *PValue
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+method initialize (	value	: *PValue,
+	table	: *PValue)
+
+	self super initialize (pc_lookup)
+	self value	= value
+	self table	= table
+//[cf]
+//[cf]
+//[of]:reducing
+//[of]:reduce
+method reduce
+	
+	self value	= self value reduce
+	self table	= self table reduce
+//[cf]
+//[cf]
+//[of]:output
+//[of]:addToStringBuffer
+method addToStringBuffer (sb: *StringBuffer)
+
+	sb << \t
+	sb << "lookup"
+	sb << \t
+	sb << self value
+	sb << ", "
+	sb << self table
+//[cf]
+//[cf]
+//[cf]
+//[cf]
+//[of]:P-Value
+//[of]:PValueCode
+enum PValueCode
+
+	vc_register
+	vc_stack
+	vc_memory
+	vc_integer
+	
+	vc_undefined
+	vc_local
+	vc_global
+	vc_function
+	vc_call
+
+	vc_integer_add
+	vc_integer_sub
+	vc_integer_smul
+	vc_integer_umul
+	vc_integer_sdiv
+	vc_integer_udiv
+	vc_integer_smod
+	vc_integer_umod
+	vc_integer_shl
+	vc_integer_sshr
+	vc_integer_ushr
+	vc_integer_not
+	vc_integer_neg
+	vc_integer_and
+	vc_integer_or
+	vc_integer_xor
+	vc_integer_eq
+	vc_integer_ne
+	vc_integer_sle
+	vc_integer_slt
+	vc_integer_sge
+	vc_integer_sgt
+	vc_integer_ule
+	vc_integer_ult
+	vc_integer_uge
+	vc_integer_ugt
+
+	vc_boolean_not
+
+	vc_truncate
+	vc_sext
+	vc_uext
+
+	vc_minimal_and
+	vc_minimal_or
+	vc_sequence
+	
+	// These ones are eliminated after reduction
+	vc_variable
+	vc_argument
+//[cf]
+//[of]:PValueSize
+enum PValueSize
+
+	vs_byte
+	vs_word
+	vs_dword
+	vs_qword
+
+	method addToStringBuffer (sb: *StringBuffer)
+		
+		var s = {String}
+		switch self
+		case vs_byte
+			s = "byte"
+		case vs_word
+			s = "word"
+		case vs_dword
+			s = "dword"
+		case vs_qword
+			s = "qword"
+		else
+			s = "*invalid*"
+		end
+		sb << s
+//[cf]
+//[of]:PValue
+//[of]:definition
+struct PValue
+
+	attr code	: PValueCode
+	attr size	: PValueSize
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+method initialize (code, size)
+
+	self code	= code
+	self size	= size
+//[cf]
+//[cf]
+//[of]:reducing
+//[of]:reduce
+method reduce
+
+	switch self code
+	case vc_memory
+		self memory reduce
+
+	case vc_call
+		self call reduce
+	
+	case vc_sequence
+		self sequence reduce
+
+	case	vc_integer_add,
+		vc_integer_sub,
+		vc_integer_smul,
+		vc_integer_umul,
+		vc_integer_sdiv,
+		vc_integer_udiv,
+		vc_integer_smod,
+		vc_integer_umod,
+		vc_integer_shl,
+		vc_integer_sshr,
+		vc_integer_ushr,
+		vc_integer_and,
+		vc_integer_or,
+		vc_integer_xor,
+		vc_integer_eq,
+		vc_integer_ne,
+		vc_integer_sle,
+		vc_integer_slt,
+		vc_integer_sge,
+		vc_integer_sgt,
+		vc_integer_ule,
+		vc_integer_ult,
+		vc_integer_uge,
+		vc_integer_ugt,
+		vc_minimal_and,
+		vc_minimal_or
+	
+		self binary reduce
+	
+	case	vc_integer_not,
+		vc_integer_neg,
+		vc_boolean_not,
+		vc_truncate,
+		vc_sext,
+		vc_uext
+	
+		self unary reduce
+		
+	case vc_variable
+		return self variable pvariable value
+
+	case vc_argument
+		return self argument pargument value
+
+	end
+
+	return self
+//[cf]
+//[cf]
+//[of]:testing
+//[of]:isInteger
+method isInteger
+
+	return self code == vc_integer
+//[cf]
+//[of]:isRegister
+method isRegister
+
+	return self code == vc_register
+//[cf]
+//[of]:isLocal
+method isLocal
+
+	return self code == vc_local
+//[cf]
+//[of]:isIntegerComparison
+method isIntegerComparison
+
+	var code = self code
+	return code >= vc_integer_eq and code <= vc_integer_ugt
+//[cf]
+//[of]:isEqual
+method isEqual (other: *PValue)
+
+	if self code <> other code
+		return false
+	end
+	if self size <> other size
+		return false
+	end
+	
+	switch self code
+	case vc_register
+		return self register number == other register number
+	case vc_stack
+		return self stack offset == other stack offset
+	case vc_memory
+		return self memory address isEqual (other memory address)
+	case vc_integer
+		return self integer value == other integer value
+	case vc_undefined
+		return self size == other size
+	case vc_local
+		return self local plocal size == other local plocal size
+	case vc_global
+		return self glob symbol == other glob symbol and self glob offset == other glob offset
+	case vc_function
+		var v1 = self func
+		var v2 = other func
+		return v1 pfunction isEqual (v2 pfunction)
+		
+	case vc_call
+		var v1 = self call
+		var v2 = other call
+		if v1 callingConvention <> v2 callingConvention
+			return false
+		end
+		if not v1 address isEqual (v2 address)
+			return false
+		end
+		var n = v1 argumentCount
+		if n <> v2 argumentCount
+			return false
+		end
+		n each do i
+			if not v1 arguments [i] isEqual (v2 arguments [i])
+				return false
+			end
+		end
+		return true
+		
+	case	vc_integer_add,
+		vc_integer_sub,
+		vc_integer_smul,
+		vc_integer_umul,
+		vc_integer_sdiv,
+		vc_integer_udiv,
+		vc_integer_smod,
+		vc_integer_umod,
+		vc_integer_shl,
+		vc_integer_sshr,
+		vc_integer_ushr,
+		vc_integer_and,
+		vc_integer_or,
+		vc_integer_xor,
+		vc_integer_eq,
+		vc_integer_ne,
+		vc_integer_sle,
+		vc_integer_slt,
+		vc_integer_sge,
+		vc_integer_sgt,
+		vc_integer_ule,
+		vc_integer_ult,
+		vc_integer_uge,
+		vc_integer_ugt,
+		vc_minimal_and,
+		vc_minimal_or
+	
+		var v1 = self binary
+		var v2 = other binary
+		return v1 left isEqual (v2 left) and v1 right isEqual (v2 right)
+	
+	case	vc_integer_not,
+		vc_integer_neg,
+		vc_boolean_not,
+		vc_truncate,
+		vc_sext,
+		vc_uext
+
+		var v1 = self unary
+		var v2 = other unary
+		return v1 value isEqual (v2 value)
+		
+	case vc_sequence
+	
+		var v1 = self sequence
+		var v2 = other sequence
+		return v1 instructions isEqualInstructions (v2 instructions) and v1 value isEqual (v2 value)
+		
+	else
+		return false
+	end
+//[cf]
+//[cf]
+//[of]:accessing
+//[of]:hash
+method hash
+
+	switch self code
+	case vc_memory
+		return self memory address hash
+	
+	case vc_integer
+		return self integer value : Hash
+	
+	case vc_local
+		return self local plocal size
+	
+	case	vc_integer_add,
+		vc_integer_sub,
+		vc_integer_smul,
+		vc_integer_umul,
+		vc_integer_sdiv,
+		vc_integer_udiv,
+		vc_integer_smod,
+		vc_integer_umod,
+		vc_integer_shl,
+		vc_integer_sshr,
+		vc_integer_ushr,
+		vc_integer_and,
+		vc_integer_or,
+		vc_integer_xor,
+		vc_integer_eq,
+		vc_integer_ne,
+		vc_integer_sle,
+		vc_integer_slt,
+		vc_integer_sge,
+		vc_integer_sgt,
+		vc_integer_ule,
+		vc_integer_ult,
+		vc_integer_uge,
+		vc_integer_ugt,
+		vc_minimal_and,
+		vc_minimal_or
+	
+		var binary = self binary
+		return binary left hash + binary right hash
+
+	case	vc_boolean_not,
+		vc_integer_not,
+		vc_integer_neg,
+		vc_truncate,
+		vc_sext,
+		vc_uext
+	
+		return self unary value hash * 2
+	
+	else
+		return self code : Hash
+	end
+//[cf]
+//[of]:leftIndex
+//[c]Returns the code class
+//[c]
+//[c]	vc_register	0
+//[c]	vc_stack	1
+//[c]	vc_memory	2
+//[c]	other	3
+//[c]
+method leftIndex
+
+	if self code > vc_memory
+		return vc_memory + 1
+	else
+		return self code
+	end
+//[cf]
+//[of]:rightIndex
+//[c]Returns the code class
+//[c]
+//[c]	vc_register	0
+//[c]	vc_stack	1
+//[c]	vc_memory	2
+//[c]	vc_integer	3
+//[c]	other	4
+//[c]
+method rightIndex
+
+	if self code > vc_integer
+		return vc_integer + 1
+	else
+		return self code
+	end
+//[cf]
+//[of]:bestOrderedPair
+//[c]Returns the two values of the binary value in the best order
+//[c]
+//[c]	It is useful for commutative operations.
+//[c]	It is better to put integer, register, stack in the second
+//[c]	value because it generates less code:
+//[c]	
+//[c]		imm + other
+//[c]	becomes
+//[c]		mov eax, imm
+//[c]		push eax
+//[c]		eval other
+//[c]		mov ecx, eax
+//[c]		pop eax
+//[c]		op eax, ecx
+//[c]		
+//[c]	while
+//[c]		other + imm
+//[c]	becomes
+//[c]		eval other
+//[c]		op eax, imm
+//[c]
+method bestOrderedPair
+
+	var binary	= self binary
+	var left	= binary left
+	var right	= binary right
+
+	if right code == vc_integer
+		return left, right	
+	elsif left code in (vc_register, vc_stack, vc_memory, vc_integer)
+		return right, left
+	else
+		return left, right
+	end
+//[cf]
+
+//[of]:setFirstIndex
+method setFirstIndex (index: InstructionIndex)
+
+	switch self code
+	case vc_variable
+		if self variable pvariable firstIndex == invalidInstructionIndex
+			self variable pvariable firstIndex	= index
+		end
+	
+	case  vc_memory
+		self memory address setFirstIndex (index)
+	
+	case vc_call
+		var call = self call
+		call address setFirstIndex (index)
+		call eachArgument do a
+			a setFirstIndex (index)
+		end
+	
+	case vc_sequence
+		self sequence value setFirstIndex (index)
+	
+	case	vc_integer_add,
+		vc_integer_sub,
+		vc_integer_smul,
+		vc_integer_umul,
+		vc_integer_sdiv,
+		vc_integer_udiv,
+		vc_integer_smod,
+		vc_integer_umod,
+		vc_integer_shl,
+		vc_integer_sshr,
+		vc_integer_ushr,
+		vc_integer_and,
+		vc_integer_or,
+		vc_integer_xor,
+		vc_integer_eq,
+		vc_integer_ne,
+		vc_integer_sle,
+		vc_integer_slt,
+		vc_integer_sge,
+		vc_integer_sgt,
+		vc_integer_ule,
+		vc_integer_ult,
+		vc_integer_uge,
+		vc_integer_ugt,
+		vc_minimal_and,
+		vc_minimal_or
+	
+		self binary left setFirstIndex (index)
+		self binary right setFirstIndex (index)
+	
+	case	vc_integer_not,
+		vc_integer_neg,
+		vc_boolean_not,
+		vc_truncate,
+		vc_sext,
+		vc_uext
+	
+		self unary value setFirstIndex (index)
+	end
+//[cf]
+//[of]:setLastIndex
+method setLastIndex (index: InstructionIndex)
+
+	switch self code
+	case vc_variable
+		self variable pvariable lastIndex	= index
+	
+	case  vc_memory
+		self memory address setLastIndex (index)
+	
+	case vc_call
+		var call = self call
+		call address setLastIndex (index)
+		call eachArgument do a
+			a setLastIndex (index)
+		end
+	
+	case vc_sequence
+		self sequence value setLastIndex (index)
+	
+	case	vc_integer_add,
+		vc_integer_sub,
+		vc_integer_smul,
+		vc_integer_umul,
+		vc_integer_sdiv,
+		vc_integer_udiv,
+		vc_integer_smod,
+		vc_integer_umod,
+		vc_integer_shl,
+		vc_integer_sshr,
+		vc_integer_ushr,
+		vc_integer_and,
+		vc_integer_or,
+		vc_integer_xor,
+		vc_integer_eq,
+		vc_integer_ne,
+		vc_integer_sle,
+		vc_integer_slt,
+		vc_integer_sge,
+		vc_integer_sgt,
+		vc_integer_ule,
+		vc_integer_ult,
+		vc_integer_uge,
+		vc_integer_ugt,
+		vc_minimal_and,
+		vc_minimal_or
+	
+		self binary left setLastIndex (index)
+		self binary right setLastIndex (index)
+	
+	case	vc_integer_not,
+		vc_integer_neg,
+		vc_boolean_not,
+		vc_truncate,
+		vc_sext,
+		vc_uext
+	
+		self unary value setLastIndex (index)
+	end
+//[cf]
+//[cf]
+//[of]:downcasting
+//[of]:register
+method register
+
+	return self : *PRegisterValue
+//[cf]
+//[of]:integer
+method integer
+
+	return self : *PIntegerValue
+//[cf]
+//[of]:stack
+method stack
+
+	assert (self code == vc_stack or self code == vc_local, "not a stack")
+	return self : *PStackValue
+//[cf]
+//[of]:memory
+method memory
+
+	return self : *PMemoryValue
+//[cf]
+//[of]:local
+method local
+
+	return self : *PLocalValue
+//[cf]
+//[of]:glob
+method glob
+
+	return self : *PGlobalValue
+//[cf]
+//[of]:func
+method func
+
+	return self : *PFunctionValue
+//[cf]
+//[of]:unary
+method unary
+
+	return self : *PUnaryValue
+//[cf]
+//[of]:binary
+method binary
+
+	return self : *PBinaryValue
+//[cf]
+//[of]:call
+method call
+
+	return self : *PCallValue
+//[cf]
+//[of]:sequence
+method sequence
+
+	return self : *PSequenceValue
+//[cf]
+//[of]:variable
+method variable
+
+	return self : *PVariableValue
+//[cf]
+//[of]:argument
+method argument
+
+	return self : *PArgumentValue
+//[cf]
+//[cf]
+//[of]:output
+//[of]:addToStringBuffer
+method addToStringBuffer (sb: *StringBuffer)
+
+	switch self code
+	case vc_register
+		sb << self size
+		sb << \w
+		sb << $R
+		sb << self register number : Unsigned
+	case vc_stack
+		sb << self stack
+	case vc_memory
+		sb << self memory
+	case vc_integer
+		sb << self integer dword
+	case vc_undefined
+		sb << $?
+	case vc_local
+		sb << self local
+	case vc_global
+		sb << $G
+		sb << self glob symbol
+	case vc_function
+		sb << self func name
+	case vc_call
+		sb << self call
+	case vc_sequence
+		sb << self sequence
+		
+	case vc_integer_add
+		self addBinaryToStringBuffer (sb, "+")
+	case vc_integer_sub
+		self addBinaryToStringBuffer (sb, "-")
+	case vc_integer_smul
+		self addBinaryToStringBuffer (sb, "*")
+	case vc_integer_umul
+		self addBinaryToStringBuffer (sb, "*")
+	case vc_integer_sdiv
+		self addBinaryToStringBuffer (sb, "/")
+	case vc_integer_udiv
+		self addBinaryToStringBuffer (sb, "/")
+	case vc_integer_smod
+		self addBinaryToStringBuffer (sb, "%")
+	case vc_integer_umod
+		self addBinaryToStringBuffer (sb, "%")
+	case vc_integer_shl
+		self addBinaryToStringBuffer (sb, "<<")
+	case vc_integer_sshr
+		self addBinaryToStringBuffer (sb, ">>")
+	case vc_integer_ushr
+		self addBinaryToStringBuffer (sb, ">>")
+	case vc_integer_not
+		self addUnaryToStringBuffer (sb, "not")
+	case vc_integer_neg
+		self addUnaryToStringBuffer (sb, "neg")
+	case vc_integer_and
+		self addBinaryToStringBuffer (sb, "&")
+	case vc_integer_or
+		self addBinaryToStringBuffer (sb, "|")
+	case vc_integer_xor
+		self addBinaryToStringBuffer (sb, "^")
+	case vc_integer_eq
+		self addBinaryToStringBuffer (sb, "==")
+	case vc_integer_ne
+		self addBinaryToStringBuffer (sb, "<>")
+	case vc_integer_sle
+		self addBinaryToStringBuffer (sb, "<=")
+	case vc_integer_slt
+		self addBinaryToStringBuffer (sb, "<")
+	case vc_integer_sge
+		self addBinaryToStringBuffer (sb, ">=")
+	case vc_integer_sgt
+		self addBinaryToStringBuffer (sb, ">")
+	case vc_integer_ule
+		self addBinaryToStringBuffer (sb, "<=")
+	case vc_integer_ult
+		self addBinaryToStringBuffer (sb, "<")
+	case vc_integer_uge
+		self addBinaryToStringBuffer (sb, ">=")
+	case vc_integer_ugt
+		self addBinaryToStringBuffer (sb, ">")
+	case vc_minimal_and
+		self addBinaryToStringBuffer (sb, "and")
+	case vc_minimal_or
+		self addBinaryToStringBuffer (sb, "or")
+	case vc_boolean_not
+		self addUnaryToStringBuffer (sb, "not")
+	case vc_truncate
+		self addUnaryToStringBuffer (sb, "trunc")
+	case vc_sext
+		self addUnaryToStringBuffer (sb, "sext")
+	case vc_uext
+		self addUnaryToStringBuffer (sb, "uext")
+
+	case vc_variable
+		sb << self variable pvariable
+	case vc_argument
+		sb << self argument pargument
+	end
+//[cf]
+//[of]:addBinaryToStringBuffer
+method addBinaryToStringBuffer (sb: *StringBuffer, op: String)
+
+	sb << $(
+	sb << self binary left
+	sb << \w
+	sb << op
+	sb << \w
+	sb << self binary right
+	sb << $)
+//[cf]
+//[of]:addUnaryToStringBuffer
+method addUnaryToStringBuffer (sb: *StringBuffer, op: String)
+
+	sb << op
+	sb << \w
+	sb << self unary value
+//[cf]
+//[cf]
+//[cf]
+//[of]:PIntegerValue
+//[of]:definition
+struct PIntegerValue : PValue
+
+	attr value	: Unsigned64
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+method initialize (size, value: Unsigned64)
+	
+	self super	initialize (vc_integer, size)
+	self value	= value
+//[cf]
+//[cf]
+//[of]:accessing
+//[of]:byte
+method byte
+
+	return self value : Unsigned8
+//[cf]
+//[of]:word
+method word
+
+	return self value : Unsigned16
+//[cf]
+//[of]:dword
+method dword
+
+	return self value : Unsigned32
+//[cf]
+//[of]:qword
+method qword
+
+	return self value : Unsigned64
+//[cf]
+//[cf]
+//[of]:testing
+//[of]:isNull
+method isNull
+
+	return self value == 0
+//[cf]
+//[of]:isUnit
+method isUnit
+
+	return self value == 1
+//[cf]
+//[cf]
+//[cf]
+//[of]:PStackValue
+//[of]:definition
+//[c]Stores a value on the stack
+//[c]
+struct PStackValue : PValue
+
+	attr offset	: StackOffset	// The offset of the variable on stack (relative to the return address of the function)
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+method initialize (size, offset: StackOffset)
+	
+	self super	initialize (vc_stack, size)
+	self offset	= offset
+//[cf]
+//[cf]
+//[of]:output
+//[of]:addToStringBuffer
+method addToStringBuffer (sb: *StringBuffer)
+
+	sb << self size
+	sb << " stack ("
+	sb << self offset signed
+	sb << $)
+//[cf]
+//[cf]
+//[cf]
+//[of]:PLocalValue
+//[of]:definition
+//[c]Stores the offset on stack of a local {Type}
+//[c]
+struct PLocalValue : PValue
+
+	attr plocal	: *PLocal
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+method initialize (plocal: *PLocal)
+	
+	self super	initialize (vc_local, vs_dword)
+	self plocal	= plocal
+//[cf]
+//[cf]
+//[of]:accessing
+//[of]:offset
+method offset
+
+	return self plocal offset
+//[cf]
+//[cf]
+//[of]:output
+//[of]:addToStringBuffer
+method addToStringBuffer (sb: *StringBuffer)
+
+	sb << self plocal
+//[cf]
+//[cf]
+//[cf]
+//[of]:PGlobalValue
+//[of]:definition
+//[c]Address of a symbol
+//[c]
+struct PGlobalValue : PValue
+
+	attr symbol	: *ObjectSymbol
+	attr offset	: Offset
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+method initialize (symbol: *ObjectSymbol,	offset: Offset)
+
+	self super	initialize (vc_global, vs_dword)
+	self symbol	= symbol
+	self offset	= offset
+//[cf]
+//[cf]
+//[cf]
+//[of]:PFunctionValue
+//[of]:definition
+//[c]Address of a function
+//[c]
+//[c]An object value is different from a global value as it must not be referenced 
+//[c]from a different section, it can be used only as a relative reference: a 
+//[c]reference to it is resolved at the end of the compilation and it does not 
+//[c]generate a relocation item in the object file.
+//[c]
+struct PFunctionValue : PValue
+
+	attr name	: String8
+	attr pfunction	: *PFunction
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+method initialize (name: String8, pfunction: *PFunction)
+
+	self super	initialize (vc_function, vs_dword)
+	self name	= name
+	self pfunction	= pfunction
+//[cf]
+//[cf]
+//[cf]
+//[of]:PRegisterValue
+//[of]:definition
+struct PRegisterValue : PValue
+
+	// Native Code Generator
+	attr number	: Byte	// The x86 register (register XXX)
+	attr save	: SaveRegister	// The flags to set to save this register
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+method initialize (	size	: PValueSize, 
+	number	: Byte,
+	save	: SaveRegister)
+
+	self super	initialize (vc_register, size)
+	self number	= number
+	self save	= save
+//[cf]
+//[cf]
+//[cf]
+//[of]:PMemoryValue
+//[of]:definition
+struct PMemoryValue : PValue
+
+	attr address	: *PValue
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+method initialize (	size	: PValueSize,
+	address	: *PValue)
+
+	self super	initialize (vc_memory, size)
+	self address	= address
+//[cf]
+//[cf]
+//[of]:reducing
+//[of]:reduce
+method reduce
+
+	self address = self address reduce
+//[cf]
+//[cf]
+//[of]:output
+//[of]:addToStringBuffer
+method addToStringBuffer (sb: *StringBuffer)
+
+	sb << self size
+	sb << " ptr ["
+	sb << self address
+	sb << $]
+//[cf]
+//[cf]
+//[cf]
+//[of]:PUnaryValue
+//[of]:definition
+struct PUnaryValue : PValue
+
+	attr value	: *PValue
+
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+method initialize (	code	: PValueCode,
+	size	: PValueSize,
+	value	: *PValue)
+
+	self super	initialize (code, size)
+	self value	= value
+//[cf]
+//[cf]
+//[of]:reducing
+//[of]:reduce
+method reduce
+
+	self value = self value reduce
+//[cf]
+//[cf]
+//[cf]
+//[of]:PBinaryValue
+//[of]:definition
+struct PBinaryValue : PValue
+
+	attr left	: *PValue
+	attr right	: *PValue
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+method initialize (	code	: PValueCode,
+	size	: PValueSize, 
+	left	: *PValue,
+	right	: *PValue )
+
+	self super	initialize (code, size)
+	self left	= left
+	self right	= right
+//[cf]
+//[cf]
+//[of]:reducing
+//[of]:reduce
+method reduce
+
+	self left	= self left reduce
+	self right	= self right reduce
+//[cf]
+//[cf]
+//[cf]
+//[of]:PCallValue
+//[of]:definition
+struct PCallValue : PValue
+
+	attr callingConvention	: CallingConvention	// The calling convention
+	attr address	: *PValue	// The function to call
+	attr argumentCount	: Size	// Number of arguments
+	attr arguments	: *[] *PValue	// The arguments
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+method initialize (	size	: PValueSize,
+	callingConvention	: CallingConvention,
+	address	: *PValue, 
+	argumentCount	: Size, 
+	arguments	: *[] *PValue)
+
+	self super	initialize (vc_call, size)
+	self callingConvention	= callingConvention
+	self address	= address
+	self argumentCount	= argumentCount
+	self arguments	= arguments
+//[cf]
+//[cf]
+//[of]:reducing
+//[of]:reduce
+method reduce
+
+	self address = self address reduce
+	self argumentCount each do i
+		self arguments [i] = self arguments [i] reduce
+	end
+//[cf]
+//[cf]
+//[of]:enumerating
+//[of]:eachArgument
+method eachArgument
+
+	self argumentCount each do i
+		yield self arguments [i]
+	end
+//[cf]
+//[cf]
+//[of]:output
+//[of]:addToStringBuffer
+method addToStringBuffer (sb: *StringBuffer)
+
+	sb << "call "
+	sb << self address
+	if self argumentCount <> 0
+		sb << " ("
+		var comma = false
+		self eachArgument do v
+			if comma
+				sb << ", "
+			end
+			comma = true
+			sb << v
+		end
+		sb << $)
+	end
+//[cf]
+//[cf]
+//[cf]
+//[of]:PSequenceValue
+//[of]:definition
+struct PSequenceValue : PValue
+
+	attr instructions	: *Collection (PInstruction)	// The instructions to execute before evaluating the value
+	attr value	: *PValue	// The value of the sequence
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+method initialize (	size	: PValueSize,
+	instructions	: *Collection (PInstruction),
+	value	: *PValue)
+
+	self super	initialize (vc_sequence, size)
+	self instructions	= instructions
+	self value	= value
+//[cf]
+//[cf]
+//[of]:reducing
+//[of]:reduce
+method reduce
+
+	self value = self value reduce
+	
+	self instructions each do i
+		i reduce
+	end
+//[cf]
+//[cf]
+//[of]:output
+//[of]:addToStringBuffer
+method addToStringBuffer (sb: *StringBuffer)
+
+	sb << "sequence "
+	sb << self value
+//[cf]
+//[cf]
+//[cf]
+//[of]:PVariableValue
+//[of]:definition
+//[c]A value that represent a local variable
+//[c]
+//[c]	This is a temporary value which will be replaced by a register,
+//[c]	a stack or a constant after the register allocation pass.
+//[c]
+struct PVariableValue : PValue
+
+	attr pvariable	: *PVariable	// The variable
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+method initialize (pvariable:	*PVariable)
+
+	self super	initialize (vc_variable, pvariable size)
+	self pvariable	= pvariable
+//[cf]
+//[cf]
+//[cf]
+//[of]:PArgumentValue
+//[of]:definition
+//[c]A value that represent a function argument
+//[c]
+//[c]	This is a temporary value which will be replaced by a register,
+//[c]	a stack or a constant after the register allocation pass.
+//[c]
+struct PArgumentValue : PValue
+
+	attr pargument	: *PArgument	// The argument
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+method initialize (pargument:	*PArgument)
+
+	self super	initialize (vc_argument, pargument size)
+	self pargument	= pargument
+//[cf]
+//[cf]
+//[cf]
+
+//[of]:PValueArray
+const max_values = 256
+
+struct PValueArray
+	attr index	: Size
+	attr values	: [max_values] *PValue
+
+	method initialize
+		self index = 0
+	
+	method add (value: *PValue)
+		self values [self index] = value
+		self index ++
+	
+	method _at (index: Size)
+		return self values [index]
+	
+	method set (index: Size, value: *PValue)
+		self values [index] = value
+	
+	method size
+		return self index
+
+	method list
+		return self values, self size
+
+	method each
+		self index each do i
+			yield self [i]
+		end
+	
+	method reverseEach
+		var i = self index
+		while i <> 0
+			i --
+			yield self [i]
+		end
+//[cf]
+//[cf]
+//[of]:Scalar Types
+//[of]:BlockDepth
+const BlockDepth	= Unsigned
+//[cf]
+//[of]:InstructionIndex
+//[c]Unsigned integer type used to number instructions in a function.
+//[c]Its main use is to define the interval of variables.
+//[c]
+const InstructionIndex	= Unsigned
+
+const invalidInstructionIndex = -1 : InstructionIndex
+//[cf]
+//[of]:StackOffset
+const StackOffset	= Unsigned
+
+const stack_origin = 0 : StackOffset
+//[cf]
+//[cf]
+
+.private
+//[of]:Utils
+//[of]:isEqualInstructions
+function isEqualInstructions (self, other)
+
+	var n = self size
+	if n <> other size
+		return false
+	end
+
+	eachDual (self, other) do i1, i2
+		if not i1 isEqual (i2)
+			return false
+		end
+	end
+
+	return true
+//[cf]
+//[cf]
+//[of]:Imports
+import "object-file-\(backend)"
+import "x86"
+
+import "commons"
+import "core"
+//[cf]

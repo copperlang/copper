@@ -1,0 +1,10 @@
+//[c]Generic structure with attribute
+//[c]
+
+function main
+	return x (nil (A (Int32)))
+
+struct A (T)
+	attr x	: T
+	attr y	: T
+

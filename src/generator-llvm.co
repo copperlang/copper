@@ -1,0 +1,2851 @@
+//[of]:LLVMGenerator
+//[of]:definition
+struct LLVMGenerator
+
+	attr program	: * Program	// The program to be generated
+	attr pool	: * MemoryPool	// We still need to allocate stuffs
+	attr func	: * Function	// The current function
+	attr llvmContext	: LLVMContextRef	// The LLVM context
+	attr llvmModule	: LLVMModuleRef	// The module being built
+	attr builder	: LLVMBuilderRef	// Builder for the current block
+	attr inlineContext	: *InlineContext	// The current inline context
+					
+	attr constantStrings8	: String8Dictionary	// The table of global strings (8 bits)
+	attr constantStrings16	: String16Dictionary	// The table of global strings (16 bits)
+
+	// Constants
+	attr llvmTrue	: LLVMValueRef
+	attr llvmFalse	: LLVMValueRef
+	attr llvmZero32	: LLVMValueRef
+	attr llvmOne32	: LLVMValueRef
+	attr llvmNil	: LLVMValueRef
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+method initialize (program: * Program)
+
+	self program	= program
+	self pool	= program pool
+	
+	self constantStrings8 initialize
+	self constantStrings16 initialize
+	
+	//var pass = LLVMGetGlobalPassRegistry
+	//LLVMInitializeCore (pass)
+	//LLVMInitializeCodeGen (pass)
+	//LLVMInitializeNativeTarget
+//[cf]
+//[of]:release
+method release
+
+	self constantStrings8 release
+	self constantStrings16 release
+//[cf]
+//[cf]
+//[of]:generating
+//[of]:generate
+method generate (outFilename: String16, debug: Bool, dump: Bool)
+
+	var program	= self program
+	var modules = program modules
+
+	// Reset the inline context
+	self inlineContext = nil
+
+	// Create the LLVM context and module
+	self llvmContext	= LLVMContextCreate
+	self llvmModule	= LLVMModuleCreateWithNameInContext ('', self llvmContext)
+
+	var cx	= self llvmContext
+	var i1	= LLVMInt1TypeInContext (cx)
+	var i8	= LLVMInt8TypeInContext (cx)
+	var i16	= LLVMInt16TypeInContext (cx)
+	var i32	= LLVMInt32TypeInContext (cx)
+	var i64	= LLVMInt64TypeInContext (cx)
+	self llvmFalse	= LLVMConstInt	(i1, 0, 0)
+	self llvmTrue	= LLVMConstInt	(i1, 1, 0)
+	self llvmZero32	= LLVMConstInt	(i32, 0, 0)
+	self llvmOne32	= LLVMConstInt	(i32, 1, 0)
+	self llvmNil	= LLVMConstPointerNull (LLVMPointerType (i8, 0))
+
+	program anyType generator	= i8
+	program nilType generator	= i8
+	program char8Type generator	= i8
+	program char16Type generator	= i16
+	program booleanType generator	= i1
+	program int8Type generator	= i8
+	program int16Type generator	= i16
+	program int32Type generator	= i32
+	program int64Type generator	= i64
+	program uint8Type generator	= i8
+	program uint16Type generator	= i16
+	program uint32Type generator	= i32
+	program uint64Type generator	= i64
+
+	// Scan all modules:
+	// * create the list of unique strings
+	// * compute index of attributes
+	modules each do m
+		self scan (m)
+		self prepareStructures (m)
+	end
+
+	self createStructures
+	self declareFunctions
+	self declareExternFunctions
+	self generateGlobalStrings8
+	self generateGlobalStrings16
+	self generateVariables
+	self generateFunctions
+
+	// Save the module
+	if dump
+		LLVMDumpModule (self llvmModule)
+	end
+	var asciiFilename	= outFilename asciiString
+	LLVMWriteBitcodeToFile (self llvmModule, asciiFilename)
+	asciiFilename delete
+
+	// Release LLVM	
+	LLVMDisposeModule (self llvmModule)
+	LLVMContextDispose (self llvmContext)
+	return true
+//[cf]
+//[cf]
+
+:private
+//[of]:scanning
+//[of]:scan
+method scan (module: * Module)
+
+	// Scan all global variables
+	module eachGlobalVariables do v
+		if v used
+			v expressions each do e
+				self scanExpression (e)
+			end
+		end
+	end
+	
+	// Scan all functions
+	module eachFunction do f
+		if f used
+			self scanFunction (f)
+		end
+	end
+//[cf]
+//[of]:scanFunction
+method scanFunction (f: * Function)
+
+	self scanBlock (f body)
+//[cf]
+//[of]:scanBlock
+method scanBlock (block: * Block)
+
+	block eachInstruction do i
+		self scanInstruction (i)
+	end
+//[cf]
+
+//[of]:scanInstruction
+method scanInstruction (instruction: * Instruction)
+
+	switch instruction code
+	case i_evaluate
+		self scanEvaluate (instruction asEvaluate)
+	case i_return
+		self scanReturn (instruction asReturn)
+	case i_variable
+		self scanVariable (instruction asVariable)
+	case i_assign
+		self scanAssign (instruction asAssign)
+	case i_if
+		self scanIf (instruction asIf)
+	case i_while
+		self scanWhile (instruction asWhile)
+	case i_break
+		// nothing to scan
+	case i_switch
+		self scanSwitch (instruction asSwitch)
+	case i_yield
+		self scanYield (instruction asYield)
+	else
+		assertFailure ("Scanning unknown instruction")
+	end
+//[cf]
+//[of]:scanEvaluate
+method scanEvaluate (instruction: * EvaluateInstruction)
+
+	self scanExpressionList (instruction values)
+//[cf]
+//[of]:scanReturn
+method scanReturn (instruction: * ReturnInstruction)
+
+	if instruction expressions notNil
+		self scanExpressionList (instruction expressions)
+	end
+//[cf]
+//[of]:scanVariable
+method scanVariable (instruction: * VariableInstruction)
+
+	self scanExpressionList (instruction expressions)
+//[cf]
+//[of]:scanAssign
+method scanAssign (instruction: * AssignInstruction)
+
+	self scanExpressionList (instruction leftValues)
+	self scanExpressionList (instruction rightValues)
+//[cf]
+//[of]:scanIf
+method scanIf (instruction: * IfInstruction)
+
+	instruction rules each do rule
+		if rule condition notNil
+			self scanExpression (rule condition)
+		end
+		self scanBlock (rule block)
+	end
+//[cf]
+//[of]:scanWhile
+method scanWhile (instruction: * WhileInstruction)
+
+	if instruction condition notNil
+		self scanExpression (instruction condition)
+	end
+	self scanBlock (instruction block)
+//[cf]
+//[of]:scanSwitch
+method scanSwitch (instruction: * SwitchInstruction)
+
+	instruction eachChoice do choice
+		self scanExpressionList (choice values)
+		self scanBlock (choice block)
+	end
+//[cf]
+//[of]:scanYield
+method scanYield (instruction: * YieldInstruction)
+
+	self scanExpressionList (instruction arguments)
+//[cf]
+
+//[of]:scanExpressionList
+method scanExpressionList (values: * ExpressionList)
+
+	values each do v
+		self scanExpression (v)
+	end
+//[cf]
+//[of]:scanExpression
+method scanExpression (expression: * Expression)
+
+	switch expression code
+	case e_literal_string_8
+		self scanLiteralString8 (expression)
+	case e_literal_string_16
+		self scanLiteralString16 (expression)
+	case e_definition
+		self scanDefinition (expression: * DefinitionExpression)
+	case e_minimal_and, e_minimal_or
+		self scanExpression (expression asPair first)
+		self scanExpression (expression asPair second)
+	case e_offset
+		self scanExpression (expression asOffset typeExpression)
+	case e_cond
+		var c = expression asCond
+		self scanExpression (c condition)
+		self scanExpressionList (c first)
+		self scanExpressionList (c second)
+	end
+//[cf]
+//[of]:scanLiteralString8
+method scanLiteralString8 (expression: * Expression)
+
+	var value	= expression firstValue
+	var constant	= value constant asString8
+	var string	= constant value
+
+	var llvmConstant = self constantStrings8 [string]
+	if llvmConstant isNil
+		llvmConstant = self pool new (GlobalString8)
+		self constantStrings8 add (string, llvmConstant)
+	end
+
+	// Remember the constant	associated to this string
+	constant generator = llvmConstant
+//[cf]
+//[of]:scanLiteralString16
+method scanLiteralString16 (expression: * Expression)
+
+	var value	= expression firstValue
+	var constant	= value constant asString16
+	var string	= constant value
+
+	var llvmConstant = self constantStrings16 [string]
+	if llvmConstant isNil
+		llvmConstant = self pool new (GlobalString16)
+		self constantStrings16 add (string, llvmConstant)
+	end
+
+	// Remember the constant	associated to this string
+	constant generator = llvmConstant
+//[cf]
+//[of]:scanDefinition
+method scanDefinition (expression: *DefinitionExpression)
+
+	self scanExpressionList (expression arguments)
+
+	var definition = expression definition
+	switch definition code
+	case d_function
+		var inlineBlock = expression inlineBlock
+		if inlineBlock notNil
+			self scanBlock (inlineBlock instructions)
+		end
+	case d_each_extra
+		var inlineBlock = expression inlineBlock
+		inlineBlock eachExtraBlock do block
+			self scanBlock (block)
+		end
+	case d_alias
+		self scanExpression (definition asAlias expression)
+	end
+//[cf]
+//[cf]
+//[of]:preparing
+//[of]:prepareStructures
+method prepareStructures (module: * Module)
+
+	module eachStructure do s
+		self prepareStructure (s)
+	end
+//[cf]
+//[of]:prepareStructure
+method prepareStructure (structure: * StructureType)
+
+	var index = 0 : Unsigned64
+	if structure parentStructure notNil
+		index ++
+	end
+	
+	structure eachAttribute do a
+		var llvmIndex = LLVMConstInt (LLVMInt32TypeInContext (self llvmContext), index, 0)
+		a generator = self pool new (AttributeIndex, llvmIndex)
+		index ++
+	end
+//[cf]
+
+//[of]:createStructures
+method createStructures
+
+	var modules = self program modules
+
+	// Declare all structures
+	modules each do m
+		m eachStructure do structure
+			structure generator = LLVMStructCreateNamed (self llvmContext, structure name)
+		end
+	end
+	
+	// Define all structures
+	modules each do module
+		module eachStructure do structure
+		
+			// Get the number of attributes
+			// The parent counts as one attribute
+			var attributeCount	= structure attributes size
+			var parentStructure	= structure parentStructure
+			if parentStructure notNil
+				attributeCount ++
+			end
+			
+			// Allocate array
+			var types = LLVMTypeRef allocateArray (attributeCount)
+			
+			var p = types
+			if parentStructure notNil
+				p [] = self createType (parentStructure)
+				p ++
+			end
+			structure eachAttribute do a
+				p [] = self createType (a storageType)
+				p ++
+			end
+				
+			var llvmType = structure generator : LLVMTypeRef
+			LLVMStructSetBody (llvmType, types, attributeCount, 0)
+		
+			LLVMTypeRef freeArray (types, attributeCount)
+		end
+	end
+//[cf]
+//[of]:createType
+method createType (type: * Type)
+
+	switch type code
+	case t_pointer
+		var target = type asPointer target
+		var llvmTarget = self createType (target)
+		return LLVMPointerType (llvmTarget, 0)
+	case t_array
+		var cellType = type asArray cellType
+		var arraySize = type asArray arraySize
+		var llvmCellType = self createType (cellType)
+		return LLVMArrayType (llvmCellType, arraySize)
+	case t_structure
+		return type generator: LLVMTypeRef
+	case t_enumeration
+		var t = type asEnumeration storageType
+		
+		// the storage type can be undefined for instance if the enumeration
+		// is declared only as a pointer but never used. Use the anything
+		// type instead (it doesn't matter as it is never used).
+		if t isNil
+			t = self program anyType
+		end
+		
+		return self createType (t)
+	case t_function
+		return self createFunctionType (type asFunction)
+	else
+		return type generator : LLVMTypeRef
+	end
+//[cf]
+//[of]:createFunctionType
+method createFunctionType (functionType: * FunctionType)
+
+	// The input types
+	var argumentTypes = {LLVMTypeArray} local
+	functionType eachType do type
+		argumentTypes add (self createType (type))
+	end
+		
+	// The output types
+	var returnType = LLVMType nil
+	var size = functionType returnTypes size
+	if size == 0
+		returnType = LLVMVoidType
+	elsif size == 1
+		returnType = self createType (functionType returnTypes first)
+	else
+		var t = {LLVMTypeArray} local
+		functionType eachReturnType do type
+			t add (self createType (type))
+		end
+		returnType = LLVMStructTypeInContext (self llvmContext, t list, 0) : LLVMTypeRef
+	end
+
+	return LLVMFunctionType (returnType, argumentTypes list, 0)
+//[cf]
+//[cf]
+//[of]:declaring
+//[of]:declareFunctions
+method declareFunctions
+
+	self program eachFunction do f
+		if not f hasYield
+			self declareFunction (f)
+		end
+	end
+//[cf]
+//[of]:declareFunction
+method declareFunction (f: * Function)
+
+	// Create the list of arguments
+	var llvmArgumentTypes = {LLVMTypeArray} local
+	f eachArgument do a
+		var type = a type
+		// Skip type arguments
+		if not type isMeta
+			llvmArgumentTypes add (self llvmType (type))
+		end
+	end
+
+	var llvmFunction	= self declarePrototype (f publicName, llvmArgumentTypes, f)
+	
+	if f isPrivate
+		LLVMSetLinkage	(llvmFunction, LLVMPrivateLinkage)
+		LLVMSetVisibility	(llvmFunction, LLVMHiddenVisibility)
+	end
+	
+	f generator	= llvmFunction
+//[cf]
+//[of]:declareExternFunctions
+method declareExternFunctions
+
+	self program eachExternFunction do f
+		self declareExternFunction (f)
+	end
+//[cf]
+//[of]:declareExternFunction
+method declareExternFunction (f: * ExternFunction)
+
+	// Create the list of arguments
+	var llvmArgumentTypes = {LLVMTypeArray} local
+	f eachArgumentType do type
+		llvmArgumentTypes add (self llvmType (type))
+	end
+
+	if f namingConvention == nc_c
+		// Search for a function with the same name already declared
+		var llvmFunction = LLVMGetNamedFunction (self llvmModule, f publicName)
+		if llvmFunction notNil
+			f generator = llvmFunction
+			return
+		end
+	end
+
+	var llvmFunction	= self declarePrototype (f publicName, llvmArgumentTypes, f)
+	f generator = llvmFunction
+//[cf]
+//[of]:declarePrototype
+method declarePrototype (	name	: String8, 
+	argumentTypes	: *LLVMTypeArray, 
+	f	: *Prototype)
+
+	var cc	= f callingConvention
+	var llvmReturnType	= self llvmReturnType (f returnValues)
+	var functionType	= LLVMFunctionType (llvmReturnType, argumentTypes list, 0)
+	var llvmFunction	= LLVMAddFunction (self llvmModule, name, functionType)
+	
+	LLVMAddFunctionAttr	(llvmFunction, LLVMNoUnwindAttribute)
+	LLVMSetFunctionCallConv	(llvmFunction, llvmCallingConvention(self, cc))
+	
+	return llvmFunction
+//[cf]
+//[cf]
+//[of]:generating
+//[of]:generateGlobalStrings8
+method generateGlobalStrings8
+
+	self constantStrings8 eachKeyAndValue do string, constant
+
+		var llvmValue	= LLVMConstStringInContext (self llvmContext, string, string size, 0)
+		var llvmType	= LLVMTypeOf (llvmValue)
+		var llvmVar	= LLVMAddGlobal (self llvmModule, llvmType, 'S')
+		
+		LLVMSetInitializer	(llvmVar, llvmValue)
+		LLVMSetLinkage	(llvmVar, LLVMPrivateLinkage)
+		LLVMSetAlignment	(llvmVar, Char8 size)
+		LLVMSetGlobalConstant	(llvmVar, 1)
+
+		constant value = LLVMConstBitCast (llvmVar, self llvmType (self program string8Type))
+	end
+//[cf]
+//[of]:generateGlobalStrings16
+method generateGlobalStrings16
+
+	self constantStrings16 eachKeyAndValue do string, constant
+
+		var llvmValue	= LLVMConstStringInContext (self llvmContext, string: *[] Char8, (string size + 1) * Char16 size, 1)
+		var llvmType	= LLVMTypeOf (llvmValue)
+		var llvmVar	= LLVMAddGlobal (self llvmModule, llvmType, 'S')
+		
+		LLVMSetInitializer	(llvmVar, llvmValue)
+		LLVMSetLinkage	(llvmVar, LLVMPrivateLinkage)
+		LLVMSetAlignment	(llvmVar, Char16 size)
+		LLVMSetGlobalConstant	(llvmVar, 1)
+
+		constant value = LLVMConstBitCast (llvmVar, self llvmType (self program string16Type))
+	end
+//[cf]
+//[of]:generateVariables
+method generateVariables
+
+	self program eachVariable do variable, value
+		var llvmValue	= self llvmConstant (value constant, value type)
+		var llvmType	= LLVMTypeOf (llvmValue)
+		var llvmVariable	= LLVMAddGlobal (self llvmModule, llvmType, 'G')
+		variable generator	= llvmVariable
+		LLVMSetInitializer (llvmVariable, llvmValue)
+	end
+//[cf]
+//[of]:generateFunctions
+method generateFunctions
+
+	self program eachFunction do f
+		if not f hasYield
+			self generateFunction (f)
+		end
+	end
+//[cf]
+//[of]:generateFunction
+method generateFunction (f: * Function)
+
+	var llvmFunction = f generator : LLVMValueRef
+	
+	// The function becomes the current function
+	self func = f
+
+	// Evaluate arguments
+	var i = 0 unsigned
+	f eachArgument do a
+		// Skip type arguments
+		if not a type isMeta
+			self bind (a, LLVMGetParam (llvmFunction, i))
+			i ++
+		end
+	end
+
+	var block = LLVMAppendBasicBlockInContext (self llvmContext, llvmFunction, 'entry')
+	self builder = LLVMCreateBuilderInContext	(self llvmContext)
+	LLVMPositionBuilderAtEnd (self builder, block)
+
+	var body = f body
+	self generateBlock (body)
+	
+	// Add a ret void to the block if the body is not terminated
+	if not body terminated
+		LLVMBuildRetVoid (self builder)
+	end
+	
+	LLVMDisposeBuilder (self builder)
+//[cf]
+//[cf]
+
+//[of]:instructions
+//[of]:generateBlock
+method generateBlock (block: * Block)
+
+	block eachInstruction do i
+		self generateInstruction (i)
+	end
+//[cf]
+//[of]:generateInstruction
+method generateInstruction (instruction: * Instruction)
+
+	switch instruction code
+	case i_evaluate
+		self generateEvaluate (instruction asEvaluate)
+	case i_assign
+		self generateAssign (instruction asAssign)
+	case i_return
+		self generateReturn (instruction asReturn)
+	case i_variable
+		self generateVariable (instruction asVariable)
+	case i_if
+		self generateIf (instruction asIf)
+	case i_while
+		self generateWhile (instruction asWhile)
+	case i_break
+		self generateBreak (instruction asBreak)
+	case i_switch
+		self generateSwitch (instruction asSwitch)
+	case i_yield
+		self generateYield (instruction asYield)
+	else
+		assertFailure ("Unhandled instruction")
+	end
+//[cf]
+//[of]:generateEvaluate
+method generateEvaluate (instruction: * EvaluateInstruction)
+
+	// If there is resulting values they are just ignored	
+	var v = {LLVMValueArray} local
+	self generateExpressionList (instruction values, v)
+//[cf]
+//[of]:generateAssign
+method generateAssign (instruction: * AssignInstruction)
+
+	var llvmRightValues = {LLVMValueArray} local
+	self generateExpressionList (instruction rightValues, llvmRightValues)
+
+	var llvmLeftValues = {LLVMValueArray} local
+	self generateEffectiveAddresses (instruction leftValues, llvmLeftValues)
+
+	// Remark: an assign instruction can not have meta types in the list of 
+	// values, so it is not required to check for metas
+	llvmRightValues size each do i
+		var currentType	= instruction rightValues values [i] type
+		var expectedType	= instruction leftValues values [i] type
+		var llvmValue	= self fixupType (llvmRightValues [i], currentType, expectedType)
+		var llvmAddress	= llvmLeftValues [i]
+		LLVMBuildStore (self builder, llvmValue, llvmAddress)
+	end
+//[cf]
+//[of]:generateReturn
+method generateReturn (instruction: *ReturnInstruction)
+
+	var v = {LLVMValueArray} local
+	if instruction expressions notNil
+		self generateExpressionList (instruction expressions, v)
+	end
+
+	var info = self inlineContext
+	
+	// Fixup type of values
+	// Remark: a return instruction can not have meta types in the list of 
+	// values, so it is not required to check for metas
+	var returnValues = (info notNil cond info func else self func) returnValues
+	v size each do i
+		var value	= v [i]
+		var currentType	= instruction expressions values [i] type
+		var expectedType	= returnValues [i] type
+		v set (i, self fixupType (value, currentType, expectedType))
+	end
+
+	if info notNil
+		
+		// Jump to the end of the block
+		LLVMBuildBr (self builder, info endBlock)
+		
+		// Add incomings
+		v size each do i
+			var incomingValue	= { [1] LLVMValueRef }
+			var incomingBranch	= { [1] LLVMBasicBlockRef }
+			incomingValue [0]	= v [i]
+			incomingBranch [0]	= LLVMGetInsertBlock (self builder)
+			LLVMAddIncoming (info phis [i], incomingValue, incomingBranch, 1)
+		end
+		
+	else
+		// Regular return
+		var values = instruction values
+		var size = instruction values size
+		if size == 0
+			LLVMBuildRetVoid	(self builder)
+		elsif size == 1
+			LLVMBuildRet (self builder, v [0])
+		else
+			LLVMBuildAggregateRet (self builder, v list)
+		end
+	end
+//[cf]
+//[of]:generateVariable
+method generateVariable (instruction: * VariableInstruction)
+
+	var llvmValues = {LLVMValueArray} local
+	self generateExpressionList (instruction expressions, llvmValues)
+
+	eachDual (instruction variables, llvmValues) do variable, llvmValue
+		var type	= variable type
+		var llvmType	= self llvmType (type)
+		var symbol	= variable name
+		var llvmAlloca	= self generateAlloca (llvmType, symbol)
+		LLVMBuildStore (self builder, llvmValue, llvmAlloca)
+		self bind (variable, llvmAlloca)
+	end
+//[cf]
+//[of]:generateIf
+method generateIf (instruction: *IfInstruction)
+	
+	var f	= self func
+	var llvmFunction	= f generator : LLVMValueRef
+	
+	// Pass 1 - Create the blocks
+	var blockLast = LLVMBasicBlock nil
+	instruction eachRule do rule
+
+		if rule condition notNil
+			var thenBlock	= LLVMAppendBasicBlockInContext (self llvmContext, llvmFunction, 'if_then')
+			var elseBlock	= LLVMAppendBasicBlockInContext (self llvmContext, llvmFunction, 'if_next')
+			self bind (rule, self pool new (LLVMBlockThenElse, thenBlock, elseBlock))
+			blockLast	= elseBlock
+		elsif not instruction terminated
+			blockLast = LLVMAppendBasicBlockInContext (self llvmContext, llvmFunction, 'if_done')
+		end
+		
+	end
+	
+	// Pass 2 - Generate code
+	instruction eachRule do rule
+		var condition	= rule condition
+		var block	= rule block
+		var nextBlock	= blockLast
+		
+		if condition notNil
+			var blockThenElse	= rule generator : *LLVMBlockThenElse
+			var thenBlock	= blockThenElse thenBlock
+			var elseBlock	= blockThenElse elseBlock
+			
+			// Generate the condition
+			var llvmCondition = self condition (condition)
+			
+			// Generate the conditional branch
+			LLVMBuildCondBr (self builder, llvmCondition, thenBlock, elseBlock)
+			
+			// The then block becomes the current block
+			LLVMPositionBuilderAtEnd (self builder, thenBlock)
+			
+			// The next block will be the else block
+			nextBlock = elseBlock
+		end
+		
+		// Generate the block
+		self generateBlock (block)
+			
+		// Jump to the last block if the block is not terminated
+		if not block terminated
+			LLVMBuildBr (self builder, blockLast)
+		end
+		
+		// The next block becomes the current one
+		LLVMPositionBuilderAtEnd (self builder, nextBlock)
+		
+	end
+//[cf]
+//[of]:generateWhile
+method generateWhile (instruction: * WhileInstruction)
+
+	var f	= self func
+	var llvmFunction	= f generator : LLVMValueRef
+	
+	if instruction condition notNil
+	
+		// It is a while
+		
+		var firstBlock	= LLVMAppendBasicBlockInContext (self llvmContext, llvmFunction, 'while_first')
+		var loopBlock	= LLVMAppendBasicBlockInContext (self llvmContext, llvmFunction, 'while_loop')
+		var endBlock	= LLVMAppendBasicBlockInContext (self llvmContext, llvmFunction, 'while_end')
+		
+		// Save the block end to the while instruction (for breaks)
+		self bind (instruction, endBlock)
+		
+		// Branch to the first test
+		LLVMBuildBr (self builder, firstBlock)
+		
+		// Create the condition block
+		LLVMPositionBuilderAtEnd (self builder, firstBlock)
+		var llvmCondition = self condition (instruction condition)
+		LLVMBuildCondBr (self builder, llvmCondition, loopBlock, endBlock)
+		
+		// Create the loop block
+		LLVMPositionBuilderAtEnd (self builder, loopBlock)
+		self generateBlock (instruction block)
+		LLVMBuildBr (self builder, firstBlock)
+		
+		// The end block becomes the current block
+		LLVMPositionBuilderAtEnd (self builder, endBlock)
+	
+	else
+	
+		// It is a repeat
+		
+		var loopBlock	= LLVMAppendBasicBlockInContext (self llvmContext, llvmFunction, 'repeat_loop')
+		var endBlock	= LLVMBasicBlock nil
+		if instruction hasBreak
+			endBlock = LLVMAppendBasicBlockInContext (self llvmContext, llvmFunction, 'repeat_end')
+		end
+		
+		// Save the block end to the while instruction (for breaks)
+		self bind (instruction, endBlock)
+		
+		// Branch to the block
+		LLVMBuildBr (self builder, loopBlock)
+		
+		// Create the loop block
+		LLVMPositionBuilderAtEnd (self builder, loopBlock)
+		self generateBlock (instruction block)
+		if not instruction block terminated
+			LLVMBuildBr (self builder, loopBlock)
+		end
+		
+		// The end block becomes the current block
+		if instruction hasBreak
+			LLVMPositionBuilderAtEnd (self builder, endBlock)
+		end
+	end
+//[cf]
+//[of]:generateBreak
+method generateBreak (instruction: *BreakInstruction)
+
+	var loopInstruction	= instruction instruction
+	if loopInstruction notNil
+		// Branch to the end of the loop
+		var endBlock	= loopInstruction generator : LLVMBasicBlockRef
+		LLVMBuildBr (self builder, endBlock)
+	else
+		// Branch to the end of the iterator call
+		var info = instruction expression generator : *InlineContext
+		LLVMBuildBr (self builder, info endBlock)
+	end
+//[cf]
+//[of]:generateSwitch
+method generateSwitch (instruction: * SwitchInstruction)
+
+	var f	= self func
+	var llvmFunction	= f generator : LLVMValueRef
+	
+	// Evaluate the value
+	var v = {LLVMValueArray} local
+	self generateExpression (instruction value, v)
+	
+	// Create the exit block (if required)
+	var exitBlock	= LLVMBasicBlock nil
+	var defaultBlock	= LLVMBasicBlock nil
+	if not instruction terminated
+		exitBlock	= LLVMAppendBasicBlockInContext (self llvmContext, llvmFunction, 'switch_end')
+		defaultBlock	= exitBlock
+	end
+	
+	// Create a block for each case
+	var caseCount = 0 s
+	instruction eachChoice do choice
+		var block = LLVMAppendBasicBlockInContext (self llvmContext, llvmFunction, 'switch_case')
+		self bind (choice, block)
+		caseCount += choice values size
+		if choice values size == 0
+			defaultBlock = block
+		end
+	end
+	
+	// Create the switch instruction
+	var type = instruction value values [0] type
+	var llvmSwitch = LLVMBuildSwitch (self builder, v [0], defaultBlock, caseCount)
+	instruction eachChoice do choice
+		choice values eachValue do value
+			LLVMAddCase (llvmSwitch, self llvmConstant (value constant, type), choice generator : LLVMBasicBlockRef)
+		end
+	end
+
+	// Build the blocks
+	instruction eachChoice do choice
+		var block = choice block
+		var llvmBlock = choice generator : LLVMBasicBlockRef
+		
+		LLVMPositionBuilderAtEnd (self builder, llvmBlock)
+		self generateBlock (block)
+			
+		// Jump to the last block if the block is not terminated
+		if not block terminated
+			LLVMBuildBr (self builder, exitBlock)
+		end
+	end
+	
+	if not instruction terminated
+		LLVMPositionBuilderAtEnd (self builder, exitBlock)
+	end
+//[cf]
+//[of]:generateYield
+method generateYield (instruction: * YieldInstruction)
+
+	// Evaluate arguments
+	var values = self generateArguments (instruction, {LLVMValueArray})
+	
+	var inlineBlock = self inlineContext inlineBlock
+	
+	// Assign values to arguments
+	eachDual (inlineBlock arguments, values) do a, v
+		self bindArgument (a, v)
+	end
+	
+	// Save the current context
+	var inlineContext = self inlineContext
+	
+	// Return to the parent context (the one that called the iterator)
+	self inlineContext = inlineContext next
+	
+	// Generate the block
+	self generateBlock (inlineBlock instructions)
+	
+	// Restore context to the iterator
+	self inlineContext = inlineContext
+//[cf]
+
+//[of]:condition
+method condition (condition: * Expression)
+
+	var v = {LLVMValueArray} local
+	self generateExpression (condition, v)
+	return v [0]
+//[cf]
+//[cf]
+//[of]:expressions
+//[of]:generateExpressionList
+method generateExpressionList (expressions: * ExpressionList, out: * LLVMValueArray)
+
+	expressions each do e
+		self generateExpression (e, out)
+	end
+//[cf]
+//[of]:generateExpression
+method generateExpression (expression: * Expression, out: * LLVMValueArray)
+
+	switch expression code
+	case	e_literal_char_8,
+		e_literal_char_16,
+		e_literal_string_8,
+		e_literal_string_16,
+		e_literal_integer,
+		e_literal_boolean
+	
+		self generateConstant (expression, out)
+
+	case e_definition
+		self generateDefinition (expression: * DefinitionExpression, out)
+	case e_minimal_and
+		self generateMinimalAnd (expression: * PairExpression, out)
+	case e_minimal_or
+		self generateMinimalOr (expression: * PairExpression, out)
+	case e_function_type
+		// ignore -- no code to generate (no-op) because the type is known at compile-time
+	case e_function
+		self generateFunctionReference (expression: * FunctionExpression, out)
+	
+//[of]:	offset
+	case e_offset
+
+		var attribute	= expression asOffset attribute
+		var structure	= attribute structure
+		
+		var llvmType	= self llvmType (structure)
+		var llvmAttribute	= attribute generator : *AttributeIndex
+		var llvmNull	= LLVMConstPointerNull (LLVMPointerType (llvmType, 0))
+		var llvmAddress	= self generateGEP (llvmNull, self llvmZero32, llvmAttribute index)
+		var llvmOffset	= LLVMBuildPtrToInt (self builder, llvmAddress, LLVMInt32TypeInContext (self llvmContext), 'offset')
+		out add (llvmOffset)
+	
+//[cf]
+//[of]:	cond
+	case e_cond
+	
+		var f	= self func
+		var llvmFunction	= f generator : LLVMValueRef
+		var c	= expression asCond
+		var thenBlock	= LLVMAppendBasicBlockInContext (self llvmContext, llvmFunction, 'cond_then')
+		var elseBlock	= LLVMAppendBasicBlockInContext (self llvmContext, llvmFunction, 'cond_else')
+		var commonBlock	= LLVMAppendBasicBlockInContext (self llvmContext, llvmFunction, 'cond_done')
+		
+		var llvmCondition = self condition (c condition)
+		LLVMBuildCondBr (self builder, llvmCondition, thenBlock, elseBlock)
+		
+		// The then block becomes the current block
+		LLVMPositionBuilderAtEnd (self builder, thenBlock)
+	
+		var v1	= {LLVMValueArray} local
+		self generateExpressionList (c first, v1)
+		v1 size each do i 
+			var type = expression values [i] type
+			v1 set (i, self fixupType (v1 [i], c first values [i] type, type))
+		end
+		LLVMBuildBr (self builder, commonBlock)
+		
+		// Save the block where the then comes from (it may have changed)
+		var block1 = LLVMGetInsertBlock (self builder)
+	
+		// The else block becomes the current block
+		LLVMPositionBuilderAtEnd (self builder, elseBlock)
+	
+		var v2	= {LLVMValueArray} local
+		self generateExpressionList (c second, v2)
+		v2 size each do i 
+			var type = expression values [i] type
+			v2 set (i, self fixupType (v2 [i], c second values [i] type, type))
+		end
+		LLVMBuildBr (self builder, commonBlock)
+		
+		// Save the block where the then comes from (it may have changed)
+		var block2 = LLVMGetInsertBlock (self builder)
+	
+		// The common block becomes the current block
+		LLVMPositionBuilderAtEnd (self builder, commonBlock)
+
+		v1 size each do i 
+			// Build the PHI node for each value
+			var type = expression values [i] type
+			var llvmType = self llvmType (type)
+			var phi = LLVMBuildPhi (self builder, llvmType, 'cond')
+			var incomingValues	= {[2] LLVMValueRef}
+			var incomingBranches	= {[2] LLVMBasicBlockRef}
+			incomingValues [0] = v1 [i]
+			incomingValues [1] = v2 [i]
+			incomingBranches [0] = block1
+			incomingBranches [1] = block2
+			LLVMAddIncoming (phi, incomingValues, incomingBranches, 2)
+			out add (phi)
+		end
+//[cf]
+		
+	else
+		assertFailure ("Unhandled expression")
+	end
+//[cf]
+//[of]:generateMinimalAnd
+//[c]Generates a boolean and
+//[c]
+//[c]	The second expression is evaluated only if the first one is true.
+//[c]	So the code generated is like this:
+//[c]	
+//[c]		x1 = values [0]
+//[c]		if x1
+//[c]			x2 = values [1]
+//[c]		end
+//[c]		result = phi (x1, x2)
+//[c]
+method generateMinimalAnd (expression: * PairExpression, out: * LLVMValueArray)
+
+	var v	= {LLVMValueArray} local
+	var f	= self func
+	var llvmFunction	= f generator : LLVMValueRef
+	var trueBlock	= LLVMAppendBasicBlockInContext (self llvmContext, llvmFunction, 'and_true')
+	var endBlock	= LLVMAppendBasicBlockInContext (self llvmContext, llvmFunction, 'and_end')
+
+	// Evaluate the first expression
+	self generateExpression (expression first, v)
+
+	// Save the block where v[0] comes from (it may have changed)
+	var startBlock	= LLVMGetInsertBlock (self builder)
+	
+	// Check result	
+	LLVMBuildCondBr (self builder, v [0], trueBlock, endBlock)
+	
+	// The true block becomes the current block
+	LLVMPositionBuilderAtEnd (self builder, trueBlock)
+
+	// Evaluate the second expression
+	self generateExpression (expression second, v)
+
+	// Save the block where v[1] comes from (it may have changed)
+	var block2 = LLVMGetInsertBlock (self builder)
+
+	// Jump to common block
+	LLVMBuildBr (self builder, endBlock)
+
+	// The common block becomes the current block
+	LLVMPositionBuilderAtEnd (self builder, endBlock)
+
+	// Build the PHI node
+	var phi = LLVMBuildPhi (self builder, LLVMInt1TypeInContext (self llvmContext), 'and')
+	var incomingValues	= {[2] LLVMValueRef}
+	var incomingBranches	= {[2] LLVMBasicBlockRef}
+	incomingValues [0] = v [0]
+	incomingValues [1] = v [1]
+	incomingBranches [0] = startBlock
+	incomingBranches [1] = block2
+	LLVMAddIncoming (phi, incomingValues, incomingBranches, 2)
+	out add (phi)
+//[cf]
+//[of]:generateMinimalOr
+//[c]Generates a boolean or
+//[c]
+//[c]	The second expression is evaluated only if the first one is false.
+//[c]	So the code generated is like this:
+//[c]	
+//[c]		x1 = values [0]
+//[c]		if not x1
+//[c]			x2 = values [1]
+//[c]		end
+//[c]		result = phi (x1, x2)
+//[c]
+method generateMinimalOr (expression: * PairExpression, out: * LLVMValueArray)
+
+	var v	= {LLVMValueArray} local
+	var f	= self func
+	var llvmFunction	= f generator : LLVMValueRef
+	var falseBlock	= LLVMAppendBasicBlockInContext (self llvmContext, llvmFunction, 'or_false')
+	var endBlock	= LLVMAppendBasicBlockInContext (self llvmContext, llvmFunction, 'or_end')
+
+	// Evaluate the first expression
+	self generateExpression (expression first, v)
+
+	// Save the block where v[0] comes from (it may have changed)
+	var startBlock	= LLVMGetInsertBlock (self builder)
+	
+	// Check result	
+	LLVMBuildCondBr (self builder, v [0], endBlock, falseBlock)
+	
+	// The true block becomes the current block
+	LLVMPositionBuilderAtEnd (self builder, falseBlock)
+
+	// Evaluate the second expression
+	self generateExpression (expression second, v)
+
+	// Save the block where v[1] comes from (it may have changed)
+	var block2 = LLVMGetInsertBlock (self builder)
+	
+	// Jump to common block
+	LLVMBuildBr (self builder, endBlock)
+
+	// The common block becomes the current block
+	LLVMPositionBuilderAtEnd (self builder, endBlock)
+
+	// Build the PHI node
+	var phi = LLVMBuildPhi (self builder, LLVMInt1TypeInContext (self llvmContext), 'or')
+	var incomingValues	= {[2] LLVMValueRef}
+	var incomingBranches	= {[2] LLVMBasicBlockRef}
+	incomingValues [0] = v [0]
+	incomingValues [1] = v [1]
+	incomingBranches [0] = startBlock
+	incomingBranches [1] = block2
+	LLVMAddIncoming (phi, incomingValues, incomingBranches, 2)
+	out add (phi)
+//[cf]
+//[of]:generateDefinition
+method generateDefinition (expression: * DefinitionExpression, out: * LLVMValueArray)
+
+	var v = {LLVMValueArray}
+
+	var definition = expression definition
+	switch definition code
+	case d_alias
+		self generateAlias (expression, out)
+	case d_function
+		var f = definition asFunction
+		if f hasYield
+			self generateInlineCall (f, expression, out)
+		else
+			self generateFunctionCall (expression, out)
+		end
+	case d_extern_function
+		self generateExternFunctionCall (expression, out)
+	case d_argument
+		self generateArgument (expression, out)
+	case d_variable
+		self generateVariable (expression, out)
+	case d_global_variable
+		self generateGlobalVariable (expression, out)
+	case d_attribute
+		self generateAttribute (expression, out)
+	case d_parameter
+		self generateParameter (expression, out)
+	case d_enumeration_value
+		self generateConstant (expression, out)
+	case d_type
+		// ignore -- no code to generate (no-op) because the type is known at compile-time
+	
+	case d_true
+		self generateLiteralBoolean (self llvmTrue, out)
+	case d_false
+		self generateLiteralBoolean (self llvmFalse, out)
+	case d_nil
+		self generateNil (expression, out)
+	case d_variable_arguments
+		self generateVariableArguments (expression, out)
+	case d_extra_size
+		self generateExtraSize (expression, out)
+	case d_typeof
+		// ignore -- no code to generate (no-op) because the type is known at compile-time
+	case d_each_extra
+		self generateEachExtra (expression)
+	
+//[of]:	meta
+	case d_meta_local
+		self generateLocal (expression, out)
+	case d_meta_size
+		self generateMetaSize (expression, out)
+	case d_meta_next
+		self generateMetaNext (expression, out)
+	case d_meta_cast
+		self generateMetaCast (expression, out)
+	case d_meta_nil
+		self generateMetaNil (expression, out)
+	case d_meta_pointer
+		// ignore -- no code to generate (no-op) because the type is known at compile-time
+	case d_meta_array_1
+		// ignore -- no code to generate (no-op) because the type is known at compile-time
+	case d_meta_array_2
+		// ignore -- no code to generate (no-op) because the type is known at compile-time
+	case d_meta_target
+		// ignore -- no code to generate (no-op) because the type is known at compile-time
+	case d_meta_initialize
+		self generateMetaInitialize (expression, out)
+//[cf]
+//[of]:	integer
+	case d_integer_add
+		self generateArguments (expression, v)
+		self convertSecondValue (expression, v)
+		out add (self builder LLVMBuildAdd	(v [0], v [1], 't'))
+
+	case d_integer_sub
+		self generateArguments (expression, v)
+		self convertSecondValue (expression, v)
+		out add (self builder LLVMBuildSub	(v [0], v [1], 't'))
+
+	case d_integer_mul
+		self generateArguments (expression, v)
+		self convertSecondValue (expression, v)
+		out add (self builder LLVMBuildMul	(v [0], v [1], 't'))
+
+	case d_integer_div
+		self generateArguments (expression, v)
+		self convertSecondValue (expression, v)
+		var v1 = v [0]
+		var v2 = v [1]
+		if expression isSignedOperation
+			out add (self builder LLVMBuildSDiv (v1, v2, 't'))
+		else
+			out add (self builder LLVMBuildUDiv (v1, v2, 't'))
+		end
+
+	case d_integer_mod
+		self generateArguments (expression, v)
+		self convertSecondValue (expression, v)
+		var v1 = v [0]
+		var v2 = v [1]
+		if expression isSignedOperation
+			out add (self builder LLVMBuildSRem (v1, v2, 't'))
+		else
+			out add (self builder LLVMBuildURem (v1, v2, 't'))
+		end
+
+	case d_integer_shl
+		self generateArguments (expression, v)
+		// LLVM requires that both types are equals	
+		self convertSecondValue (expression, v)
+		out add (self builder LLVMBuildShl	(v [0], v[1], 't'))
+	
+	case d_integer_shr
+		self generateArguments (expression, v)
+		// LLVM requires that both types are equals	
+		self convertSecondValue (expression, v)
+		var leftType	= expression arguments firstValue type
+		if leftType isSigned
+			out add (self builder LLVMBuildAShr (v [0], v [1], 't'))
+		else
+			out add (self builder LLVMBuildLShr (v [0], v [1], 't'))
+		end
+
+	case d_integer_not
+		self generateArguments (expression, v)
+		out add (self builder LLVMBuildXor (v [0], LLVMConstAllOnes (LLVMTypeOf (v [0])), 't'))
+
+	case d_integer_neg
+		self generateArguments (expression, v)
+		var value = v [0]
+		// 0 - value
+		out add (self builder LLVMBuildSub (LLVMConstNull (LLVMTypeOf (value)), value, 't'))
+
+	case d_integer_pos
+		self generateArguments (expression, v)
+		out add (v [0])
+
+	case d_integer_and
+		self generateArguments (expression, v)
+		self convertSecondValue (expression, v)
+		out add (self builder LLVMBuildAnd	(v [0], v [1], 't'))
+	
+	case d_integer_or
+		self generateArguments (expression, v)
+		self convertSecondValue (expression, v)
+		out add (self builder LLVMBuildOr (v [0], v [1], 't'))
+
+	case d_integer_xor
+		self generateArguments (expression, v)
+		self convertSecondValue (expression, v)
+		out add (self builder LLVMBuildXor	(v [0], v [1], 't'))
+		
+	case d_integer_assign_add
+		self generateAssignOp (expression, ref add (* LLVMGenerator, LLVMValueRef, LLVMValueRef))
+	case d_integer_assign_sub
+		self generateAssignOp (expression, ref sub (* LLVMGenerator, LLVMValueRef, LLVMValueRef))
+	case d_integer_assign_mul
+		self generateAssignOp (expression, ref mul (* LLVMGenerator, LLVMValueRef, LLVMValueRef))
+	case d_integer_assign_div
+		self generateAssignOp (expression, (expression isSignedOperation cond ref sdiv (* LLVMGenerator, LLVMValueRef, LLVMValueRef) else ref udiv (* LLVMGenerator, LLVMValueRef, LLVMValueRef)) )
+	case d_integer_assign_mod
+		self generateAssignOp (expression,  (expression isSignedOperation cond ref srem (* LLVMGenerator, LLVMValueRef, LLVMValueRef) else ref urem (* LLVMGenerator, LLVMValueRef, LLVMValueRef)) )
+	case d_integer_assign_shl
+		self generateAssignShiftOp (expression, ref shl (* LLVMGenerator, LLVMValueRef, LLVMValueRef))
+	case d_integer_assign_shr
+		self generateAssignShiftOp (expression,  (expression isSignedOperation cond ref ashr (* LLVMGenerator, LLVMValueRef, LLVMValueRef) else ref lshr (* LLVMGenerator, LLVMValueRef, LLVMValueRef)) )
+	case d_integer_assign_and
+		self generateAssignOp (expression, ref logicalAnd (* LLVMGenerator, LLVMValueRef, LLVMValueRef))
+	case d_integer_assign_or
+		self generateAssignOp (expression, ref logicalOr (* LLVMGenerator, LLVMValueRef, LLVMValueRef))
+	case d_integer_assign_xor
+		self generateAssignOp (expression, ref logicalXor (* LLVMGenerator, LLVMValueRef, LLVMValueRef))
+	case d_integer_assign_inc
+		self generateAssignUnaryOp (expression, ref add (* LLVMGenerator, LLVMValueRef, LLVMValueRef))
+	case d_integer_assign_dec
+		self generateAssignUnaryOp (expression, ref sub (* LLVMGenerator, LLVMValueRef, LLVMValueRef))
+
+	case d_integer_eq
+		self generateCompare (expression, LLVMIntEQ, out)
+	case d_integer_ne
+		self generateCompare (expression, LLVMIntNE, out)
+	case d_integer_le
+		var predicate = expression isSignedOperation cond LLVMIntSLE else LLVMIntULE
+		self generateCompare (expression, predicate, out)
+	case d_integer_ge
+		var predicate = expression isSignedOperation cond LLVMIntSGE else LLVMIntUGE
+		self generateCompare (expression, predicate, out)
+	case d_integer_lt
+		var predicate = expression isSignedOperation cond LLVMIntSLT else LLVMIntULT
+		self generateCompare (expression, predicate, out)
+	case d_integer_gt
+		var predicate = expression isSignedOperation cond LLVMIntSGT else LLVMIntUGT
+		self generateCompare (expression, predicate, out)
+//[cf]
+//[of]:	char
+	case d_char_add
+		self generateArguments (expression, v)
+		self convertSecondValue (expression, v)
+		out add (self builder LLVMBuildAdd (v [0], v [1], 't'))
+
+	case d_char_sub
+		self generateArguments (expression, v)
+		self convertSecondValue (expression, v)
+		out add (LLVMBuildSub (self builder, v [0], v [1], 't'))
+
+	case d_char_eq
+		self generateCompare (expression, LLVMIntEQ, out)
+	case d_char_ne
+		self generateCompare (expression, LLVMIntNE, out)
+	case d_char_le
+		self generateCompare (expression, LLVMIntULE, out)
+	case d_char_ge
+		self generateCompare (expression, LLVMIntUGE, out)
+	case d_char_lt
+		self generateCompare (expression, LLVMIntULT, out)
+	case d_char_gt
+		self generateCompare (expression, LLVMIntUGT, out)
+
+	case d_char_assign_add
+		self generateAssignOp (expression, ref add (* LLVMGenerator, LLVMValueRef, LLVMValueRef))
+	case d_char_assign_sub
+		self generateAssignOp (expression, ref sub (* LLVMGenerator, LLVMValueRef, LLVMValueRef))
+	case d_char_assign_inc
+		self generateAssignUnaryOp (expression, ref add (* LLVMGenerator, LLVMValueRef, LLVMValueRef))
+	case d_char_assign_dec
+		self generateAssignUnaryOp (expression, ref sub (* LLVMGenerator, LLVMValueRef, LLVMValueRef))
+//[cf]
+//[of]:	boolean
+	case d_boolean_and
+		self generateArguments (expression, v)
+		out add (self builder LLVMBuildAnd	(v [0], v [1], 't'))
+
+	case d_boolean_or
+		self generateArguments (expression, v)
+		out add (self builder LLVMBuildOr (v [0], v [1], 't'))
+
+	case d_boolean_eq
+		self generateCompare (expression, LLVMIntEQ, out)
+	case d_boolean_ne
+		self generateCompare (expression, LLVMIntNE, out)
+	case d_boolean_not
+		self generateArguments (expression, v)
+		out add (self builder LLVMBuildXor	(v [0], self llvmTrue, 't'))
+
+	case d_boolean_assign_and
+		self generateAssignOp (expression, ref logicalAnd (* LLVMGenerator, LLVMValueRef, LLVMValueRef))
+	case d_boolean_assign_or
+		self generateAssignOp (expression, ref logicalOr (* LLVMGenerator, LLVMValueRef, LLVMValueRef))
+//[cf]
+//[of]:	pointer
+	case d_pointer_eq
+		self generateCompare (expression, LLVMIntEQ, out)
+	case d_pointer_ne
+		self generateCompare (expression, LLVMIntNE, out)
+	case d_pointer_dereference
+		self generatePointerDereference (expression, out)
+	case d_pointer_super
+		self generatePointerSuper (expression, out)
+	case d_pointer_call
+		self generatePointerCall (expression, out)
+//[cf]
+//[of]:	array
+	case d_array_index
+		self generateArrayIndex (expression, out)
+	case d_array_index_0
+		self generateArrayIndex (expression, out)
+	case d_array_add
+		self generateArrayAdd (expression, out)
+	case d_array_sub
+		self generateArraySub (expression, out)
+		
+	case d_array_assign_add
+		self generateAssignPointerOp (expression, ref addPointer (* LLVMGenerator, LLVMValueRef, LLVMValueRef))
+	case d_array_assign_sub
+		self generateAssignPointerOp (expression, ref subPointer (* LLVMGenerator, LLVMValueRef, LLVMValueRef))
+	case d_array_assign_inc
+		self generateArrayAssignUnaryOp (expression, ref addPointer (* LLVMGenerator, LLVMValueRef, LLVMValueRef))
+	case d_array_assign_dec
+		self generateArrayAssignUnaryOp (expression, ref subPointer (* LLVMGenerator, LLVMValueRef, LLVMValueRef))
+
+	case d_array_le
+		self generateCompare (expression, LLVMIntULE, out)
+	case d_array_ge
+		self generateCompare (expression, LLVMIntUGE, out)
+	case d_array_lt
+		self generateCompare (expression, LLVMIntULT, out)
+	case d_array_gt
+		self generateCompare (expression, LLVMIntUGT, out)
+//[cf]
+	else
+		assertFailure ("Generating unknown definition")
+	end
+//[cf]
+//[of]:generateFunctionReference
+method generateFunctionReference (expression: * FunctionExpression, out: * LLVMValueArray)
+
+	var code = expression func code
+	if code == d_function
+		var f	= expression func asFunction
+		var llvmFunction	= f generator : LLVMValueRef
+		out add (llvmFunction)
+	else
+		var f	= expression func asExternFunction
+		var llvmFunction	= f generator : LLVMValueRef
+		out add (llvmFunction)
+	end
+//[cf]
+//[cf]
+//[of]:memory
+//[of]:generateArgument
+method generateArgument (expression: * DefinitionExpression, out: * LLVMValueArray)
+
+	var argument = expression definition asArgument
+
+	// Do not evaluate if the argument is a meta
+	if argument type isMeta
+		return
+	end
+	
+	var llvmArgument = argument generator : LLVMValueRef
+	out add (llvmArgument)
+//[cf]
+//[of]:generateVariableArguments
+method generateVariableArguments (expression: * DefinitionExpression, out: * LLVMValueArray)
+
+	var variableArguments	= expression definition asVariableArguments
+	variableArguments eachArgument do a
+		var llvmArgument = a generator : LLVMValueRef
+		out add (llvmArgument)
+	end
+//[cf]
+//[of]:generateGlobalVariable
+method generateGlobalVariable (expression: * DefinitionExpression, out: * LLVMValueArray)
+
+	var variable	= expression definition asGlobalVariable
+	var llvmVariable	= variable generator : LLVMValueRef
+	var symbol	= variable name
+	var llvmValue	= LLVMBuildLoad (self builder, llvmVariable, symbol)
+
+	out add (llvmValue)
+//[cf]
+//[of]:generateVariable
+method generateVariable (expression: * DefinitionExpression, out: * LLVMValueArray)
+
+	var alloca	= self effectiveAddress (expression)
+	var variable	= expression definition asVariable
+	var symbol	= variable name
+	var llvmValue	= LLVMBuildLoad (self builder, alloca, symbol)
+
+	out add (llvmValue)
+//[cf]
+//[of]:generateLocal
+method generateLocal (expression: * DefinitionExpression, out: * LLVMValueArray)
+
+	var meta	= expression arguments firstValue type asMeta
+	var localType	= meta type
+	var llvmType	= self llvmType (localType)
+	var llvmValue	= {LLVMValueRef}
+	
+	if localType isSimple
+		// Just use an undefined value
+		llvmValue = LLVMGetUndef (llvmType)
+	else
+		// Create an alloca
+		llvmValue	= self generateAlloca (llvmType, 'v')
+		
+		// Save the address
+		self bind (expression, llvmValue)
+	end
+
+	out add (llvmValue)
+//[cf]
+//[of]:generateArrayIndex
+method generateArrayIndex (expression: * DefinitionExpression, out: * LLVMValueArray)
+
+	var arrayValue	= expression arguments firstValue
+	var arrayPointerType	= arrayValue type asPointer
+	var arrayType	= arrayPointerType target asArray
+	var cellType	= arrayType cellType
+	var llvmValue	= self effectiveAddress (expression)
+	
+	// If the cell type is a simple type, read the content of the cell, 
+	// otherwise return the address
+	if cellType isSimple
+		llvmValue = LLVMBuildLoad (self builder, llvmValue, 'v')
+	end
+	
+	out add (llvmValue)
+//[cf]
+//[of]:generatePointerDereference
+method generatePointerDereference (expression: * DefinitionExpression, out: * LLVMValueArray)
+
+	var pointerValue	= expression arguments firstValue
+	var pointerType	= pointerValue type asPointer
+	var type	= pointerType target
+	var llvmValue	= self effectiveAddress (expression)
+	
+	// If the target type is a simple type, read the content of the cell, 
+	// otherwise return the address
+	if type isSimple
+		llvmValue = LLVMBuildLoad (self builder, llvmValue, 'v')
+	end
+	
+	out add (llvmValue)
+//[cf]
+//[of]:generateAttribute
+method generateAttribute (expression: * DefinitionExpression, out: * LLVMValueArray)
+
+	var attribute	= expression definition asAttribute
+	var attributeType	= attribute storageType
+	var llvmValue	= self effectiveAddress (expression)
+	
+	// If the type is a simple type, read the content of the cell, 
+	// otherwise return the address
+	if attributeType isSimple
+		llvmValue = LLVMBuildLoad (self builder, llvmValue, 'v')
+	end
+	
+	out add (llvmValue)
+//[cf]
+
+//[of]:generateEffectiveAddresses
+method generateEffectiveAddresses (values: * ExpressionList, out: * LLVMValueArray)
+
+	values each do value
+		out add (self effectiveAddress (value))
+	end
+//[cf]
+//[of]:effectiveAddress 
+method effectiveAddress (expression: * Expression)
+
+	switch expression code
+	case e_definition
+		return self effectiveAddressDefinition (expression: * DefinitionExpression)
+	else
+		assertFailure ("Invalid effective address")
+		return nil
+	end
+//[cf]
+//[of]:effectiveAddressDefinition
+method effectiveAddressDefinition (expression: * DefinitionExpression)
+
+	var definition = expression definition
+	switch definition code
+	case d_global_variable
+		return self effectiveAddressGlobalVariable (expression)
+	case d_variable
+		return self effectiveAddressVariable (expression)
+	case d_attribute
+		return self effectiveAddressAttribute (expression)
+	case d_array_index
+		return self effectiveAddressArrayIndex (expression)
+	case d_array_index_0
+		return self effectiveAddressArrayIndex0 (expression)
+	case d_pointer_dereference
+		return self effectiveAddressPointerDereference (expression)
+	else
+		assertFailure ("Invalid effective address definition")
+		return nil
+	end
+//[cf]
+//[of]:effectiveAddressGlobalVariable
+method effectiveAddressGlobalVariable (expression: * DefinitionExpression)
+
+	var variable = expression definition asGlobalVariable
+	return variable generator : LLVMValueRef
+//[cf]
+//[of]:effectiveAddressVariable
+method effectiveAddressVariable (expression: * DefinitionExpression)
+
+	var variable = expression definition asVariable
+	return variable generator : LLVMValueRef
+//[cf]
+//[of]:effectiveAddressAttribute
+method effectiveAddressAttribute (expression: *DefinitionExpression)
+
+	var v = self generateArguments (expression, {LLVMValueArray})
+	
+	// Get the object value
+	var objectValue	= v [0]
+	
+	// Get the type of the object
+	var pointerType	= expression arguments firstValue type asPointer
+	
+	// Get the expected type
+	var attribute	= expression definition : *Attribute
+	var llvmAttribute	= attribute generator : *AttributeIndex
+	var structure	= attribute structure
+	var expectedType	= self program getPointerType (structure)
+
+	// The value may be of a derived type
+	objectValue = self fixupType (objectValue, pointerType, expectedType)
+	
+	return self generateGEP (objectValue, self llvmZero32, llvmAttribute index)
+//[cf]
+//[of]:effectiveAddressArrayIndex
+method effectiveAddressArrayIndex (expression: * DefinitionExpression)
+
+	var v = self generateArguments (expression, {LLVMValueArray})
+	var arrayValue = v [0]
+	var indexValue = v [1]
+	
+	return self generateGEP (arrayValue, self llvmZero32, indexValue)
+//[cf]
+//[of]:effectiveAddressArrayIndex0
+method effectiveAddressArrayIndex0 (expression: * DefinitionExpression)
+
+	var v = self generateArguments (expression, {LLVMValueArray})
+	var arrayValue = v [0]
+
+	return self generateGEP (arrayValue, self llvmZero32, self llvmZero32)
+//[cf]
+//[of]:effectiveAddressPointerDereference
+method effectiveAddressPointerDereference (expression: * DefinitionExpression)
+
+	var v = self generateArguments (expression, {LLVMValueArray})
+	return v [0]
+//[cf]
+//[cf]
+//[of]:array
+//[of]:arrayAdd
+method generateArrayAdd (expression: * DefinitionExpression, out: * LLVMValueArray)
+
+	var v = self generateArguments (expression, {LLVMValueArray})
+	var llvmValue = self addPointer (v [0], v [1])
+	out add (llvmValue)
+//[cf]
+//[of]:arraySub
+method generateArraySub (expression: * DefinitionExpression, out: * LLVMValueArray)
+
+	var v = self generateArguments (expression, {LLVMValueArray})
+	var arrayValue = v [0]
+	var indexValue = v [1]
+	
+	var arguments	= expression argumentValues
+	var arrayArgument	= arguments [0]
+	var offsetArgument	= arguments [1]
+	var pointerType	= arrayArgument type asPointer
+	var indexType	= offsetArgument type
+	var arrayType	= pointerType target asArray
+	
+	if indexType isInteger
+	
+		// array - integer
+		var llvmValue	= self subPointer (arrayValue, indexValue)
+		out add (llvmValue)
+	
+	else
+	
+		// array - array
+		var llvmType	= self llvmType (expression firstValue type)
+		var v1	= LLVMBuildPtrToInt (self builder, v [0], llvmType, 'v1')
+		var v2	= LLVMBuildPtrToInt (self builder, v [1], llvmType, 'v2')
+		var diff	= LLVMBuildSub	(self builder, v1, v2, 'diff')
+		var size	= self getSizeof (arrayType cellType)
+		var llvmValue	= LLVMBuildUDiv (self builder, diff, size, 'dist')
+		out add (llvmValue)
+	
+	end
+//[cf]
+//[cf]
+//[of]:misc
+//[of]:generateInlineCall
+method generateInlineCall (f: *Function, expression: *DefinitionExpression, out: *LLVMValueArray)
+
+	var info	= {InlineContext} local (self pool)
+	info next	= self inlineContext
+	self inlineContext	= info
+	
+	// Evaluate arguments
+	var v = self generateArguments (expression, {LLVMValueArray})
+	
+	// Assign values to arguments
+	var i = 0 s
+	eachDual (f arguments, expression argumentValues) do a, value
+		if not a type isMeta
+			v set (i, self fixupType (v [i], value type, a type))
+			self bindArgument (a, v [i])
+			i ++
+		end
+	end
+
+	// Create the end-block
+	var llvmFunction	= self func generator : LLVMValueRef
+	var endBlock	= LLVMAppendBasicBlockInContext (self llvmContext, llvmFunction, 'iterator_call_end')
+
+	// Create the phis (one phi for each returned value)
+	var previousBlock = LLVMGetInsertBlock (self builder)
+	LLVMPositionBuilderAtEnd (self builder, endBlock)
+	expression values each do value
+		var type	= value type
+		var phi	= LLVMBuildPhi (self builder, self llvmType (type), 'iterator_call_return')
+		out add (phi)
+	end
+	LLVMPositionBuilderAtEnd (self builder, previousBlock)
+	
+	// The generator object is valid only during the generation of the block
+	info inlineBlock	= expression inlineBlock
+	info endBlock	= endBlock
+	info phis	= out
+	info func	= f
+
+	// Attach the context to the expression because a break inside the inline
+	// block needs to find the exit label
+	self bind (expression, info)
+	
+	self generateBlock (f body)
+	self inlineContext = info next
+	info restore
+
+	// Implicit return ?
+	if not f body terminated
+		LLVMBuildBr (self builder, endBlock)
+	end
+
+	// The end block becomes the current block
+	LLVMPositionBuilderAtEnd (self builder, endBlock)
+//[cf]
+//[of]:generateFunctionCall
+method generateFunctionCall (expression: * DefinitionExpression, out: * LLVMValueArray)
+
+	var arguments = expression arguments
+	
+	var v = {LLVMValueArray} local
+	self generateExpressionList (arguments, v)
+		
+	var f = expression definition asFunction
+	
+	// Fixup type of values
+	var i = 0 s
+	eachDual (f arguments, arguments values) do argument, value
+		var currentType	= value type
+		var expectedType	= argument type
+		if not currentType isMeta
+			var llvmValue	= v [i]
+			v set (i, self fixupType (llvmValue, currentType, expectedType))
+			i ++
+		end
+	end
+
+	self generateCall (f, out, v)
+//[cf]
+//[of]:generateExternFunctionCall
+method generateExternFunctionCall (expression: * DefinitionExpression, out: * LLVMValueArray)
+
+	var v = self generateArguments (expression, {LLVMValueArray})
+
+	var f	= expression definition asExternFunction
+	
+	// Fixup type of values
+	var i = 0 s
+	eachDual (f argumentTypes, expression argumentValues) do argumentType, value
+		var currentType	= value type
+		if not currentType isMeta
+			var llvmValue	= v [i]
+			v set (i, self fixupType (llvmValue, currentType, argumentType))
+			i ++
+		end
+	end
+		
+	self generateCall (f, out, v)
+//[cf]
+//[of]:generatePointerSuper
+method generatePointerSuper (expression: * DefinitionExpression, out: * LLVMValueArray)
+
+	var v	= self generateArguments (expression, {LLVMValueArray})
+	var oldType	= expression arguments firstValue type
+	var newType	= expression firstValue type
+	var llvmValue	= self fixupType (v [0], oldType, newType)
+	out add (llvmValue)
+//[cf]
+//[of]:generatePointerCall
+method generatePointerCall (expression: * DefinitionExpression, out: * LLVMValueArray)
+
+	var v	= self generateArguments (expression, {LLVMValueArray})
+	var pointerType	= expression arguments firstValue type asPointer
+	var functionType	= pointerType target asFunction
+
+	// Fixup type of arguments
+	// Remark: a call can not have meta types in the list of 
+	// values, so it is not required to check for metas
+	var i = 1 s	// Skip function pointer
+	functionType eachType do expectedType
+		var llvmValue	= v [i]
+		var currentType	= type (expression argumentValues [i])
+		v set (i, self fixupType (llvmValue, currentType, expectedType))
+		i ++
+	end
+	
+	// Call function
+	var llvmFunction	= v [0]
+	var llvmResult	= LLVMBuildCall (self builder, llvmFunction, v values + 1, v size - 1, '')
+	
+	LLVMAddInstrAttribute	(llvmResult, -1:Unsigned, LLVMNoUnwindAttribute)	// -1 (== ~0) is for function attribute
+	LLVMSetInstructionCallConv	(llvmResult, self llvmCallingConvention (functionType callingConvention))
+	
+	var size = functionType returnTypes size
+	if size == 0
+		// nothing to add
+	elsif size == 1
+		out add (llvmResult)
+	else
+		i = 0
+		functionType eachReturnType do type
+			var llvmValue = LLVMBuildExtractValue (self builder, llvmResult, i, 'v')
+			out add (llvmValue)
+			i ++
+		end
+	end
+//[cf]
+
+//[of]:generateMetaSize
+method generateMetaSize (expression: * DefinitionExpression, out: * LLVMValueArray)
+
+	// Get the type
+	var value	= expression arguments firstValue
+	var type	= value constantType
+	var llvmSize	= self getSizeof (type)
+	out add (llvmSize)
+//[cf]
+//[of]:generateMetaCast
+method generateMetaCast (expression: * DefinitionExpression, out: * LLVMValueArray)
+
+	var v = self generateArguments (expression, {LLVMValueArray})
+	
+	// The type is not added to the result, so the value is at index zero
+	var value = v [0]
+
+	// Get the target type
+	var type	= expression arguments firstValue constantType
+	var llvmType	= self llvmType (type)
+
+	// Get the source type
+	var oldType = expression arguments secondValue type
+
+	var llvmCast = {LLVMValueRef}
+	if oldType isIntegerOrChar and type isIntegerOrChar
+		// Integer conversion
+		llvmCast = self convert (value, oldType, type)
+	elsif not oldType isPointer and type isPointer
+		// Conversion to a pointer
+		llvmCast = LLVMBuildIntToPtr (self builder, value, llvmType, 'cast')
+	elsif  oldType isPointer and not type isPointer
+		// Conversion from a pointer
+		llvmCast = LLVMBuildPtrToInt (self builder, value, llvmType, 'cast')
+	else
+		llvmCast	= LLVMBuildBitCast (self builder, value, llvmType, 'cast')
+	end
+	out add (llvmCast)
+//[cf]
+//[of]:generateMetaNil
+method generateMetaNil (expression: * DefinitionExpression, out: * LLVMValueArray)
+
+	var pointerType	= expression firstValue type
+	out add (self llvmNilConstant (pointerType))
+//[cf]
+//[of]:generateMetaInitialize
+method generateMetaInitialize (expression: * DefinitionExpression, out: * LLVMValueArray)
+
+	var value	= expression firstValue
+	var llvmValue	= self llvmConstant (value constant, value type)
+	out add (llvmValue)
+//[cf]
+
+//[of]:generateExtraSize
+method generateExtraSize (expression: * DefinitionExpression, out: * LLVMValueArray)
+
+	var value	= expression firstValue
+	var llvmValue	= self llvmConstant (value constant, value type)
+	
+	out add (llvmValue)
+//[cf]
+//[of]:generateEachExtra
+method generateEachExtra (expression: * DefinitionExpression)
+
+	var extraDefinition	= expression definition asExtraDefinition
+	var variableArguments	= extraDefinition variableArguments
+	var inlineBlock	= expression inlineBlock
+	
+	inlineBlock eachExtraBlocks each do b
+		self generateBlock (b)
+	end
+//[cf]
+//[cf]
+//[of]:constants
+//[of]:generateAlias
+method generateAlias (expression: * DefinitionExpression, out: * LLVMValueArray)
+
+	var value	= expression firstValue
+	var constant	= value constant
+	var type	= value type
+	if type isMeta
+		return
+	end
+	var llvmValue = self llvmConstant (constant, type)
+	out add (llvmValue)
+//[cf]
+//[of]:generateLiteralBoolean
+method generateLiteralBoolean (value: LLVMValueRef, out: * LLVMValueArray)
+
+	out add (value)
+//[cf]
+//[of]:generateNil
+method generateNil (expression: * DefinitionExpression, out: * LLVMValueArray)
+
+	out add (self llvmNilConstant (nil))
+//[cf]
+//[of]:generateMetaNext
+method generateMetaNext (	expression	: * DefinitionExpression, 
+	out	: * LLVMValueArray )
+
+	var value	= expression firstValue
+	var type	= value type
+	var constant	= value constant asInteger
+	var llvmValue	= self llvmIntegerConstant (constant, type)
+	out add (llvmValue)
+//[cf]
+//[of]:generateParameter
+method generateParameter (expression: * DefinitionExpression, out: * LLVMValueArray)
+
+	var value = expression firstValue
+	
+	// If the parameter is a type: just ignore
+	if value isMeta
+		return
+	end
+	
+	// Otherwise it must be a constant
+	out add (self llvmConstant (value constant, value type))
+//[cf]
+//[cf]
+
+//[of]:utils
+//[of]:generateConstant
+method generateConstant (expression: * Expression, out: * LLVMValueArray)
+
+	var value	= expression firstValue
+	var llvmValue	= self llvmConstant (value constant, value type)
+	out add (llvmValue)
+//[cf]
+//[of]:generateCall
+method generateCall (f: * Prototype, out: * LLVMValueArray, v: * LLVMValueArray)
+
+	var llvmFunction	= f generator : LLVMValueRef
+	var llvmResult	= LLVMBuildCall (self builder, llvmFunction, v list, '')
+	
+	LLVMAddInstrAttribute	(llvmResult, -1:Unsigned, LLVMNoUnwindAttribute)	// -1 (== ~0) is for function attribute
+	LLVMSetInstructionCallConv	(llvmResult, llvmCallingConvention(self, f callingConvention))
+	
+	var size = f returnValues size
+	if size == 0
+		// nothing to add
+	elsif size == 1
+		out add (llvmResult)
+	else
+		var i = 0 s
+		f returnValues eachType do type
+			var llvmValue = LLVMBuildExtractValue (self builder, llvmResult, i, 'v')
+			out add (llvmValue)
+			i ++
+		end
+	end
+//[cf]
+//[of]:generateCompare
+method generateCompare (	expression	: * DefinitionExpression, 
+	predicate	: LLVMIntPredicate, 
+	out	: * LLVMValueArray)
+
+	var v = self generateArguments (expression, {LLVMValueArray})
+	self convertSecondValue (expression, v)
+	var llvmValue = LLVMBuildICmp (self builder, predicate, v [0], v [1], 'cmp')
+	out add (llvmValue)
+//[cf]
+//[of]:generateAssignOp
+method generateAssignOp (	expression	: * DefinitionExpression, 
+	operation	: & (* LLVMGenerator, LLVMValueRef, LLVMValueRef) -> (LLVMValueRef) )
+
+	var v = {LLVMValueArray} local
+	var arguments = expression arguments
+	self generateExpression (arguments second, v)
+	var oldType	= arguments secondValue type
+	var newType	= arguments firstValue type
+	v set (0, self fixupType (v [0], oldType, newType))
+
+	var leftAddress	= self effectiveAddress (arguments first)
+	var leftValue	= LLVMBuildLoad (self builder, leftAddress, 't')
+	var rightValue	= v [0]
+	var result	= operation call (self, leftValue, rightValue)
+	LLVMBuildStore (self builder, result, leftAddress)
+
+method add (left: LLVMValueRef, right: LLVMValueRef)
+
+	return LLVMBuildAdd (self builder, left, right, 't')
+
+method sub (left: LLVMValueRef, right: LLVMValueRef)
+
+	return LLVMBuildSub (self builder, left, right, 't')
+
+method mul (left: LLVMValueRef, right: LLVMValueRef)
+
+	return LLVMBuildMul (self builder, left, right, 't')
+
+method udiv (left: LLVMValueRef, right: LLVMValueRef)
+
+	return LLVMBuildUDiv (self builder, left, right, 't')
+
+method sdiv (left: LLVMValueRef, right: LLVMValueRef)
+
+	return LLVMBuildSDiv (self builder, left, right, 't')
+
+method urem (left: LLVMValueRef, right: LLVMValueRef)
+
+	return LLVMBuildURem (self builder, left, right, 't')
+
+method srem (left: LLVMValueRef, right: LLVMValueRef)
+
+	return LLVMBuildSRem (self builder, left, right, 't')
+
+method shl (left: LLVMValueRef, right: LLVMValueRef)
+
+	return LLVMBuildShl (self builder, left, right, 't')
+
+method lshr (left: LLVMValueRef, right: LLVMValueRef)
+
+	return LLVMBuildLShr (self builder, left, right, 't')
+
+method ashr (left: LLVMValueRef, right: LLVMValueRef)
+
+	return LLVMBuildAShr (self builder, left, right, 't')
+
+method logicalAnd (left: LLVMValueRef, right: LLVMValueRef)
+
+	return LLVMBuildAnd (self builder, left, right, 't')
+
+method logicalOr (left: LLVMValueRef, right: LLVMValueRef)
+
+	return LLVMBuildOr (self builder, left, right, 't')
+
+method logicalXor (left: LLVMValueRef, right: LLVMValueRef)
+
+	return LLVMBuildXor (self builder, left, right, 't')
+//[cf]
+//[of]:generateAssignPointerOp
+//[c]This method differs from generateAssignOp as the second
+//[c]arguments must not be converted to the type of the first one.
+//[c]
+method generateAssignPointerOp (	expression	: * DefinitionExpression, 
+	operation	: & (* LLVMGenerator, LLVMValueRef, LLVMValueRef) -> (LLVMValueRef) )
+
+	var v = {LLVMValueArray} local
+	var arguments = expression arguments
+	self generateExpression (arguments second, v)
+
+	var leftAddress	= self effectiveAddress (arguments first)
+	var leftValue	= LLVMBuildLoad (self builder, leftAddress, 't')
+	var rightValue	= v [0]
+	var result	= operation call (self, leftValue, rightValue)
+	LLVMBuildStore (self builder, result, leftAddress)
+
+method addPointer (left: LLVMValueRef, right: LLVMValueRef)
+
+	var value = self generateGEP (left, self llvmZero32, right)
+
+	// Value is a pointer to the nth element of the array but we want to keep
+	// a pointer to an array
+	return LLVMBuildBitCast (self builder, value, LLVMTypeOf (left), 'cast')
+
+method subPointer (left: LLVMValueRef, right: LLVMValueRef)
+
+	var zero	= LLVMConstNull (LLVMTypeOf (right))
+	var neg	= LLVMBuildSub	(self builder, zero, right, 't')
+	var value	= self generateGEP (left, self llvmZero32, neg)
+
+	// Value is a pointer to the nth element of the array but we want to keep
+	// a pointer to an array
+	return LLVMBuildBitCast (self builder, value, LLVMTypeOf (left), 'cast')
+//[cf]
+//[of]:generateAssignShiftOp
+method generateAssignShiftOp (	expression	: * DefinitionExpression, 
+	operation	: & (* LLVMGenerator, LLVMValueRef, LLVMValueRef) -> (LLVMValueRef) )
+
+	var v = {LLVMValueArray} local
+	var arguments = expression arguments
+	self generateExpression (arguments second, v)
+	// LLVM requires that both types are equals
+	var oldType	= arguments secondValue type
+	var newType	= arguments firstValue type
+	var rightValue	= self fixupType (v [0], oldType, newType)
+	var leftAddress	= self effectiveAddress (arguments first)
+	var leftValue	= LLVMBuildLoad (self builder, leftAddress, 't')
+	var llvmResult	= operation call (self, leftValue, rightValue)
+	LLVMBuildStore (self builder, llvmResult, leftAddress)
+//[cf]
+//[of]:generateAssignUnaryOp
+method generateAssignUnaryOp (	expression	: * DefinitionExpression, 
+	operation	: & (* LLVMGenerator, LLVMValueRef, LLVMValueRef) -> (LLVMValueRef) )
+
+	var leftAddress	= self effectiveAddress (expression arguments first)
+	var leftValue	= LLVMBuildLoad (self builder, leftAddress, 't')
+	var rightValue	= LLVMConstInt (LLVMTypeOf (leftValue), 1, 0)
+	var llvmResult	= operation call (self, leftValue, rightValue)
+	LLVMBuildStore (self builder, llvmResult, leftAddress)
+//[cf]
+//[of]:generateArrayAssignUnaryOp
+method generateArrayAssignUnaryOp (	expression	: * DefinitionExpression, 
+	operation: & (* LLVMGenerator, LLVMValueRef, LLVMValueRef) -> (LLVMValueRef ))
+
+	var leftAddress	= self effectiveAddress (expression arguments first)
+	var leftValue	= LLVMBuildLoad (self builder, leftAddress, 't')
+	var rightValue	= self llvmOne32
+	var llvmResult	= operation call (self, leftValue, rightValue)
+	LLVMBuildStore (self builder, llvmResult, leftAddress)
+//[cf]
+//[of]:generateArguments
+method generateArguments (expression, llvmValues: * LLVMValueArray)
+
+	llvmValues initialize
+	self generateExpressionList (expression arguments, llvmValues)
+	return llvmValues
+//[cf]
+//[of]:generateAlloca
+method generateAlloca (type: LLVMTypeRef, symbol: String8)
+
+	// Save the current insertion position
+	var currentBlock	= LLVMGetInsertBlock (self builder)
+	
+	// Move the insertion position to the beginning of the function
+	var llvmFunction	= self func generator : LLVMValueRef
+	var firstBlock	= LLVMGetFirstBasicBlock (llvmFunction)
+	var firstInstr	= LLVMGetFirstInstruction (firstBlock)
+	if firstInstr notNil
+		LLVMPositionBuilderBefore (self builder, firstInstr)
+	else
+		LLVMPositionBuilderAtEnd (self builder, firstBlock)
+	end
+	
+	// Insert an alloca
+	var alloca	= LLVMBuildAlloca (self builder, type, symbol)
+
+	// Restore the position
+	LLVMPositionBuilderAtEnd (self builder, currentBlock)
+
+	return alloca
+//[cf]
+//[of]:convert
+method convert (	value	: LLVMValueRef, 
+	oldType	: * Type, 
+	newType	: * Type )
+
+	var oldSize	= oldType size
+	var newSize	= newType size
+	
+	if oldSize == newSize
+		// Do nothing: the operation is a no-op if the size is identical
+		return value
+	end
+	
+	var llvmType = self llvmType (newType)
+	if oldSize > newSize
+		return LLVMBuildTrunc (self builder, value, llvmType, 'v')
+	elsif oldType isSigned
+		return LLVMBuildSExt (self builder, value, llvmType, 'v')
+	else
+		return LLVMBuildZExt (self builder, value, llvmType, 'v')
+	end
+//[cf]
+//[of]:getSizeof
+method getSizeof (type: * Type)
+
+	var llvmType	= self llvmType (type)
+	var llvmNull	= LLVMConstPointerNull (LLVMPointerType (llvmType, 0))
+	var llvmOffset	= self generateGEP (llvmNull, self llvmOne32)
+	var llvmSize	= LLVMBuildPtrToInt (self builder, llvmOffset, LLVMInt32TypeInContext (self llvmContext), 'sizeof')
+	return llvmSize
+//[cf]
+//[of]:convertSecondValue
+method convertSecondValue (expression: * DefinitionExpression, v: * LLVMValueArray)
+
+	var arguments	= expression arguments
+	var oldType	= arguments secondValue type
+	var newType	= arguments firstValue type
+	v set (1, self fixupType (v [1], oldType, newType))
+//[cf]
+
+//[of]:llvmConstant
+method llvmConstant (constant: * Constant, type: * Type)
+
+	switch constant code
+	case c_integer
+		return self llvmIntegerConstant (constant asInteger, type)
+	case c_boolean
+		return self llvmBooleanConstant (constant asBoolean)
+	case c_structure
+		return self llvmStructureConstant (constant asStructure, type)
+	case c_array
+		return self llvmArrayConstant (constant asArray, type)
+	case c_function
+		return self llvmFunctionConstant (constant asFunction, type)
+	case c_string_8
+		return self llvmString8Constant (constant asString8, type)
+	case c_string_16
+		return self llvmString16Constant (constant asString16, type)
+	case c_nil
+		return self llvmNilConstant (type)
+	else // c_uninitialized
+		return self llvmUninitializedConstant (constant asUninitialized, type)
+	end
+//[cf]
+//[of]:llvmIntegerConstant
+method llvmIntegerConstant (constant: * IntegerConstant, expectedType: * Type)
+
+	var integer	= constant value
+	
+	// Special case: the expected type is a pointer
+	if expectedType isPointer
+		var llvmType	= self llvmType (expectedType)
+		var llvmValue	= LLVMConstInt	(LLVMInt32TypeInContext (self llvmContext), integer, 0)	// 32 bit specific
+		return LLVMConstIntToPtr (llvmValue, llvmType)
+	end
+	
+	var llvmType	= self llvmType (expectedType)
+	var llvmValue	= LLVMConstInt	(llvmType, integer, 0)
+	return llvmValue
+//[cf]
+//[of]:llvmBooleanConstant
+method llvmBooleanConstant (constant: * BooleanConstant)
+
+	if constant value
+		return self llvmTrue
+	else
+		return self llvmFalse
+	end
+//[cf]
+//[of]:llvmNilConstant
+//[c]Generate a null pointer constant
+//[c]
+//[c]	The type is the type of the pointer, or nil if unspecified.
+//[c]
+method llvmNilConstant (type: * Type)
+
+	if type isNil
+		return self llvmNil
+	else
+		var llvmType	= self llvmType (type)
+		return LLVMConstPointerNull (llvmType)
+	end
+//[cf]
+//[of]:llvmFunctionConstant
+method llvmFunctionConstant (constant: * FunctionConstant, expectedType: * Type)
+
+	var f	= constant value
+	var llvmFunction	= f generator : LLVMValueRef
+
+	return LLVMConstBitCast (llvmFunction, self llvmType (expectedType))
+//[cf]
+//[of]:llvmStructureConstant
+method llvmStructureConstant (	constant	: * StructureConstant, 
+	expectedType	: * Type)
+
+	var llvmValue = constant generator : LLVMValueRef
+
+	if llvmValue isNil
+		var structure	= constant structure
+		var values	= constant values
+		var llvmData, pos	= self readConstantStructure (structure, values, 1)
+		var llvmVar	= LLVMAddGlobal (self llvmModule, LLVMTypeOf (llvmData), 'C')
+		
+		LLVMSetInitializer	(llvmVar, llvmData)
+		LLVMSetLinkage	(llvmVar, LLVMPrivateLinkage)
+		LLVMSetGlobalConstant	(llvmVar, 1)
+	
+		llvmValue = LLVMConstBitCast (llvmVar, self llvmType (expectedType))
+		constant generator = llvmValue
+	end
+
+	return llvmValue
+//[cf]
+//[of]:llvmArrayConstant
+method llvmArrayConstant (	constant	: * ArrayConstant, 
+	expectedType	: * Type)
+
+	var llvmValue = constant generator : LLVMValueRef
+
+	if llvmValue isNil
+		var arrayType	= constant arrayType
+		var values	= constant values
+		var llvmArray, pos	= self readConstantArray (arrayType, values, 1)
+		var llvmVar	= LLVMAddGlobal (self llvmModule, LLVMTypeOf (llvmArray), 'A')
+	
+		LLVMSetInitializer	(llvmVar, llvmArray)
+		LLVMSetLinkage	(llvmVar, LLVMPrivateLinkage)
+		LLVMSetGlobalConstant	(llvmVar, 1)
+
+		llvmValue = LLVMConstBitCast (llvmVar, self llvmType (expectedType))
+		constant generator = llvmValue
+	end
+
+	return llvmValue
+//[cf]
+//[of]:llvmString8Constant
+method llvmString8Constant (constant: * String8Constant, expectedType: * Type)
+
+	var v	= (constant generator : * GlobalString8) value
+	if expectedType <> self program string8Type
+		v = LLVMConstBitCast (v, self llvmType (expectedType))
+	end
+	return v
+//[cf]
+//[of]:llvmString16Constant
+method llvmString16Constant (constant: * String16Constant, expectedType: * Type)
+
+	var v	= (constant generator : * GlobalString16) value
+	if expectedType <> self program string16Type
+		v = LLVMConstBitCast (v, self llvmType (expectedType))
+	end
+	return v
+//[cf]
+//[of]:llvmUninitializedConstant
+method llvmUninitializedConstant (	constant	: * UninitializedConstant, 
+	expectedType	: * Type)
+
+	var llvmValue = constant generator : LLVMValueRef
+
+	if llvmValue isNil
+		var type	= constant type
+		if type isSimple
+			var llvmType	= self llvmType (expectedType)
+			llvmValue	= LLVMGetUndef	(llvmType)
+		else
+			var llvmType	= self llvmType (type)
+			var llvmVar	= LLVMAddGlobal (self llvmModule, llvmType, 'G')
+			LLVMSetInitializer	(llvmVar, LLVMGetUndef (llvmType))
+			LLVMSetLinkage	(llvmVar, LLVMInternalLinkage)
+			llvmValue = LLVMConstBitCast (llvmVar, self llvmType (expectedType))
+		end
+		constant generator = llvmValue
+	end
+
+	return llvmValue
+//[cf]
+
+//[of]:readConstantStructure
+method readConstantStructure (structure: * StructureType, values: * ValueList, index: Size)
+
+	// ### Bug: limited to 256 !
+	var v = {LLVMValueArray} local
+
+	var pos = index
+	if structure parentStructure notNil
+		var value, newPos = self readConstantStructure (structure parentStructure, values, pos)
+		pos = newPos
+		v add (value)
+	end
+	
+	structure eachAttribute do a
+		var value, newPos = self readConstantValue (a storageType, values, pos)
+		pos = newPos
+		v add (value)
+	end
+	
+	return LLVMConstStructInContext (self llvmContext, v list, 0), pos
+//[cf]
+//[of]:readConstantArray
+method readConstantArray (arrayType: * ArrayType, values: * ValueList, index: Size)
+
+	// ### Bug: limited to 256 !
+	var v = {LLVMValueArray} local
+
+	var cellType	= arrayType cellType
+	var arraySize	= arrayType arraySize
+	var i	= 0 s
+	var pos	= index
+	repeat
+		if arraySize == 0
+			if pos == values size
+				break
+			end
+		elsif i == arraySize
+			break
+		end
+		
+		var value, newPos = self readConstantValue (cellType, values, pos)
+		pos = newPos
+		v add (value)
+		i ++
+	end	
+	
+	// Can't use the type of cell here: the type of elements can be 
+	// anoymous structures and LLVM doesn't like to put anonymous
+	// structures in an array of named structures.
+	//
+	// We assume that the type of all elements are compatibles.
+	var type = (v size == 0) cond self llvmType (cellType) else LLVMTypeOf (v [0])
+	return LLVMConstArray	(type, v list), pos
+//[cf]
+//[of]:readConstantValue
+method readConstantValue (	type	: * Type, 
+	values	: * ValueList, 
+	index	: Size)
+
+	if type isStructure
+		return self readConstantStructure (type asStructure, values, index)
+	elsif type isArray
+		return self readConstantArray (type asArray, values, index)
+	end
+	
+	return	self llvmConstant (constant (values [index]), type), 
+		index + 1
+//[cf]
+
+//[of]:llvmType
+method llvmType (type: * Type)
+
+	var llvmType = type generator : LLVMTypeRef
+	if llvmType isNil
+	
+		switch type code
+		case t_pointer
+			var target	= type asPointer target
+			var llvmTarget	= self llvmType (target)
+			llvmType	= LLVMPointerType (llvmTarget, 0)
+		case t_array
+			var cellType	= type asArray cellType
+			var arraySize	= type asArray arraySize
+			var llvmCellType	= self llvmType (cellType)
+			llvmType	= LLVMArrayType (llvmCellType, arraySize)
+		case t_enumeration
+			llvmType = self llvmType (type asEnumeration storageType)
+		case t_function
+			llvmType = self llvmFunctionType (type asFunction)
+		else
+			assertFailure ("This type should have been already defined")
+		end
+
+		type generator = llvmType
+	end
+	
+	return llvmType
+//[cf]
+//[of]:llvmFunctionType
+method llvmFunctionType (functionType: * FunctionType)
+
+	// The input types
+	var argumentTypes = {LLVMTypeArray} local
+	functionType eachType do type
+		argumentTypes add (self llvmType (type))
+	end
+		
+	// The output types
+	var returnType = LLVMType nil
+	var size = functionType returnTypes size
+	if  size == 0
+		returnType = LLVMVoidType
+	elsif size == 1
+		returnType = self llvmType (functionType returnTypes first)
+	else
+		var t = {LLVMTypeArray} local
+		functionType eachReturnType do type
+			t add (self llvmType (type))
+		end
+		returnType = LLVMStructTypeInContext (self llvmContext, t list, 0) : LLVMTypeRef
+	end
+
+	return LLVMFunctionType (returnType, argumentTypes list, 0)
+//[cf]
+//[of]:llvmCallingConvention
+method llvmCallingConvention (cc: CallingConvention)
+
+	if cc == cc_stdcall
+		return LLVMX86StdcallCallConv
+	elsif cc == cc_cdecl
+		return LLVMCCallConv
+	else
+		return LLVMFastCallConv
+	end
+//[cf]
+//[of]:llvmReturnType
+method llvmReturnType (returnValues: * ValueList)
+
+	var size = returnValues size
+	if  size == 0
+		return LLVMVoidType
+	elsif size == 1
+		return self llvmType (type (returnValues [0]))
+	else
+		var t = {LLVMTypeArray} local
+		returnValues eachType do type
+			t add (self llvmType (type))
+		end
+		return LLVMStructTypeInContext (self llvmContext, t list, 0) : LLVMTypeRef
+	end
+//[cf]
+
+//[of]:fixupType
+//[c]The type may be ok for the language but not for LLVM:
+//[c]	* Pointer to nil type matches with anything but is mapped as i8*
+//[c]	* Pointer to any type is mapped as i8*
+//[c]	* Derived types 
+//[c]
+//[c]To fix this issue, we must convert the value to the expected value.
+//[c]
+method fixupType (	currentValue	: LLVMValueRef, 
+	currentType	: * Type, 
+	expectedType	: * Type)
+
+	// Same type: no change needed
+	if currentType == expectedType
+		return currentValue
+	end
+
+	// Numeric types
+	if currentType isIntegerOrChar
+		return self convert (currentValue, currentType, expectedType)
+	end
+
+	// Cast
+	return LLVMBuildBitCast (self builder, currentValue, self llvmType (expectedType), 'fixup')
+//[cf]
+//[of]:arrayToPointer
+method arrayToPointer (value: LLVMValueRef)
+
+	// We have a pointer to an array of something but we want a something*
+	// So let's get the address of the first element
+	return self generateGEP (value, self llvmZero32, self llvmZero32)
+//[cf]
+
+//[of]:generateGEP
+method generateGEP (base: LLVMValueRef, ...)
+
+	var indices = {[extra_size] LLVMValueRef}
+	var i = 0
+	each_extra do index
+		indices [i] = index
+		i ++
+	end
+	return LLVMBuildGEP (self builder, base, indices, extra_size, 'v')
+//[cf]
+
+//[of]:bind
+//[c]Changes the generator of an object after saving its current value
+//[c]
+method bind (object, value)
+
+	if self inlineContext notNil
+		self inlineContext add (object)
+	end
+	object generator = value
+//[cf]
+//[of]:bindArgument
+//[c]Bind an value to an argument
+//[c]
+//[c]This method is used when a function is inlined or a yield is expanded:
+//[c]the arguments will be evaluated with the passed values.
+//[c]
+//[c]Constants values are used as is while other are copied in temporary
+//[c]variables.
+//[c]
+//[c]The following values are supposed to be constants inside the expanded
+//[c]block:
+//[c]	* local variable
+//[c]	* arguments
+//[c]	* local objects
+//[c]	* global objects
+//[c]	* integer constants
+//[c]
+method bindArgument (a: *Argument, v: LLVMValueRef)
+
+	self bind (a, v)
+//[cf]
+//[cf]
+//[cf]
+//[of]:Constants
+const CodeGenerator	= LLVMGenerator
+const defaultOutputName	= "a.bc"
+//[cf]
+
+.private
+//[of]:Utils
+//[of]:LLVMTypeArray
+const max_types = 256
+
+struct LLVMTypeArray
+	attr index	: Size
+	attr types	: [max_types] LLVMTypeRef
+
+	method initialize
+		self index = 0
+	
+	method add (type: LLVMTypeRef)
+		self types [self index] = type
+		self index ++
+	
+	method _at (index: Size)
+		return self types [index]
+	
+	method size
+		return self index
+
+	method list
+		return self types, self size
+//[cf]
+//[of]:LLVMValueArray
+const max_values = 256
+
+struct LLVMValueArray
+	attr index	: Size
+	attr values	: [max_values] LLVMValueRef
+
+	method initialize
+		self index = 0
+	
+	method add (value: LLVMValueRef)
+		self values [self index] = value
+		self index ++
+	
+	method _at (index: Size)
+		return self values [index]
+	
+	method set (index: Size, value: LLVMValueRef)
+		self values [index] = value
+	
+	method size
+		return self index
+
+	method list
+		return self values, self size
+//[cf]
+
+//[of]:LLVMStructure
+//[of]:definition
+struct LLVMStructure
+
+	attr destructor	: LLVMValueRef
+	attr destructorScalar	: LLVMValueRef
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+method initialize (generator: *LLVMGenerator, structure: *StructureType)
+
+	self destructor	= nil
+	self destructorScalar	= nil
+//[cf]
+//[cf]
+//[of]:testing
+//[of]:hasDestructor
+method hasDestructor
+
+	return self destructor notNil
+//[cf]
+//[cf]
+//[cf]
+//[of]:AttributeIndex
+//[c]Stores additional information on attributes
+//[c]
+struct AttributeIndex
+	
+	attr index	: LLVMValueRef
+
+	method initialize (index: LLVMValueRef)
+	
+		self index = index
+//[cf]
+//[of]:LLVMBlockThenElse
+struct LLVMBlockThenElse
+	
+	attr thenBlock	: LLVMBasicBlockRef
+	attr elseBlock	: LLVMBasicBlockRef
+
+	method initialize (	thenBlock	: LLVMBasicBlockRef, 
+		elseBlock	: LLVMBasicBlockRef )
+	
+		self thenBlock = thenBlock
+		self elseBlock = elseBlock
+//[cf]
+
+//[of]:String8Dictionary
+const String8Dictionary = Dictionary (	String8, *GlobalString8, nil,
+	ref hash (String8),
+	ref isEqual (String8, String8))
+//[cf]
+//[of]:String16Dictionary
+const String16Dictionary = Dictionary (	String16, * GlobalString16, nil,
+	ref hash (String16),
+	ref isEqual (String16, String16))
+//[cf]
+//[of]:GlobalString8
+//[of]:definition
+struct GlobalString8
+	
+	attr value	: LLVMValueRef
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+method initialize
+
+	self value = nil
+//[cf]
+//[cf]
+//[cf]
+//[of]:GlobalString16
+//[of]:definition
+struct GlobalString16
+	
+	attr value	: LLVMValueRef
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+method initialize
+
+	self value = nil
+//[cf]
+//[cf]
+//[cf]
+
+//[of]:InlineContext
+//[of]:definition
+struct InlineContext
+
+	attr next	: *InlineContext	// Previous context
+	attr func	: *Function	// The function being inlined
+	attr endBlock	: LLVMBasicBlockRef	// The block after the inlining
+	attr phis	: *LLVMValueArray	// The values merged from returns inside the block
+	attr inlineBlock	: *InlineBlock	// The block to use on yield
+			
+	attr pool	: *MemoryPool	// Memory to allocate GeneratorValues
+	attr generators	: *GeneratorValue	// Save all generators set during inlining of the function
+//[cf]
+//[of]:initialize
+method initialize (pool: *MemoryPool)
+
+	self pool	= pool
+	self generators	= nil
+//[cf]
+//[of]:restore
+method restore
+
+	var g = self generators
+	while g notNil
+		g slot [] = g generator
+		g = g next
+	end
+//[cf]
+//[of]:add
+//[c]Save the generator property of an object to be restored later with the 
+//[c]restore method.
+//[c]
+//[c]REMARKS
+//[c]	This is a generic method working with any object having a 'generator' 
+//[c]	attribute: The address of the generator attribute is saved along with 
+//[c]	its value.
+//[c]
+method add (x)
+
+	var g = self pool allocateMemory (GeneratorValue)
+	g slot	= ((x : Bytes) + (#x) target @ generator) : *Pointer
+	g generator	= x generator
+	g next	= self generators
+	self generators	= g
+//[cf]
+//[cf]
+//[of]:GeneratorValue
+struct GeneratorValue
+
+	attr next	: *GeneratorValue
+	attr slot	: *Pointer
+	attr generator	: Pointer
+//[cf]
+//[cf]
+//[of]:Imports
+import "llvm/Core"
+import "llvm/Target"
+import "llvm/Initialization"
+import "llvm/BitWriter"
+
+import "syntax-tree"
+import "commons"
+import "core"
+//[cf]

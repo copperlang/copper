@@ -1,0 +1,29 @@
+struct Point
+
+	attr x : Int32
+	attr y : Int32
+
+struct Dummy : Point
+
+	attr c : Bool
+	attr a : Int32
+	attr b : Int32
+	
+function .c .cdecl main
+
+	if Point @ x <> 0
+		return 1
+	end
+	if Point @ y <> 4
+		return 2
+	end
+	if Dummy @ c <> 8
+		return 3
+	end
+	if Dummy @ a <> 12
+		return 4
+	end
+	if Dummy @ b <> 16
+		return 5
+	end
+	return 0

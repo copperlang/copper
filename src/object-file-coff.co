@@ -1,0 +1,1345 @@
+//[of]:ObjectFile
+//[of]:definition
+struct ObjectFile
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+method initialize (pool: *MemoryPool)
+
+	self pool	= pool
+	self dataBuffer	= pool allocateArray (Byte, 65536)
+	
+	self _textSection _initialize (	self pool,
+		1,
+		text_section_name,
+	 	IMAGE_SCN_CNT_CODE	|
+		IMAGE_SCN_ALIGN_4BYTES	|
+		IMAGE_SCN_MEM_EXECUTE	|
+		IMAGE_SCN_MEM_READ,
+		0x90)
+	self _dataSection _initialize (	self pool,
+		2,
+		data_section_name,
+		IMAGE_SCN_CNT_INITIALIZED_DATA	|
+		IMAGE_SCN_ALIGN_16BYTES	|
+		IMAGE_SCN_MEM_READ	|
+		IMAGE_SCN_MEM_WRITE,
+		0)
+		
+	self _strings initialize
+	self _symbols initialize (self pool, self _strings)
+	self constantStrings8 initialize
+	self constantStrings16 initialize
+//[cf]
+//[of]:release
+method release
+
+	self _symbols release
+	self constantStrings8 release
+	self constantStrings16 release
+//[cf]
+//[cf]
+//[of]:accessing
+//[of]:firstByte
+//[c]The first position (to compute relative offset)
+//[c]
+attr firstByte	: Bytes
+//[cf]
+//[of]:nextByte
+//[c]The write position in the code buffer.
+//[c]
+attr nextByte	: Bytes
+//[cf]
+//[of]:virtualAddress
+//[c]Returns the current virtual address of the next byte to be written
+//[c]
+method virtualAddress
+
+	return self object _offset + (self nextByte - self firstByte)
+//[cf]
+
+//[of]:textSection
+method textSection
+
+	return self _textSection
+//[cf]
+//[of]:dataSection
+method dataSection
+
+	return self _dataSection
+//[cf]
+//[of]:getString8
+method getString8 (string: String8)
+
+	var object = self constantStrings8 [string]
+	if object isNil
+		object = self pool new (ObjectStatic, self _symbols)
+		self dataSection beginObject (object, align_byte)
+		self dataSection endObject (object, string : Bytes, (string size + 1) * Char8 size)
+		object _updateSymbol
+		
+		self constantStrings8 add (string, object)
+	end
+	
+	return object
+//[cf]
+//[of]:getString16
+method getString16 (string: String16)
+
+	var object = self constantStrings16 [string]
+	if object isNil
+		object = self pool new (ObjectStatic, self _symbols)
+		self dataSection beginObject (object, align_word)
+		self dataSection endObject (object, string:Bytes, (string size + 1) * Char16 size)
+		object _updateSymbol
+		
+		self constantStrings16 add (string, object)
+	end
+	
+	return object
+//[cf]
+//[cf]
+//[of]:creating
+//[of]:createData
+//[c]Creates a data object
+//[c]
+//[c]REMARKS
+//[c]	The object is not added to a section yet.
+//[c]
+method createData (code: Bytes, size: Size)
+
+	return self pool new (ObjectData, code, size)
+//[cf]
+//[of]:createStatic
+//[c]Creates a static object
+//[c]
+//[c]REMARKS
+//[c]	The object is not added to a section yet.
+//[c]
+method createStatic
+
+	return self pool new (ObjectStatic, self _symbols)
+//[cf]
+//[of]:createFunction
+//[c]Creates a new function
+//[c]
+//[c]ARGUMENTS
+//[c]	f	-- the function
+//[c]	section	-- the section
+//[c]	debug	-- true if debug object
+//[c]
+//[c]REMARKS
+//[c]	The object is not added to any section yet but symbols can be added to 
+//[c]	the symbol table.
+//[c]
+method createFunction (	f	: *Function, 
+	section	: *ObjectSection,
+	debug	: Bool)
+
+	var obj = self pool new (ObjectFunction, f, self, section, debug)
+	return obj
+//[cf]
+//[of]:createFunctionSymbol
+//[c]Creates a new function symbol
+//[c]
+//[c]ARGUMENTS
+//[c]	name	-- the name of the function
+//[c]
+//[c]RETURN VALUES
+//[c]	The symbol
+//[c]
+//[c]REMARKS
+//[c]	The symbol is added to the symbol table.
+//[c]
+method createFunctionSymbol (f: *ExternFunction)
+
+	var symbol = self pool allocateMemory (ObjectSymbol)
+	symbol _initializeFunction (self, self _symbols generateFunctionName (f))
+	return symbol
+//[cf]
+//[cf]
+//[of]:dumping
+//[of]:dump
+method dump (filename: String)
+
+//[c]
+//[c]	Compute the offset of each element
+//[c]	
+	var offset = 0 s
+	offset += IMAGE_FILE_HEADER size
+	offset += IMAGE_SECTION_HEADER size	// .text section header
+	offset += IMAGE_SECTION_HEADER size	// .data section header
+
+	offset = self textSection _finalize (offset)
+	offset = self dataSection _finalize (offset)
+	
+	var offsetSymbolTable = offset
+	offset += self _symbols size * IMAGE_SYMBOL_size
+
+	offset += self _strings sizeOfRawData
+	var bufferSize	= offset
+
+//[c]
+	var buffer = Byte allocateArray (bufferSize)
+	
+	var p = buffer
+	p = self dumpFileHeader (p, offsetSymbolTable)
+	p = self dumpSectionHeader (p, self textSection)
+	p = self dumpSectionHeader (p, self dataSection)
+	p = self dumpSection (p, self textSection)
+	p = self dumpSection (p, self dataSection)
+	p = self dumpSymbolTable (p)
+	p = self dumpStringTable (p)
+
+	var saved = self saveBuffer (filename, buffer, bufferSize)
+	Byte freeArray (buffer, bufferSize)
+	return saved
+//[cf]
+//[cf]
+//[of]:write primitives
+//[of]:beginObject
+method beginObject (	object	: *ObjectData,
+	section	: *ObjectSection,
+	align	: Size)
+
+	self section	= section
+	self object	= object
+	self firstByte	= self dataBuffer
+	self nextByte	= self dataBuffer
+
+	section beginObject (object, align)
+//[cf]
+//[of]:endObject
+method endObject (object: *ObjectData)
+
+	var size	= self nextByte - self firstByte
+	var buffer	= self pool allocateArray (Byte, size)
+	memoryCopy (buffer, self firstByte, size)
+
+	self section endObject (object, buffer, size)
+	object _updateSymbol
+//[cf]
+
+//[of]:allocateBuffer
+method allocateBuffer (T, size: Size)
+
+	var buffer = self nextByte : *[] T
+	self nextByte += T size * size
+	return buffer
+//[cf]
+//[of]:writeRelativeReference
+//[c]Writes a relative reference (for function calls)
+//[c]
+method writeRelativeReference (	base	: *ObjectSymbol,
+	offset	: Offset)
+
+	// Add relocation
+	var fromObject	= self object
+	var fromOffset	= fromObject _offset + (self nextByte - self firstByte)
+	self section addRelativeRelocation (fromOffset, base)
+
+	// Write empty offset
+	self writeDword (offset)
+//[cf]
+//[of]:writeReference
+//[c]Writes a global reference
+//[c]
+method writeReference (	symbol	: *ObjectSymbol,
+	offset	: Offset)
+
+	// Add relocation
+	var fromObject	= self object
+	var fromOffset	= self nextByte - self firstByte
+	self section addDirectRelocation (fromObject, fromOffset, symbol)
+
+	// Write empty offset
+	self writeDword (offset)
+//[cf]
+//[of]:writeBytes
+method writeBytes (buffer: Bytes, size: Size)
+
+	self nextByte memoryCopy (buffer, size)
+	self nextByte += size
+//[cf]
+//[of]:writeByte
+method writeByte (x : Byte)
+
+	return self write (x)
+//[cf]
+//[of]:writeWord
+method writeWord (x : Unsigned16)
+
+	return self write (x)
+//[cf]
+//[of]:writeDword
+method writeDword (x : Unsigned32)
+
+	return self write (x)
+//[cf]
+//[of]:writeQword
+method writeQword (x : Unsigned64)
+
+	return self write (x)
+//[cf]
+//[of]:write
+method write (x)
+	
+	// Get the current address
+	var p = self nextByte : *[] #x
+	
+	// Store value
+	p [] = x
+	
+	// Advance pointer
+	p ++
+	
+	// Save pointer
+	self nextByte = p : Bytes
+//[cf]
+//[cf]
+
+//[c]COFF Only
+//[of]:attributes
+attr _textSection	: ObjectSection	// The text section
+attr _dataSection	: ObjectSection	// The data section			
+attr _symbols	: COFFSymbolTable	// The symbol table
+attr _strings	: COFFStringTable	// The strings
+//[cf]
+
+:private
+//[of]:attributes
+attr pool	: *MemoryPool	// The memory pool to store child elements
+		
+attr constantStrings8	: String8Dictionary	// The table of global strings (8 bits)
+attr constantStrings16	: String16Dictionary	// The table of global strings (16 bits)
+		
+// Writer		
+attr section	: *ObjectSection	// Writing in this section
+attr object	: *ObjectData	// Writing in this object
+attr dataBuffer	: Bytes	// Temporary buffer to write structures and arrays
+//[cf]
+//[of]:dumping
+//[of]:dumpFileHeader
+method dumpFileHeader (	p	: Bytes, 
+	offsetSymbolTable	: Unsigned32)
+
+	var header = p : * IMAGE_FILE_HEADER
+	
+	header Machine	= IMAGE_FILE_MACHINE_I386
+	header NumberOfSections	= section_count
+	header TimeDateStamp	= 0
+	header PointerToSymbolTable	= offsetSymbolTable
+	header NumberOfSymbols	= self _symbols size
+	header SizeOfOptionalHeader	= 0
+	header Characteristics	=	IMAGE_FILE_LINE_NUMS_STRIPPED	|
+			IMAGE_FILE_BYTES_REVERSED_LO	|
+			IMAGE_FILE_32BIT_MACHINE
+
+	return p + IMAGE_FILE_HEADER size
+//[cf]
+//[of]:dumpSectionHeader
+method dumpSectionHeader (	p	: Bytes, 
+	section	: *ObjectSection )
+
+	var header = p : * IMAGE_SECTION_HEADER
+	
+	header Name	memoryCopy (section _name, IMAGE_SIZEOF_SHORT_NAME)
+	header VirtualSize	= section _virtualSize
+	header VirtualAddress	= section _virtualAddress
+	header SizeOfRawData	= section _sizeOfRawData
+	header PointerToRawData	= section _offsetRawData
+	header PointerToRelocations	= section _offsetRelocations
+	header PointerToLineNumbers	= section _offsetLineNumbers
+	header NumberOfRelocations	= section _numberOfRelocations
+	header NumberOfLineNumbers	= section _numberOfLineNumbers
+	header Characteristics	= section _characteristics
+
+	return p + IMAGE_SECTION_HEADER size
+//[cf]
+//[of]:dumpSection
+method dumpSection (	start	: Bytes,
+	section	: *ObjectSection)
+
+	var p = start
+	
+	// Write raw data
+	section _objects each do object
+		var next = start + object _offset
+		var byte = section _paddingByte
+		while p <> next
+			p [] = byte
+			p ++
+		end
+		p = self dumpObject (p, object)
+	end
+	p = start + section _sizeOfRawData
+	
+	// Write relocations
+	var rb = section _relocations buffer
+	var rs = section _relocations size * IMAGE_RELOCATION_size
+	p memoryCopy (rb, rs)
+	p += rs
+
+	// Write line numbers
+	if section _hasLineNumbers
+		var b = section _lineNumbers buffer
+		var s = section _lineNumbers size * IMAGE_LINENUMBER_size
+		p memoryCopy (b, s)
+		p += s
+	end
+	
+	return p
+//[cf]
+//[of]:dumpObject
+method dumpObject (	base	: Bytes,
+	object	: *ObjectData )
+
+	memoryCopy (base, object buffer, object size)
+	return base + object size
+//[cf]
+//[of]:dumpSymbolTable
+method dumpSymbolTable (start: Bytes)
+
+	var p = start
+	self _symbols each do symbol
+		// Fixup pointer to line numbers
+		var section = symbol _lineNumberSection
+		if section notNil
+			symbol _auxSymbolFunction PointerToLinenumber	+= section _offsetLineNumbers
+		end
+	
+		p memoryCopy (symbol _imageSymbol, IMAGE_SYMBOL_size)
+		p += IMAGE_SYMBOL_size
+	end
+	return p
+//[cf]
+//[of]:dumpStringTable
+method dumpStringTable (start: Bytes)
+
+	var p = start
+	
+	var q = p : *[] Unsigned32
+	q[] = self _strings sizeOfRawData
+	p += Unsigned32 size
+	
+	var b = self _strings base
+	var s = self _strings size
+	p memoryCopy (b, s)
+	p += s
+
+	return p
+//[cf]
+//[of]:saveBuffer
+method saveBuffer (outFilename: String16, buffer: Bytes, size: Size)
+
+	var file = outFilename openWrite
+	if file isNil
+		return false
+	end
+	var written = file write (buffer, size)
+	file close
+	if written == 0
+		return false
+	end
+
+	return true
+//[cf]
+//[cf]
+//[cf]
+//[of]:ObjectSection
+//[of]:definition
+struct ObjectSection : ObjectSection CollectionElement
+//[cf]
+//[of]:accessing
+//[of]:lineNumberOffset
+method lineNumberOffset
+
+	if self _lineNumbers isNil
+		self _lineNumbers = self _pool new (COFFLineBuffer)
+	end
+	
+	return self _lineNumbers offset
+//[cf]
+//[cf]
+//[of]:adding - removing
+//[of]:addObject
+//[c]Adds an object to the section
+//[c]
+//[c]ARGUMENTS
+//[c]	object	--	the object associated to this data (its address is saved)
+//[c]
+method addObject (object: *ObjectData, align: Size)
+
+	self beginObject (object, align)
+	
+	// Update the size of the section	
+	self _size = object _offset + object size
+//[cf]
+//[of]:beginObject
+//[c]Starts adding an object to the section: the object is assigned an offset
+//[c]
+//[c]ARGUMENTS
+//[c]	object	--	the object associated to this data (its address is saved)
+//[c]
+//[c]REMARKS
+//[c]	No other object can be added to the section until this one is completed.
+//[c]
+method beginObject (object: *ObjectData, align: Size)
+
+	// Align the offset
+	var offset	= self _size
+	var mask	= align - 1
+	offset += mask
+	offset &= not mask
+
+	// Set the location of the object
+	object _section	= self _number
+	object _offset	= offset
+
+	self _objects add (object)
+//[cf]
+//[of]:endObject
+//[c]Completes the insertion of an object into the section
+//[c]
+//[c]	The size of the object should be set, so the size of the section
+//[c]	can be updated.
+//[c]
+//[c]ARGUMENTS
+//[c]	object	--	the object associated to this data (its address is saved)
+//[c]
+method endObject (object: *ObjectData, buffer: Bytes, size: Size)
+
+	object buffer	= buffer
+	object size	= size
+	
+	// Update the size of the section	
+	self _size = object _offset + size
+//[cf]
+
+//[of]:addDirectRelocation
+//[c]Adds a relocation
+//[c]
+//[c]	The offset is relative to the given object being added, so the
+//[c]	RVA is this offset + the offset of the o
+//[c]
+method addDirectRelocation (object: *ObjectData, offset: Unsigned32, symbol: *ObjectSymbol)
+
+	self _relocations add (object _offset + offset, symbol, IMAGE_REL_I386_DIR32)
+//[cf]
+//[of]:addRelativeRelocation
+//[c]Adds a relocation
+//[c]
+//[c]	The offset is relative to the current object being added, so the
+//[c]	RVA is this offset + the offset of the o
+//[c]
+method addRelativeRelocation (offset: Unsigned32, symbol: *ObjectSymbol)
+
+	self _relocations add (offset, symbol, IMAGE_REL_I386_REL32)
+//[cf]
+//[of]:beginLineNumber
+method beginLineNumber (object: *ObjectData)
+
+	self addLineNumber (object symbol _number, 0)
+//[cf]
+//[of]:addLineNumber
+method addLineNumber (address: Unsigned32, line: Unsigned16)
+
+	if self _lineNumbers isNil
+		self _lineNumbers = self _pool new (COFFLineBuffer)
+	end
+
+	self _lineNumbers add (address, line)
+//[cf]
+//[cf]
+
+//[c]COFF Only
+//[of]:attributes
+attr _pool	: * MemoryPool
+attr _number	: SectionNumber	
+attr _name	: *[] Char8
+	
+attr _virtualSize	: Unsigned32
+attr _virtualAddress	: Unsigned32
+attr _size	: Unsigned32
+attr _offsetRawData	: Unsigned32
+attr _offsetRelocations	: Unsigned32
+attr _offsetLineNumbers	: Unsigned32
+attr _characteristics	: Unsigned32
+	
+attr _objects	: ObjectData Collection	// All objects of the section
+attr _relocations	: *COFFRelocationBuffer	// The buffer of relocations
+attr _lineNumbers	: *COFFLineBuffer	// The buffer of line numbers
+attr _paddingByte	: Byte	// Fill gaps with this value
+//[cf]
+//[of]:initialize - release
+//[of]:_initialize
+method _initialize (	pool	: *MemoryPool,
+	number	: SectionNumber,
+	name	: *[] Char8,
+	characteristics	: Unsigned32,
+	paddingByte	: Byte)
+
+	self _pool	= pool
+	self _number	= number
+	self _name	= name
+	self _virtualSize	= 0
+	self _virtualAddress	= 0
+	self _size	= 0
+	self _offsetRawData	= 0
+	self _offsetRelocations	= 0
+	self _offsetLineNumbers	= 0
+	self _characteristics	= characteristics
+	self _relocations	= pool new (COFFRelocationBuffer)
+	self _lineNumbers	= nil
+	self _paddingByte	= paddingByte
+
+	self _relocations initialize
+	self _objects initialize
+//[cf]
+//[of]:_finalize
+method _finalize (offset : Unsigned32)
+
+	var p = offset
+	
+	// offsetRawData
+	self _offsetRawData = p
+	p += self _sizeOfRawData
+	
+	// offsetRelocations
+	var n = self _relocations size * IMAGE_RELOCATION_size
+	if n > 0
+		self _offsetRelocations = p
+		p += n
+	end
+	
+	// offsetLineNumbers
+	if self _lineNumbers notNil
+		var m	= self _lineNumbers size * IMAGE_LINENUMBER_size
+		if m > 0
+			self _offsetLineNumbers = p
+			p += m
+		end
+	end
+	
+	return p
+//[cf]
+//[cf]
+//[of]:accessing
+//[of]:_sizeOfRawData
+method _sizeOfRawData
+
+	var s = self _size
+	var align	= 4 s
+	var mask	= align - 1
+	s += mask
+	s &= not mask
+	return s
+//[cf]
+//[of]:_numberOfRelocations
+method _numberOfRelocations
+	
+	return self _relocations size	: Unsigned16
+//[cf]
+//[of]:_numberOfLineNumbers
+method _numberOfLineNumbers
+
+	if not self _hasLineNumbers
+		return 0 : Unsigned16
+	end
+	
+	return self _lineNumbers size	: Unsigned16
+//[cf]
+//[cf]
+//[of]:testing
+//[of]:_hasLineNumbers
+method _hasLineNumbers
+
+	return self _lineNumbers notNil
+//[cf]
+//[cf]
+//[cf]
+//[of]:ObjectData
+//[of]:definition
+//[c]Base class of all objects having an address:
+//[c]	- function, 
+//[c]	- variable, 
+//[c]	- constant structure
+//[c]	- constant array
+//[c]	- constant strings
+//[c]
+//[c]An object is a piece of data inserted into a section with an optional 
+//[c]symbol to reference it.
+//[c]
+//[c]Any object that can be referenced must have a symbol. Only builtin
+//[c]functions shouldn't require a symbol.
+//[c]
+//[c]All these objects can be relocated
+//[c]
+struct ObjectData : ObjectData CollectionElement
+
+	attr buffer	: Bytes	// The data
+	attr size	: Size	// The size of data
+	attr symbol	: ObjectSymbol	// Any object that can be referenced must have a symbol
+			
+	attr _section	: SectionNumber	// The section of this object
+	attr _offset	: Offset	// The relative position of the object in the section
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+//[c]Initialize a new object
+//[c]
+method initialize
+
+	self buffer	= nil
+	self size	= 0
+	self _section	= 0
+	self _offset	= 0
+
+method initialize (code: Bytes, size: Size)
+
+	self buffer	= code
+	self size	= size
+	self _section	= 0
+	self _offset	= 0
+//[cf]
+//[cf]
+//[of]:converting
+//[of]:relative
+method relative (	fromObject	: *ObjectData,
+	fromOffset	: Offset)
+
+	var from = fromOffset + fromObject _offset
+	return self _offset - (from + 4)
+//[cf]
+//[cf]
+
+//[c]COFF Only
+//[of]:updating
+//[of]:_updateSymbol
+method _updateSymbol
+
+	var s	= self symbol _imageSymbol
+	s Value	= self _offset
+	s SectionNumber	= self _section
+//[cf]
+//[cf]
+//[cf]
+//[of]:ObjectStatic
+//[of]:definition
+struct ObjectStatic : ObjectData
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+method initialize (symbols: *COFFSymbolTable)
+
+	self super initialize
+	self symbol _initializeStatic (symbols, 'S')
+//[cf]
+//[cf]
+//[cf]
+//[of]:ObjectFunction
+//[of]:definition
+struct ObjectFunction : ObjectData
+//[cf]
+//[of]:updating
+//[of]:finalize
+//[c]Updates the function symbols
+//[c]
+//[c]	Once the function is fully built, we can complete its associated symbol
+//[c]	(and auxiliary debug symbols) with all missing information.
+//[c]
+method finalize (	debug	: Bool, 
+	firstLineOffset	: Offset,
+	lineNumberCount	: Size,
+	firstLineNumber	: LineNumber,
+	lastLineNumber	: LineNumber)
+
+	if debug
+		var aux	= self _auxSymbol _auxSymbolFunction
+		aux TotalSize	= self size
+		aux PointerToLinenumber	= firstLineOffset
+			
+		var bf	= self _bfSymbol _imageSymbol
+		bf Value	= self _offset	// unused
+		bf SectionNumber	= self _section
+			
+		var bf1	= self _bfSymbol1 _auxSymbolXF
+		bf1 Linenumber	= firstLineNumber : Unsigned16
+			
+		var lf	= self _lfSymbol _imageSymbol
+		lf Value	= lineNumberCount
+		lf SectionNumber	= self _section
+			
+		var ef	= self _efSymbol _imageSymbol
+		ef Value	= self _offset	+ self size // end offset
+		ef SectionNumber	= self _section
+			
+		var ef1	= self _efSymbol1 _auxSymbolXF
+		ef1 Linenumber	= lastLineNumber : Unsigned16
+	end
+//[cf]
+//[cf]
+
+//[c]COFF Only
+//[of]:attributes
+attr _auxSymbol	: ObjectSymbol	// The aux symbol. This attribute is used to link the function symbols together.
+attr _bfSymbol	: ObjectSymbol	// The last .bf symbol.
+attr _bfSymbol1	: ObjectSymbol	// The last .bf aux symbol. This attribute is used to link the .bf symbols together.
+attr _lfSymbol	: ObjectSymbol	// The last .bf symbol.
+attr _efSymbol	: ObjectSymbol	// The last .bf symbol.
+attr _efSymbol1	: ObjectSymbol	// The last .bf aux symbol. This attribute is used to link the .bf symbols together.
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+method initialize (	f	: *Function, 
+	object	: *ObjectFile,
+	section	: *ObjectSection,
+	debug	: Bool)
+
+	self super initialize
+
+	// Create a .file symbol before the function symbol if the file
+	// differs from the one of the previous function.
+	if debug
+		object _symbols setCurrentLocation (f module)
+	end
+
+	self symbol _initializeFunction (object, object _symbols generateFunctionName (f))
+
+	if debug
+		var symbols = object _symbols
+		self symbol _imageSymbol NumberOfAuxSymbols ++
+		
+		self _auxSymbol	_initializeAux	(symbols, section)
+		self _bfSymbol	_initializeBF	(symbols)
+		self _bfSymbol1	_initializeXF1	(symbols)
+		self _lfSymbol	_initializeLF	(symbols)
+		self _efSymbol	_initializeEF	(symbols)
+		self _efSymbol1	_initializeXF1	(symbols)
+
+		// Link the .bf symbol to the aux symbol
+		self _auxSymbol _setTagIndex	(self _bfSymbol _number)
+		
+		// Link symbols
+		var lastFunction = symbols lastFunction
+		if lastFunction notNil
+			var last = lastFunction
+			// Link functions
+			last _auxSymbol _auxSymbolFunction PointerToNextFunction = self symbol _number
+			// Link .bf symbols
+			last _bfSymbol1 _auxSymbolXF PointerToNextFunction = self _bfSymbol _number
+		end
+		// This new function symbol becomes the last one
+		symbols lastFunction = self
+	end
+//[cf]
+//[cf]
+//[cf]
+//[of]:ObjectSymbol
+//[of]:definition
+struct ObjectSymbol : ObjectSymbol CollectionElement
+//[cf]
+//[of]:output
+//[of]:addToStringBuffer
+method addToStringBuffer (sb: *StringBuffer)
+
+	sb << self _number
+//[cf]
+//[cf]
+
+//[c]COFF Only
+//[of]:attributes
+attr _number	: SymbolNumber	// The symbol number
+attr _lineNumberSection	: *ObjectSection	// If not nil: the symbol is an auxiliary with a pointer 
+		// to line numbers that must be fixed.
+attr _imageSymbol	: IMAGE_SYMBOL	// The raw data
+//[cf]
+//[of]:initialize - release
+//[of]:_initializeFunction
+method _initializeFunction (	object	: *ObjectFile,
+	name	: String8)
+
+	self _initializeStandard (	object _symbols, 
+		name,
+		DT_FUNCTION,
+		IMAGE_SYM_CLASS_EXTERNAL)
+//[cf]
+//[of]:_initializeStatic
+method _initializeStatic (	symbols	: *COFFSymbolTable,
+	baseName	: String8)
+
+	self _initializeStandard (	symbols,
+		symbols generateUniqueName (baseName),
+		0,
+		IMAGE_SYM_CLASS_STATIC)
+//[cf]
+//[of]:_initializeStandard
+method _initializeStandard (	symbols	: *COFFSymbolTable,
+	name	: String8,
+	type	: Unsigned16,
+	storageClass	: Unsigned8)
+
+	self initialize (symbols)
+	
+	var s = self _imageSymbol
+	symbols setSymbolName (s, name)
+	
+	s Value	= 0
+	s SectionNumber	= 0
+	s Type	= type
+	s StorageClass	= storageClass
+	s NumberOfAuxSymbols	= 0
+//[cf]
+//[of]:_initializeAux
+method _initializeAux (	symbols	: *COFFSymbolTable,
+	section	: *ObjectSection)
+
+	self initialize (symbols)
+
+	var aux = self _auxSymbolFunction
+	aux TagIndex	= 0
+	aux TotalSize	= 0
+	aux PointerToLinenumber	= 0
+	aux PointerToNextFunction	= 0
+		
+	// The pointer to line number must be fixed later (when the position of
+	// line numbers in the file is known)
+	self _lineNumberSection = section
+//[cf]
+//[of]:_initializeBF
+method _initializeBF (symbols	: *COFFSymbolTable)
+
+	self initialize (symbols)
+	
+	var s = self _imageSymbol
+	s Name	memoryCopy (bf_symbol, IMAGE_SIZEOF_SHORT_NAME)
+	s Value	= 0
+	s SectionNumber	= 0
+	s Type	= 0
+	s StorageClass	= IMAGE_SYM_CLASS_FUNCTION
+	s NumberOfAuxSymbols	= 1
+//[cf]
+//[of]:_initializeLF
+method _initializeLF (symbols	: *COFFSymbolTable)
+
+	self initialize (symbols)
+	
+	var s = self _imageSymbol
+	s Name	memoryCopy (lf_symbol, IMAGE_SIZEOF_SHORT_NAME)
+	s Value	= 0
+	s SectionNumber	= 0
+	s Type	= 0
+	s StorageClass	= IMAGE_SYM_CLASS_FUNCTION
+	s NumberOfAuxSymbols	= 0
+//[cf]
+//[of]:_initializeEF
+method _initializeEF (symbols	: *COFFSymbolTable)
+
+	self initialize (symbols)
+	
+	var s = self _imageSymbol
+	s Name	memoryCopy (ef_symbol, IMAGE_SIZEOF_SHORT_NAME)
+	s Value	= 0
+	s SectionNumber	= 0
+	s Type	= 0
+	s StorageClass	= IMAGE_SYM_CLASS_FUNCTION
+	s NumberOfAuxSymbols	= 1
+//[cf]
+//[of]:_initializeXF1
+method _initializeXF1 (symbols	: *COFFSymbolTable)
+
+	self initialize (symbols)
+	
+	var s = self _auxSymbolXF
+	s unused1	= 0
+	s Linenumber	= 0
+	s unused2	= 0
+	s unused3	= 0
+	s PointerToNextFunction	= 0
+	s unused4	= 0
+//[cf]
+//[of]:initialize
+method initialize (symbols	: *COFFSymbolTable)
+
+	self _number	= symbols size toSymbolNumber
+	self _lineNumberSection	= nil
+
+	symbols add (self)
+//[cf]
+//[cf]
+//[of]:accessing
+//[of]:_auxSymbolFunction
+method _auxSymbolFunction
+
+	return self _imageSymbol : * IMAGE_AUX_SYMBOL_FUNCTION
+//[cf]
+//[of]:_auxSymbolXF
+method _auxSymbolXF
+
+	return self _imageSymbol : * IMAGE_AUX_SYMBOL_BF_EF
+//[cf]
+
+//[of]:_setTagIndex
+method _setTagIndex (tagIndex: Unsigned32)
+
+	self _auxSymbolFunction TagIndex	= tagIndex
+//[cf]
+//[cf]
+//[cf]
+
+.private
+//[of]:COFFSymbolTable
+//[of]:definition
+struct COFFSymbolTable
+
+	attr pool	: *MemoryPool	// The pool to store new symbols
+	attr symbols	: ObjectSymbol Collection	// The symbol table
+	attr strings	: *COFFStringTable	// The string table to store long strings
+	attr nameBuffer	: MemoryBuffer	// Buffer to generate the name of symbols
+	attr nameIndex	: Unsigned	// Suffix to generate a unique symbol
+	attr location	: *Module	// When the location changes, a .file symbol is inserted into the symbol table.
+	attr fileSymbol	: *ObjectSymbol	// The last .file symbol. This attribute is used to link the .file symbols together.
+	attr lastFunction	: *ObjectFunction	// The last function. This attribute is used to link the functions symbols together.
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+method initialize (pool: *MemoryPool, strings: *COFFStringTable)
+
+	self pool	= pool
+	self strings	= strings
+	self nameIndex	= 1
+	self location	= nil
+	self fileSymbol	= nil
+	self lastFunction	= nil
+	self nameBuffer	initialize
+	self symbols	initialize
+//[cf]
+//[of]:release
+method release
+
+	self nameBuffer release
+//[cf]
+//[cf]
+//[of]:adding - removing
+//[of]:add
+method add (symbol: *ObjectSymbol)
+
+	self symbols add (symbol)
+//[cf]
+//[cf]
+//[of]:accessing
+//[of]:setCurrentLocation
+method setCurrentLocation (location: * Module)
+
+	// Do nothing if the location is the same as the current one
+	if location == self location
+		return
+	end
+
+	// The new location becomes the current one	
+	self location = location
+
+	// Create a .file symbol
+	var symbol	= self newSymbol
+	var imageSymbol	= symbol _imageSymbol
+	
+	imageSymbol Name	memoryCopy (file_symbol, IMAGE_SIZEOF_SHORT_NAME)
+	imageSymbol Value	= 0	// Next symbol
+	imageSymbol SectionNumber	= IMAGE_SYM_DEBUG
+	imageSymbol Type	= 0
+	imageSymbol StorageClass	= IMAGE_SYM_CLASS_FILE
+	imageSymbol NumberOfAuxSymbols	= 0
+	
+	// Link the previous .file to this one
+	if self fileSymbol notNil
+		self fileSymbol _imageSymbol Value = symbol _number
+	end
+	
+	// The new symbol becomes the current .file
+	self fileSymbol = symbol
+
+	// Create additional symbol to store the filename
+	var name	= location filename asciiString
+	var n	= name
+	var nameLimit	= name + name size + 1
+	while n <> nameLimit
+		imageSymbol NumberOfAuxSymbols ++
+		var aux	= self newSymbol
+		var p	= aux _imageSymbol : String8
+		var limit	= p + IMAGE_SYMBOL_size
+		while n <> nameLimit and p <> limit
+			p [] = n []
+			p ++
+			n ++
+		end
+	end
+	name delete
+//[cf]
+//[of]:size
+method size
+
+	return self symbols size
+//[cf]
+//[cf]
+//[of]:enumerating
+//[of]:each
+method each
+
+	self symbols each do symbol
+		yield symbol
+	end
+//[cf]
+//[cf]
+
+//[of]:creating
+//[of]:newSymbol
+//[c]Creates a COFF symbol and add it to the symbol table
+//[c]
+method newSymbol
+
+	return self pool new (ObjectSymbol, self)
+//[cf]
+//[cf]
+//[of]:utils
+//[of]:generateUniqueName
+//[c]Generates a unique name for the symbol table based on the given string
+//[c]
+method generateUniqueName (s: String8)
+
+	var nameBuffer = self nameBuffer
+	nameBuffer removeAll
+	nameBuffer addChar8 ($@)
+	nameBuffer addMemoryBlock (s, s size)
+	nameBuffer addUnsignedToAnsi (self nameIndex)
+	nameBuffer addChar8 (0)
+
+	self nameIndex ++
+
+	return nameBuffer string8
+//[cf]
+//[of]:generateFunctionName
+method generateFunctionName (f)
+
+	var buffer = self nameBuffer
+	buffer removeAll
+	buffer addChar8 ($_)
+	var name = f publicName
+	buffer addMemoryBlock (name, name size)
+	
+	if f callingConvention <> cc_cdecl
+		var size = 0 s
+		f eachArgumentType do type
+			size += max (4 s, type size)
+		end
+		buffer addChar8 ($@)
+		buffer addUnsignedToAnsi (size)
+	end
+	buffer addChar8 (0)
+
+	return buffer string8
+//[cf]
+//[of]:setSymbolName
+method setSymbolName (	imageSymbol	: *IMAGE_SYMBOL,
+	name	: String8)
+
+	var size	= name size
+	if size <= IMAGE_SIZEOF_SHORT_NAME
+		var p	= imageSymbol Name
+		var limit	= p + IMAGE_SIZEOF_SHORT_NAME
+		var s	= name
+		repeat
+			var c = s []
+			if c isNul
+				break
+			end
+			p [] = c
+			p ++
+			s ++
+		end
+		while p <> limit
+			p [] = char_nul
+			p ++
+		end
+	else
+		var p = imageSymbol : * IMAGE_SYMBOL_LONG
+		p Zeroes	= 0
+		p Offset	= self strings add (name)
+	end
+//[cf]
+//[cf]
+//[cf]
+//[of]:COFFStringTable
+//[of]:definition
+const size_of_size_of_string_table	= 4
+
+struct COFFStringTable
+
+	attr buffer	: MemoryBuffer
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+method initialize
+	
+	self buffer initialize
+//[cf]
+//[of]:release
+method release
+
+	self buffer release
+//[cf]
+//[cf]
+//[of]:accessing
+//[of]:base
+method base
+
+	return self buffer base
+//[cf]
+//[of]:size
+method size
+
+	return self buffer size
+//[cf]
+//[of]:sizeOfRawData
+method sizeOfRawData
+
+	return self size + size_of_size_of_string_table
+//[cf]
+//[cf]
+//[of]:adding - removing
+//[of]:add
+method add (s: String8)
+
+	var offset = self buffer size
+	self buffer addMemoryBlock (s, s size + 1)
+	return offset + size_of_size_of_string_table
+//[cf]
+//[cf]
+//[cf]
+//[of]:COFFLineBuffer
+//[of]:definition
+// The number of line number in the section header is limited to 16 bits.
+// A better implementation should be to use multiple .text sections
+// And write line numbers in chunks.
+//
+// 65536 * 6 = 384Kb
+const max_line_numbers	= 65535	
+
+struct COFFLineBuffer
+
+	attr size	: Size
+	attr pointer	: Bytes
+	attr buffer	: [IMAGE_LINENUMBER_size * max_line_numbers] Byte
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+method initialize
+	
+	self size	= 0
+	self pointer	= self buffer
+//[cf]
+//[cf]
+//[of]:adding - removing
+//[of]:add
+method add (address, line)
+
+	var p = self pointer : * IMAGE_LINENUMBER
+	p VirtualAddress	= address
+	p Linenumber	= line
+	self pointer += IMAGE_LINENUMBER_size
+	self size ++
+//[cf]
+//[cf]
+//[of]:accessing
+//[of]:offset
+//[c]Returns the current offset in bytes relative to the beginning of the buffer
+//[c]
+method offset
+
+	return self size * IMAGE_LINENUMBER_size
+//[cf]
+//[cf]
+//[cf]
+//[of]:COFFRelocationBuffer
+//[of]:definition
+// 10000 * 10 = 10Kb
+const max_relocation_numbers	= 10000
+
+struct COFFRelocationBuffer
+
+	attr size	: Size
+	attr pointer	: Bytes
+	attr buffer	: [IMAGE_RELOCATION_size * max_relocation_numbers] Byte
+//[cf]
+//[of]:initialize - release
+//[of]:initialize
+method initialize
+	
+	self size	= 0
+	self pointer	= self buffer
+//[cf]
+//[cf]
+//[of]:adding - removing
+//[of]:add
+method add (offset: Unsigned32, symbol: *ObjectSymbol, type: Unsigned16)
+
+	var p = self pointer : * IMAGE_RELOCATION
+	p VirtualAddress	= offset
+	p SymbolTableIndex	= symbol _number
+	p Type	= type
+	
+	self pointer += IMAGE_RELOCATION_size
+	self size ++
+//[cf]
+//[cf]
+//[cf]
+//[of]:Scalar Types
+//[of]:SectionNumber
+const SectionNumber = Int16
+//[cf]
+//[of]:SymbolNumber
+const SymbolNumber = Unsigned32
+
+function toSymbolNumber (x)
+
+	return x : SymbolNumber
+//[cf]
+//[cf]
+//[of]:Utils
+//[of]:String8Dictionary
+//[of]:definition
+const String8Dictionary = Dictionary (	String8, *ObjectData, nil,
+	ref hash (String8),
+	ref isEqual (String8, String8))
+//[cf]
+//[cf]
+//[of]:String16Dictionary
+const String16Dictionary = Dictionary (	String16, *ObjectData, nil,
+	ref hash (String16),
+	ref isEqual (String16, String16))
+//[cf]
+//[cf]
+//[of]:Constants
+//[c]
+//[c]Number of sections
+//[c]	1 for code and const data (.text)
+//[c]	1 for global variables (.data)
+//[c]
+const section_count	= 2
+
+const text_section_name	= [] Char8 [$., $t, $e, $x, $t, \0, \0, \0]
+const data_section_name	= [] Char8 [$., $d, $a, $t, $a, \0, \0, \0]
+
+const file_symbol	= [8] Byte [0x2E, 0x66, 0x69, 0x6C, 0x65, 0x00, 0x00, 0x00]	// .file
+const bf_symbol	= [8] Byte [0x2E, 0x62, 0x66, 0x00, 0x00, 0x00, 0x00, 0x00]	// .bf
+const lf_symbol	= [8] Byte [0x2E, 0x6C, 0x66, 0x00, 0x00, 0x00, 0x00, 0x00]	// .lf
+const ef_symbol	= [8] Byte [0x2E, 0x65, 0x66, 0x00, 0x00, 0x00, 0x00, 0x00]	// .ef
+//[cf]
+//[of]:Imports
+import "coff/coff"
+
+import "syntax-tree"
+import "x86"
+import "commons"
+import "file"
+import "core"
+//[cf]

@@ -1,0 +1,5 @@
+//[c]Regression test: \" was ignored in strings
+//[c]
+function .c .cdecl main
+
+	return ("\"" [0] == $") cond 0 else 1
