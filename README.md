@@ -5,6 +5,29 @@ Copper
 
 Copper is a simple imperative language statically typed with type inference and genericity.
 
+Example Code
+------------
+
+A simple function:
+
+``` copper
+function full_name (first, last)
+    first + last
+```
+
+A simple struct:
+
+``` copper
+struct Profile
+    attr name : Char16
+    attr age : Int16
+
+    method initialize (x, y)
+        self name = name
+        self age = age
+        return self
+```
+
 
 Building From Source
 --------------------
