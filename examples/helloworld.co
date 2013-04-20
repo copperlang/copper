@@ -1,0 +1,4 @@
+import function .c .cdecl puts (*[]Char8)
+
+function .c .cdecl main
+  puts ('Hello World')
